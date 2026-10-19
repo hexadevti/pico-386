@@ -22,6 +22,10 @@ typedef struct EMULINK EMULINK;
 EMULINK *emulink_init();
 
 int emulink_attach_floppy(EMULINK *e, int i, const char *filename);
+#ifdef TINY386_PICO
+/* pico-386: the folder floppy in drive i, or NULL (an image, or empty) */
+struct PicoFolder *emulink_floppy_folder(EMULINK *e, int i);
+#endif
 uint32_t emulink_status_read(void *s);
 void emulink_cmd_write(void *s, uint32_t val);
 void emulink_data_write(void *s, uint32_t val);

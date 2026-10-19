@@ -14,6 +14,7 @@
 // (the PC core does its own frameskip). Drawing reads VGA memory while the guest writes it, which
 // at worst tears a frame, as on upstream tiny386's ESP32 builds.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <string>
 #include "pc_internal.h"
@@ -46,7 +47,8 @@ int16_t s_stereo[kMixMax * 2], s_mono[kMixMax];
 std::string s_ini;                 // the machine's .ini: drive changes are saved to it
 std::string s_drive[DRIVE_COUNT];  // what each drive holds (relative paths, "" = empty)
 std::string s_driveLabel[DRIVE_COUNT];
-bool s_mouseSaved;                 // the keyboard mouse state pc.ini has
+int s_mouseSaved;                  // the keyboard mouse mode the .ini has
+uint32_t s_noteUntil;              // a note in the bottom strip until then (ms), 0 = none
 
 const char *baseName(const std::string &p) {
   const size_t s = p.find_last_of('/');
@@ -70,6 +72,7 @@ bool pc_loadRom(const char *ini) {
     switch (r) {
       case T386_ERR_INI:    snprintf(s_error, sizeof s_error, "Cannot read %s", f); break;
       case T386_ERR_FILE:   snprintf(s_error, sizeof s_error, "Missing %s", f); break;
+      case T386_ERR_ZIP:    snprintf(s_error, sizeof s_error, "Cannot unpack %s", f); break;
       default:              snprintf(s_error, sizeof s_error, "Not enough memory for this machine"); break;
     }
     return false;
@@ -78,8 +81,14 @@ bool pc_loadRom(const char *ini) {
   s_ini = ini;
   for (int d = 0; d < DRIVE_COUNT; d++) s_drive[d] = pcdisk_drive(s_ini, d);
   pckbd_reset();
-  s_mouseSaved = pcprof_mouse_default(ini);
+  for (int b = 0; b < 2; b++) {
+    const std::string k = pcini_get_in(s_ini, "pico", b ? "mouse_right" : "mouse_left");
+    pckbd_set_mouse_button(b, k.empty() ? (b ? "rshift" : "alt") : k.c_str());
+  }
+  s_mouseSaved = atoi(pcini_get_in(s_ini, "pico", "mouse").c_str());
   pckbd_set_mouse_mode(s_mouseSaved);
+  s_mouseSaved = pckbd_mouse_mode();
+  s_noteUntil = 0;
   pcvid_reset();
   hal_audio_start(kRate);
   s_nextUs = get_uticks();
@@ -139,6 +148,16 @@ void drawJob(void *) {
   if (pcvid_render(back, s_fb, hal_millis())) hal_video_submit(0, SCREEN_H - 10);
 }
 
+// A line of text in the bottom strip, under the picture (where the FPS meter goes), for 2 s;
+// null clears the strip.
+void showNote(const char *text) {
+  const int y = PANEL_H - 10;
+  ui::fill(0, y, PANEL_W, 10, 0);
+  if (text) ui::text(PANEL_W / 2, y + 5, text, ui::kAccent, 1, ui::MC);
+  hal_panel_push(0, y, PANEL_W, 10, ui::canvas() + y * PANEL_W, PANEL_W);
+  s_noteUntil = text ? (hal_millis() + 2000) | 1 : 0;
+}
+
 void pc_runFrame(bool draw) {
   if (!s_running) return;
   uint32_t now = get_uticks();
@@ -153,9 +172,17 @@ void pc_runFrame(bool draw) {
   if ((int32_t)(s_nextUs - now) > 2 * (int32_t)kFrameUs) s_nextUs = now + kFrameUs;   // ahead
 
   pckbd_tick(hal_millis());
-  if (pckbd_mouse_mode() != s_mouseSaved) {    // Ctrl-Tab or the menu: kept for the next start
+  if (pckbd_mouse_mode() != s_mouseSaved) {    // both Shifts, Ctrl-Tab or the menu: kept for the next start
     s_mouseSaved = pckbd_mouse_mode();
-    pcini_set_in(s_ini, "pico", "mouse", s_mouseSaved ? "1" : "0");
+    pcini_set_in(s_ini, "pico", "mouse", std::to_string(s_mouseSaved));
+    std::string note = std::string("Arrows: ") + (s_mouseSaved == MOUSE_ARROWS ? "keys" : s_mouseSaved == MOUSE_ON ? "mouse" : "keys + mouse");
+    if (s_mouseSaved != MOUSE_ARROWS)
+      note += std::string("   buttons: ") + pckbd_mouse_button_label(0) + " / " + pckbd_mouse_button_label(1);
+    showNote(note.c_str());
+  }
+  if (s_noteUntil && (int32_t)(hal_millis() - s_noteUntil) >= 0) {
+    s_noteUntil = 0;
+    if (!g_settings.showFps) showNote(nullptr);              // the FPS meter repaints its own
   }
   t386_run_until(s_nextUs);
   pc_audio();
@@ -187,10 +214,10 @@ void pc_setInput(int, uint32_t) {}
 
 uint32_t pc_frameRate() { return 60; }
 
-// Powers the PC off. The D: folder gets the guest's changes now, which can take a while.
+// Powers the PC off. Folder disks and floppies get the guest's changes now, which can take a while.
 void stopMachine() {
   hal_job_wait();
-  if (pfolder_dirty()) ui::message("Saving D:", "Writing changes to the SD folder");
+  if (pfolder_dirty()) ui::message("Saving", "Writing changes to the SD folders");
   t386_stop();
 }
 
@@ -207,16 +234,20 @@ void pc_shutdown() {
 
 void pc_keyEvent(uint8_t code, uint8_t state) { pckbd_event(code, state); }
 
-// The in-game rows: the four drives, then the keyboard mouse and Ctrl+Alt+Del.
+// The in-game rows: the drives, then the keyboard mouse, its two button keys and Ctrl+Alt+Del.
+enum { ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_CAD, ROW_EXTRA };
+
 int pc_menuItems(CoreMenuItem *out, int max) {
-  if (max < DRIVE_COUNT + 2) return 0;
+  if (max < DRIVE_COUNT + ROW_EXTRA) return 0;
   for (int d = 0; d < DRIVE_COUNT; d++) {
     s_driveLabel[d] = pcdisk_drive_label(s_drive[d]);
     out[d] = { pcdisk_drive_name(d), s_driveLabel[d].c_str(), false };
   }
-  out[DRIVE_COUNT] = { "Keyboard mouse", pckbd_mouse_mode() ? "On" : "Off", true };
-  out[DRIVE_COUNT + 1] = { "Ctrl+Alt+Del", nullptr, false };
-  return DRIVE_COUNT + 2;
+  out[DRIVE_COUNT + ROW_MOUSE] = { "Arrows (both Shifts)", pckbd_mouse_mode_name(pckbd_mouse_mode()), true };
+  out[DRIVE_COUNT + ROW_LEFT] = { "Mouse left button", pckbd_mouse_button_label(0), true };
+  out[DRIVE_COUNT + ROW_RIGHT] = { "Mouse right button", pckbd_mouse_button_label(1), true };
+  out[DRIVE_COUNT + ROW_CAD] = { "Ctrl+Alt+Del", nullptr, false };
+  return DRIVE_COUNT + ROW_EXTRA;
 }
 
 // A, B and the CD change at once. C: and D: cannot change under a running DOS, so the PC restarts.
@@ -243,11 +274,21 @@ bool changeDrive(int d) {
   }
   if (d == DRIVE_CD) {
     t386_change_cd(pcdisk_cd_ide(s_ini), full.c_str());
-  } else if (t386_swap_floppy(d, r == 1 ? full.c_str() : nullptr) != 0 && r == 1) {
-    s_drive[d].clear();
-    pcdisk_set_drive(s_ini, d, "");
-    ui::message(pcdisk_drive_letter(d), "Not a floppy image size", 1500);
-    return false;
+  } else {
+    // a folder floppy taken out is written back to its folder first
+    if (t386_floppy_dirty(d))
+      ui::message(("Saving " + std::string(pcdisk_drive_letter(d))).c_str(), "Writing changes to the SD folder");
+    const int err = t386_swap_floppy(d, r == 1 ? full.c_str() : nullptr);
+    if (err != 0) {
+      s_drive[d].clear();
+      pcdisk_set_drive(s_ini, d, "");
+      ui::message(pcdisk_drive_letter(d),
+                  err == T386_FD_TOO_BIG ? "Too big for a floppy (use D:)" :
+                  err == T386_FD_IN_USE ? "Already in another drive" :
+                  err == T386_FD_UNPACK ? "Cannot unpack this zip" :
+                  err == T386_FD_MISSING ? "File not found" : "Not a floppy image size", 1800);
+      return false;
+    }
   }
   s_drive[d] = rel;
   pcdisk_set_drive(s_ini, d, full);
@@ -257,11 +298,21 @@ bool changeDrive(int d) {
 
 bool pc_menuAction(int i, uint8_t key) {
   if (i < DRIVE_COUNT) return key == KEY_ENTER && changeDrive(i);
+  const int dir = key == KEY_LEFT ? -1 : 1;
   switch (i - DRIVE_COUNT) {
-    case 0:
-      pckbd_set_mouse_mode(!pckbd_mouse_mode());
+    case ROW_MOUSE: {
+      const int mode = pckbd_mouse_mode();
+      pckbd_set_mouse_mode((mode + (dir < 0 ? 2 : 1)) % 3);
       return false;
-    case 1:
+    }
+    case ROW_LEFT:
+    case ROW_RIGHT: {
+      const int b = i - DRIVE_COUNT - ROW_LEFT;
+      pckbd_next_mouse_button(b, dir);
+      pcini_set_in(s_ini, "pico", b ? "mouse_right" : "mouse_left", pckbd_mouse_button(b));
+      return false;
+    }
+    case ROW_CAD:
       if (key != KEY_ENTER) return false;
       pckbd_ctrl_alt_del();
       return true;

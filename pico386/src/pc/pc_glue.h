@@ -25,6 +25,7 @@ enum T386Error {
   T386_ERR_INI,        // the profile .ini is missing or unreadable
   T386_ERR_FILE,       // a file the .ini names (BIOS, disk) is missing: see t386_error_file()
   T386_ERR_MEMORY,
+  T386_ERR_ZIP,         // a zip the .ini names cannot be unpacked: see t386_error_file()
 };
 
 // Builds the machine an .ini describes (tiny386's own keys: [pc] mem_size, vga_mem_size,
@@ -56,7 +57,17 @@ void t386_mouse(int dx, int dy, int buttons);   // dy > 0 = down; buttons bit 0 
 int  t386_refresh(int full);
 void t386_info(VGAPicoInfo *info);
 
-int  t386_swap_floppy(int drive, const char *path);   // 0 on success
+// Puts an image, a folder or a zip (as a 1.44 MB floppy) in A: (0) or B: (1); NULL or "" ejects.
+// 0 on success, else a T386_FD_* code. A folder floppy taken out is written back to its folder.
+enum {
+  T386_FD_SIZE = -1,     // an image of a size no floppy has
+  T386_FD_TOO_BIG = -2,  // a folder or zip with more than a floppy holds
+  T386_FD_IN_USE = -3,   // that folder is open in the other drive or as D:
+  T386_FD_UNPACK = -4,   // the zip cannot be unpacked
+  T386_FD_MISSING = -5,
+};
+int  t386_swap_floppy(int drive, const char *path);
+int  t386_floppy_dirty(int drive);      // a folder floppy the guest has written to
 void t386_change_cd(int ide_drive, const char *path);  // 0..3 = primary master .. secondary slave
 
 // pc_platform.cpp

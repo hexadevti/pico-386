@@ -5,11 +5,22 @@
 // when the guest's Shift state does not already match. Modifiers, arrows and F-keys go through
 // as themselves. tiny386 takes Linux input codes (1..95 = the set-1 scancode, 96.. = extended).
 //
+// Caps Lock is kept here and never reaches the guest. The PicoCalc's STM32 applies its own Caps
+// Lock to the letters it sends (the desktop does not), so a guest Caps Lock on top of that turned
+// 'A' (sent as Shift+A) back into 'a'. Instead, with Caps Lock on, a letter's case is set here
+// from the Shift keys held: upper without Shift, lower with it, whatever case it arrived in.
+//
+// Ctrl+Alt+Del also comes from Ctrl+Alt+Backspace: on the PicoCalc, Del with Ctrl and Alt held
+// did not reach the guest (2026-10-19), and Backspace sits next to it.
+//
 // The keyboard sends one press and one release per key, so the PC typematic repeat (500 ms, then
 // 30/s) is made here, for the last key pressed, as a real keyboard does it.
 //
-// Mouse mode (Ctrl+Tab, or the in-game menu): arrows move the pointer, accelerating while held,
-// Alt is the left button and Right Shift the right button.
+// The keyboard mouse has three modes (MOUSE_*), cycled by pressing both Shifts together, Ctrl+Tab
+// or the in-game menu: Arrows (the arrows are arrow keys), Mouse (the arrows move the pointer,
+// accelerating while held) and Both (the arrows do both, for games that use the keyboard and the
+// mouse). In Mouse and Both, the two button keys (Alt and Right Shift unless the startup picks
+// others) are the mouse buttons and nothing else.
 #include <string.h>
 #include "pc_internal.h"
 #include "pc_glue.h"
@@ -23,7 +34,7 @@ enum : uint8_t {
   K_Q = 16, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30,
   K_SEMICOLON = 39, K_APOSTROPHE = 40, K_GRAVE = 41, K_LSHIFT = 42, K_BACKSLASH = 43, K_Z = 44,
   K_COMMA = 51, K_DOT = 52, K_SLASH = 53, K_RSHIFT = 54, K_LALT = 56, K_SPACE = 57,
-  K_CAPS = 58, K_F1 = 59, K_F10 = 68,
+  K_F1 = 59, K_F10 = 68,
   K_HOME = 102, K_UP = 103, K_PGUP = 104, K_LEFT = 105, K_RIGHT = 106, K_END = 107,
   K_DOWN = 108, K_PGDN = 109, K_INSERT = 110, K_DELETE = 111,
 };
@@ -91,7 +102,6 @@ Mapped mapKey(uint8_t k) {
     case KEY_PGDN:    return { K_PGDN, false, true };
     case KEY_INSERT:  return { K_INSERT, false, true };
     case KEY_DEL:     return { K_DELETE, false, true };
-    case KEY_CAPS:    return { K_CAPS, false, true };
     case KEY_CTRL:    return { K_LCTRL, false, true };
     case KEY_ALT:     return { K_LALT, false, true };
     case KEY_SHIFT_L: return { K_LSHIFT, false, true };
@@ -102,13 +112,37 @@ Mapped mapKey(uint8_t k) {
 
 uint8_t s_down[256];                // PicoCalc code -> the Linux code it pressed (0 = up)
 bool s_lshift, s_rshift;            // what the guest believes
+bool s_caps;                        // our Caps Lock (the guest's stays off)
+bool s_shiftL, s_shiftR;            // the Shift keys physically held, buttons or not
 uint8_t s_repeatKey;                // PicoCalc code of the key that repeats
 uint32_t s_repeatAt;
 bool s_needRepeatTime;
 
-bool s_mouseMode;
+int s_mouseMode;                    // MOUSE_*
+uint8_t s_button[2] = { KEY_ALT, KEY_SHIFT_R };   // the left and right button keys (0 = none)
+bool s_buttonDown[2];
+bool s_arrow[4];                    // the pointer's arrows held: left, right, up, down
+bool s_arrowShifted[4];             // ...pressed as their Shift form (PgUp etc.)
 int s_mouseButtons;
 uint32_t s_mouseHeldSince;
+
+// The keys a mouse button can be: name in the .ini, name in the menu, PicoCalc code.
+struct ButtonKey { const char *ini, *label; uint8_t code; };
+const ButtonKey kButtonKeys[] = {
+  { "alt", "Alt", KEY_ALT },          { "rshift", "Right Shift", KEY_SHIFT_R },
+  { "lshift", "Left Shift", KEY_SHIFT_L }, { "ctrl", "Ctrl", KEY_CTRL },
+  { "space", "Space", ' ' },          { "enter", "Enter", KEY_ENTER },
+  { "tab", "Tab", KEY_TAB },          { "bs", "Backspace", KEY_BACKSPACE },
+  { "z", "Z", 'z' },                  { "x", "X", 'x' },
+  { "none", "None", 0 },
+};
+constexpr int kNumButtonKeys = sizeof kButtonKeys / sizeof kButtonKeys[0];
+
+int buttonKeyIndex(uint8_t code) {
+  for (int i = 0; i < kNumButtonKeys; i++)
+    if (kButtonKeys[i].code == code) return i;
+  return kNumButtonKeys - 1;
+}
 
 void send(bool down, uint8_t code) {
   if (code) t386_key(down ? 1 : 0, code);
@@ -127,9 +161,10 @@ void setGuestShift(bool want) {
   }
 }
 
-// Back to the Shift the user really holds (the PicoCalc keys, not our temporary presses).
+// Back to the Shift the user really holds (the PicoCalc keys, not our temporary presses). A Shift
+// that is a mouse button never reaches s_down.
 void restoreShift() {
-  const bool l = s_down[KEY_SHIFT_L] != 0, r = s_down[KEY_SHIFT_R] != 0 && !s_mouseMode;
+  const bool l = s_down[KEY_SHIFT_L] != 0, r = s_down[KEY_SHIFT_R] != 0;
   if (s_lshift != l) { send(l, K_LSHIFT); s_lshift = l; }
   if (s_rshift != r) { send(r, K_RSHIFT); s_rshift = r; }
 }
@@ -141,17 +176,51 @@ void pressChar(const Mapped &m) {
   restoreShift();
 }
 
-bool mouseKey(uint8_t code) {
-  return code == KEY_UP || code == KEY_DOWN || code == KEY_LEFT || code == KEY_RIGHT ||
-         code == KEY_ALT || code == KEY_SHIFT_R;
+uint8_t lower(uint8_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+// Which mouse button code is (0 left, 1 right), or -1. Letters match in either case.
+int buttonOf(uint8_t code) {
+  for (int b = 0; b < 2; b++)
+    if (s_button[b] && lower(code) == s_button[b]) return b;
+  return -1;
+}
+
+int arrowOf(uint8_t code) {
+  switch (code) {
+    case KEY_LEFT: return 0;
+    case KEY_RIGHT: return 1;
+    case KEY_UP: return 2;
+    case KEY_DOWN: return 3;
+  }
+  return -1;
+}
+
+// The STM32 sends Shift+Up/Down as PgUp/PgDn, so while a Shift held as a mouse button drags, the
+// pointer's vertical arrows arrive as those. Shift+Left/Right it sends not at all (seen on the
+// device's serial log, 2026-10-19): a Shift button cannot drag sideways.
+int shiftedArrowOf(uint8_t code) {
+  switch (code) {
+    case KEY_PGUP: return 2;
+    case KEY_PGDN: return 3;
+  }
+  return -1;
 }
 
 void mouseButtons() {
-  const int b = (s_down[KEY_ALT] ? 1 : 0) | (s_down[KEY_SHIFT_R] ? 2 : 0);
+  const int b = (s_buttonDown[0] ? 1 : 0) | (s_buttonDown[1] ? 2 : 0);
   if (b != s_mouseButtons) {
     s_mouseButtons = b;
     t386_mouse(0, 0, b);
   }
+}
+
+// mapKey with our Caps Lock: a letter is upper case unless Shift is held. The key stays filed
+// under the code it arrived as, since its release comes with that code.
+Mapped mapKeyCaps(uint8_t code) {
+  Mapped m = mapKey(code);
+  if (s_caps && ((code >= 'a' && code <= 'z') || (code >= 'A' && code <= 'Z')))
+    m.shift = !(s_down[KEY_SHIFT_L] || s_down[KEY_SHIFT_R]);
+  return m;
 }
 
 } // namespace
@@ -163,17 +232,43 @@ void pckbd_reset() {
   if (s_lshift) send(false, K_LSHIFT);
   if (s_rshift) send(false, K_RSHIFT);
   s_lshift = s_rshift = false;
+  s_shiftL = s_shiftR = false;
   s_repeatKey = 0;
+  memset(s_arrow, 0, sizeof s_arrow);
+  memset(s_arrowShifted, 0, sizeof s_arrowShifted);
+  s_buttonDown[0] = s_buttonDown[1] = false;
   if (s_mouseButtons) t386_mouse(0, 0, 0);
   s_mouseButtons = 0;
 }
 
-void pckbd_set_mouse_mode(bool on) {
+void pckbd_set_mouse_mode(int mode) {
   pckbd_reset();
-  s_mouseMode = on;
+  s_mouseMode = mode >= MOUSE_ARROWS && mode <= MOUSE_BOTH ? mode : MOUSE_ARROWS;
 }
 
-bool pckbd_mouse_mode() { return s_mouseMode; }
+int pckbd_mouse_mode() { return s_mouseMode; }
+
+const char *pckbd_mouse_mode_name(int mode) {
+  return mode == MOUSE_ON ? "Mouse" : mode == MOUSE_BOTH ? "Both" : "Arrows";
+}
+
+void pckbd_set_mouse_button(int button, const char *iniName) {
+  for (const ButtonKey &k : kButtonKeys)
+    if (!strcmp(k.ini, iniName)) {
+      pckbd_reset();
+      s_button[button & 1] = k.code;
+      return;
+    }
+}
+
+const char *pckbd_mouse_button(int button) { return kButtonKeys[buttonKeyIndex(s_button[button & 1])].ini; }
+const char *pckbd_mouse_button_label(int button) { return kButtonKeys[buttonKeyIndex(s_button[button & 1])].label; }
+
+void pckbd_next_mouse_button(int button, int dir) {
+  const int i = (buttonKeyIndex(s_button[button & 1]) + (dir < 0 ? kNumButtonKeys - 1 : 1)) % kNumButtonKeys;
+  pckbd_reset();
+  s_button[button & 1] = kButtonKeys[i].code;
+}
 
 void pckbd_ctrl_alt_del() {
   pckbd_reset();
@@ -191,21 +286,43 @@ void pckbd_event(uint8_t code, uint8_t state) {
   const bool down = state != KEYSTATE_RELEASED;
   if (state == KEYSTATE_HELD) return;          // the repeat is ours (pckbd_tick)
 
-  // Ctrl+Tab: mouse mode on/off
-  if (down && code == KEY_TAB && s_down[KEY_CTRL]) {
-    pckbd_set_mouse_mode(!s_mouseMode);
+  // Both Shifts together, or Ctrl+Tab: the next mouse mode. The first Shift has already gone
+  // through as itself (or as a button press); the reset lets go of it.
+  if (code == KEY_SHIFT_L) s_shiftL = down;
+  if (code == KEY_SHIFT_R) s_shiftR = down;
+  if (down && ((code == KEY_SHIFT_L && s_shiftR) || (code == KEY_SHIFT_R && s_shiftL) ||
+               (code == KEY_TAB && s_down[KEY_CTRL]))) {
+    pckbd_set_mouse_mode((s_mouseMode + 1) % 3);
     return;
   }
 
-  if (s_mouseMode && mouseKey(code)) {
-    if (down) {
-      s_down[code] = 1;                        // marks it held; nothing goes to the keyboard
-      if (code != KEY_ALT && code != KEY_SHIFT_R) s_mouseHeldSince = hal_millis();
-    } else {
-      s_down[code] = 0;
+  if (s_mouseMode != MOUSE_ARROWS) {
+    const int b = buttonOf(code);
+    if (b >= 0) {
+      s_buttonDown[b] = down;
+      mouseButtons();
+      return;
     }
-    mouseButtons();
-    return;
+    // PgUp/PgDn are arrows while a Shift is held that is a button (or, in Mouse, any Shift), and
+    // their release always ends an arrow they started. They never reach the guest.
+    const int sa = shiftedArrowOf(code);
+    if (sa >= 0) {
+      const bool shiftButton = (s_shiftL && buttonOf(KEY_SHIFT_L) >= 0) || (s_shiftR && buttonOf(KEY_SHIFT_R) >= 0);
+      const bool shifted = s_mouseMode == MOUSE_ON ? (s_shiftL || s_shiftR) : shiftButton;
+      if (down ? shifted : (shifted || s_arrowShifted[sa])) {
+        if (down && !s_arrow[0] && !s_arrow[1] && !s_arrow[2] && !s_arrow[3]) s_mouseHeldSince = hal_millis();
+        s_arrow[sa] = down;
+        s_arrowShifted[sa] = down;
+        return;
+      }
+    }
+    const int a = arrowOf(code);
+    if (a >= 0) {
+      s_arrowShifted[a] = false;
+      if (down && !s_arrow[0] && !s_arrow[1] && !s_arrow[2] && !s_arrow[3]) s_mouseHeldSince = hal_millis();
+      s_arrow[a] = down;
+      if (s_mouseMode == MOUSE_ON) return;     // Both: the arrow key too
+    }
   }
 
   if (!down) {
@@ -219,8 +336,13 @@ void pckbd_event(uint8_t code, uint8_t state) {
     return;
   }
 
+  if (code == KEY_CAPS) { s_caps = !s_caps; return; }
   if (s_down[code]) return;                    // already down
-  const Mapped m = mapKey(code);
+  Mapped m = mapKeyCaps(code);
+  if (s_down[KEY_CTRL] && s_down[KEY_ALT]) {
+    hal_log("kbd: Ctrl+Alt+0x%02X", code);       // what the PicoCalc sends with both held
+    if (code == KEY_BACKSPACE || code == KEY_DEL) m = { K_DELETE, false, true };
+  }
   if (!m.code) return;
   s_down[code] = m.code;
   if (m.raw) {
@@ -231,7 +353,7 @@ void pckbd_event(uint8_t code, uint8_t state) {
     pressChar(m);
   }
   // Modifiers do not repeat.
-  if (code != KEY_CTRL && code != KEY_ALT && code != KEY_SHIFT_L && code != KEY_SHIFT_R && code != KEY_CAPS) {
+  if (code != KEY_CTRL && code != KEY_ALT && code != KEY_SHIFT_L && code != KEY_SHIFT_R) {
     s_repeatKey = code;
     s_needRepeatTime = true;
   }
@@ -243,16 +365,16 @@ void pckbd_tick(uint32_t nowMs) {
       s_repeatAt = nowMs + 500;
       s_needRepeatTime = false;
     } else if ((int32_t)(nowMs - s_repeatAt) >= 0) {
-      const Mapped m = mapKey(s_repeatKey);
+      const Mapped m = mapKeyCaps(s_repeatKey);
       if (m.raw) send(true, m.code);
       else pressChar(m);
       s_repeatAt = nowMs + 33;
     }
   }
 
-  if (s_mouseMode) {
-    const int dx = (s_down[KEY_RIGHT] ? 1 : 0) - (s_down[KEY_LEFT] ? 1 : 0);
-    const int dy = (s_down[KEY_DOWN] ? 1 : 0) - (s_down[KEY_UP] ? 1 : 0);
+  if (s_mouseMode != MOUSE_ARROWS) {
+    const int dx = (s_arrow[1] ? 1 : 0) - (s_arrow[0] ? 1 : 0);
+    const int dy = (s_arrow[3] ? 1 : 0) - (s_arrow[2] ? 1 : 0);
     if (dx || dy) {
       // 1 px a frame at first, up to 8 after about a second
       const uint32_t held = nowMs - s_mouseHeldSince;

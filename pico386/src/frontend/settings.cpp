@@ -51,14 +51,15 @@ void settingsLoad() {
     if (!strcmp(line, "volume"))         g_settings.volume = atoi(v);
     else if (!strcmp(line, "frameskip")) g_settings.frameskip = atoi(v);
     else if (!strcmp(line, "showfps"))   g_settings.showFps = atoi(v) != 0;
+    else if (!strcmp(line, "fontsize"))  g_settings.fontSize = atoi(v);
     else if (!strcmp(line, "lastdir"))   g_settings.lastDir = v;
-    else if (!strcmp(line, "profile"))   g_settings.profile = atoi(v);
+    else if (!strcmp(line, "startup"))   g_settings.startup = v;
     else if (!strcmp(line, "biosdir"))   g_settings.biosDir = v;
   }
   fclose(f);
   if (g_settings.volume < 0 || g_settings.volume > 10) g_settings.volume = 7;
   if (g_settings.frameskip < 0 || g_settings.frameskip > 3) g_settings.frameskip = 0;
-  if (g_settings.profile < 0 || g_settings.profile > 1) g_settings.profile = 0;
+  if (g_settings.fontSize < 0 || g_settings.fontSize > 1) g_settings.fontSize = 0;
   while (!g_settings.biosDir.empty() && g_settings.biosDir[0] == '/') g_settings.biosDir.erase(0, 1);
 }
 
@@ -66,8 +67,8 @@ void settingsSave() {
   makeDirs(sdPath("pc-386"));
   FILE *f = fopen(cfgPath().c_str(), "w");
   if (!f) { hal_log("settings: cannot write %s", cfgPath().c_str()); return; }
-  fprintf(f, "volume=%d\nframeskip=%d\nshowfps=%d\nlastdir=%s\nprofile=%d\nbiosdir=%s\n",
-          g_settings.volume, g_settings.frameskip, g_settings.showFps ? 1 : 0,
-          g_settings.lastDir.c_str(), g_settings.profile, g_settings.biosDir.c_str());
+  fprintf(f, "volume=%d\nframeskip=%d\nshowfps=%d\nfontsize=%d\nlastdir=%s\nstartup=%s\nbiosdir=%s\n",
+          g_settings.volume, g_settings.frameskip, g_settings.showFps ? 1 : 0, g_settings.fontSize,
+          g_settings.lastDir.c_str(), g_settings.startup.c_str(), g_settings.biosDir.c_str());
   fclose(f);
 }

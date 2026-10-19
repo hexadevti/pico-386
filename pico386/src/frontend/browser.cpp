@@ -30,6 +30,40 @@ struct Entry {
   std::string tag;
 };
 
+// Whether a directory entry is a folder: the entry's own type when the system gives one (the
+// P4's FAT does), else stat. On a FAT card each stat searches the folder from its start, so a
+// stat per file made a folder of 500 games take many seconds to open.
+static bool entryIsDir(const std::string &dir, const dirent *e) {
+#if defined(DT_DIR) && defined(DT_UNKNOWN)
+  if (e->d_type == DT_DIR) return true;
+  if (e->d_type != DT_UNKNOWN) return false;
+#endif
+  return isDir(dir + "/" + e->d_name);
+}
+
+// The rows of one folder, with the tags (BrowseOpts::tag) filled in as rows come on screen.
+struct Rows {
+  const std::string *dir;
+  const BrowseOpts *opts;
+  std::vector<Entry> *entries;
+  std::vector<std::string> *tags;
+  std::vector<ui::Item> *items;
+  std::vector<bool> tagged;
+};
+
+static void prepareRows(void *ctx, int first, int count) {
+  Rows &r = *(Rows *)ctx;
+  for (int i = first; i < first + count && i < (int)r.entries->size(); i++) {
+    const Entry &e = (*r.entries)[i];
+    if (r.tagged[i] || e.dir || e.name.empty()) continue;
+    r.tagged[i] = true;
+    const std::string t = r.opts->tag(*r.dir + "/" + e.name);
+    if (t.empty()) continue;
+    (*r.tags)[i] = t;
+    (*r.items)[i].value = (*r.tags)[i].c_str();
+  }
+}
+
 static std::string parentOf(const std::string &p) {
   const size_t s = p.find_last_of('/');
   return s == std::string::npos || s == 0 ? p : p.substr(0, s);
@@ -49,9 +83,19 @@ bool browseRom(const EmuCore &core, std::string &outPath, const BrowseOpts *opts
   for (;;) {
     std::vector<Entry> entries;
     if (DIR *d = opendir(dir.c_str())) {
+      // a big folder on the card takes a moment: after a short while, say how far it got
+      const uint32_t t0 = hal_millis();
+      uint32_t shown = t0;
+      int seen = 0;
       while (dirent *e = readdir(d)) {
+        if (hal_millis() - shown > 250) {
+          shown = hal_millis();
+          const std::string line = std::to_string(seen) + " files and folders so far";
+          ui::message("Reading the folder", line.c_str());
+        }
+        seen++;
         if (e->d_name[0] == '.') continue;
-        const bool isD = isDir(dir + "/" + e->d_name);
+        const bool isD = entryIsDir(dir, e);
         if (isD) { entries.push_back({ e->d_name, true, "" }); continue; }
         if (pickDir) continue;
         if (!extMatches(e->d_name, opts && opts->exts ? opts->exts : core.romExts)) continue;
@@ -97,7 +141,12 @@ bool browseRom(const EmuCore &core, std::string &outPath, const BrowseOpts *opts
     const std::string shown = dir.size() > root.size() ? dir.substr(root.size()) : std::string("/");
     if (entries.empty()) items.push_back({ "Nothing to choose in this folder", nullptr, ui::ICON_NONE });
 
+    Rows rows{ &dir, opts, &entries, &tags, &items, std::vector<bool>(entries.size()) };
     ui::Screen scr;
+    if (opts && opts->tag) {
+      scr.prepare = prepareRows;
+      scr.ctx = &rows;
+    }
     scr.title = opts && opts->title ? opts->title : core.name;
     scr.subtitle = shown.c_str();
     scr.hints = atRoot ? "Enter|Open;Esc|Back" : "Enter|Open;Bs|Up;Esc|Back";

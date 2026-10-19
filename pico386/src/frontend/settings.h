@@ -8,8 +8,9 @@ struct Settings {
   int volume = 7;            // 0..10
   int frameskip = 0;         // 0 = auto, N = draw 1 frame in N+1
   bool showFps = false;
+  int fontSize = 0;          // 80x25 text: 0 = 4x12 cells (fills the panel), 1 = 4x8
   std::string lastDir;       // where the ROM browser was last
-  int profile = 0;           // the home menu row last started (0 PC, 1 disk image)
+  std::string startup;       // the .ini of the startup last chosen ("pc.ini"), for the home menu's cursor
   std::string biosDir = "roms/pc";   // bios.bin + vgabios.bin, relative to the card root
 };
 

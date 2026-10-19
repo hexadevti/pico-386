@@ -50,14 +50,25 @@ std::string sizeText(long bytes) {
   return b;
 }
 
-// The browser hook: only disks of the wanted kind, tagged with what they are.
+std::string kindTag(DiskKind k, long size) {
+  switch (k) {
+    case DISK_FLOPPY: return "Floppy " + sizeText(size);
+    case DISK_HARD:   return "Hard disk " + sizeText(size);
+    case DISK_CD:     return "CD " + sizeText(size);
+    case DISK_ZIP:    return "Zip " + sizeText(size);
+    default:          return "";
+  }
+}
+
+// The browser hook: only disks of the wanted kind, tagged with what they are. Floppies and hard
+// disks differ only in size, so choosing one of them stats every image of the folder.
 DiskKind s_wanted;
 
 bool acceptDisk(const std::string &path, std::string &tag) {
   long size;
   const DiskKind k = pcdisk_kind(path, &size);
   if (k == DISK_NONE || (s_wanted != DISK_NONE && k != s_wanted)) return false;
-  tag = pcdisk_tag(path);
+  tag = kindTag(k, size);
   return true;
 }
 
@@ -280,6 +291,7 @@ DiskKind pcdisk_kind(const std::string &path, long *sizeOut) {
   if (sizeOut) *sizeOut = size;
   if (size <= 0) return DISK_NONE;
   if (hasExt(path, ".iso")) return DISK_CD;
+  if (hasExt(path, ".zip")) return DISK_ZIP;
   // tiny386 takes the floppy formats up to 2.88 MB; anything larger is a hard disk
   if (size <= 2949120) return DISK_FLOPPY;
   return DISK_HARD;
@@ -287,12 +299,8 @@ DiskKind pcdisk_kind(const std::string &path, long *sizeOut) {
 
 std::string pcdisk_tag(const std::string &path) {
   long size;
-  switch (pcdisk_kind(path, &size)) {
-    case DISK_FLOPPY: return "Floppy " + sizeText(size);
-    case DISK_HARD:   return "Hard disk " + sizeText(size);
-    case DISK_CD:     return "CD " + sizeText(size);
-    default:          return "";
-  }
+  const DiskKind k = pcdisk_kind(path, &size);
+  return kindTag(k, size);
 }
 
 std::string pcdisk_rel(const std::string &path) {
@@ -307,11 +315,20 @@ std::string pcdisk_abs(const std::string &rel) {
   return sdPath(rel.c_str());
 }
 
-bool pcdisk_browse(DiskKind kind, const char *title, std::string &out) {
+bool pcdisk_browse(DiskKind kind, const char *title, std::string &out, const char *startDir) {
   s_wanted = kind;
   BrowseOpts o;
   o.title = title;
-  o.accept = acceptDisk;
+  o.startDir = startDir;
+  // Any disk, a CD or a zip is known by its extension alone: the sizes are read only for the rows
+  // on screen, so a folder of hundreds of games opens at once.
+  if (kind == DISK_NONE || kind == DISK_CD || kind == DISK_ZIP) {
+    o.exts = kind == DISK_CD ? ".iso" : kind == DISK_ZIP ? ".zip" : ".img.ima.iso.vhd.zip";
+    o.tag = pcdisk_tag;
+  } else {
+    o.exts = ".img.ima.vhd";
+    o.accept = acceptDisk;
+  }
   return browseRom(kPC386, out, &o);
 }
 
@@ -402,13 +419,27 @@ const char *pcdisk_drive_letter(int drive) { return kLetters[drive]; }
 
 int pcdisk_choose(int drive, const std::string &current, const char *note, std::string &out) {
   const bool loaded = !current.empty();
-  ui::Item items[2];
   std::string title = std::string(kDriveNames[drive]);
   const char *what = drive == DRIVE_C ? "hard disk" : drive == DRIVE_CD ? "CD image" : "floppy";
-  std::string pick = drive == DRIVE_D ? std::string("Choose a folder") : std::string("Choose a ") + what + " image";
-  items[0] = { pick.c_str(), nullptr, ui::ICON_FOLDER, note };
-  items[1] = { drive >= DRIVE_C ? "Remove it" : "Eject", nullptr, ui::ICON_EXIT, note };
-  int n = loaded ? 2 : 1;
+  const std::string pick = std::string("Choose a ") + what + " image";
+  const std::string letter = kLetters[drive];
+  // D: is a folder or a zip (a game as it was downloaded), unpacked to a folder when the PC
+  // starts. A: and B: take those too, as a 1.44 MB floppy, besides their images.
+  const bool floppy = drive == DRIVE_A || drive == DRIVE_B;
+  enum { ROW_IMAGE, ROW_FOLDER, ROW_ZIP, ROW_EJECT };
+  int rows[4], n = 0;
+  if (drive != DRIVE_D) rows[n++] = ROW_IMAGE;
+  if (floppy || drive == DRIVE_D) { rows[n++] = ROW_FOLDER; rows[n++] = ROW_ZIP; }
+  if (loaded) rows[n++] = ROW_EJECT;
+  ui::Item items[4];
+  for (int i = 0; i < n; i++) {
+    switch (rows[i]) {
+      case ROW_IMAGE:  items[i] = { pick.c_str(), nullptr, ui::ICON_FOLDER, note }; break;
+      case ROW_FOLDER: items[i] = { "Choose a folder", nullptr, ui::ICON_FOLDER, note }; break;
+      case ROW_ZIP:    items[i] = { "Choose a zip file", nullptr, ui::ICON_LOAD, note }; break;
+      default:         items[i] = { drive >= DRIVE_C ? "Remove it" : "Eject", nullptr, ui::ICON_EXIT, note }; break;
+    }
+  }
   int sel = 0;
   const std::string sub = loaded ? "Now: " + pcdisk_drive_label(current) : std::string("Now: empty");
   ui::Screen scr;
@@ -419,14 +450,21 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
     const uint8_t k = ui::list(scr, items, n, &sel);
     if (k == KEY_ESC || k == KEY_BACKSPACE) return 0;
     if (k != KEY_ENTER) continue;
-    if (sel == 1) { out.clear(); return 2; }
-    if (drive == DRIVE_D) {
-      // opens beside the current folder, else at the card's root
-      std::string start = loaded ? pcdisk_abs(current) : std::string(hal_sd_root());
-      if (loaded) start = start.substr(0, start.find_last_of('/'));
+    const int row = rows[sel];
+    if (row == ROW_EJECT) { out.clear(); return 2; }
+    // the browsers open beside what the drive holds now, so the next game is a key away
+    std::string start = loaded ? pcdisk_abs(current) : std::string();
+    if (loaded) start = start.substr(0, start.find_last_of('/'));
+    if (row == ROW_ZIP) {
+      if (pcdisk_browse(DISK_ZIP, ("Zip file for " + letter).c_str(), out, isDir(start) ? start.c_str() : nullptr))
+        return 1;
+      continue;
+    }
+    if (row == ROW_FOLDER) {
       if (!isDir(start)) start = hal_sd_root();
       BrowseOpts o;
-      o.title = "Folder for D:";
+      const std::string t = "Folder for " + letter;
+      o.title = t.c_str();
       o.pickDir = true;
       o.startDir = start.c_str();
       if (!browseRom(kPC386, out, &o)) continue;
@@ -443,39 +481,58 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
 
 // ---- the drives screen of a machine, before it starts -----------------------------------------
 
-bool pcdisk_machine_menu(const std::string &ini, const char *title) {
+int pcdisk_machine_menu(const std::string &ini, const char *title, bool canDelete) {
+  // Start, the drives, the boot order, then the startup's own rows
+  enum { ROW_START = 0, ROW_DRIVES = 1, ROW_BOOT = ROW_DRIVES + DRIVE_COUNT, ROW_RENAME, ROW_DELETE };
   int sel = 0;
   for (;;) {
     std::string vals[DRIVE_COUNT];
-    ui::Item items[1 + DRIVE_COUNT];
-    items[0] = { "Start", nullptr, ui::ICON_PLAY, "Boots from A: if a floppy is in, else from C:" };
+    ui::Item items[ROW_DELETE + 1];
+    const bool cdFirst = pcini_get_in(ini, "pico", "boot") == "cd";
+    items[ROW_START] = { "Start", nullptr, ui::ICON_PLAY,
+                         cdFirst ? "Boot order: A: (if a floppy is in), CD, C:"
+                                 : "Boots from A: if a floppy is in, else from C:" };
     for (int d = 0; d < DRIVE_COUNT; d++) {
       const std::string rel = pcdisk_drive(ini, d);
       vals[d] = pcdisk_drive_label(rel);
-      items[1 + d] = { kDriveNames[d], vals[d].c_str(),
-                       d == DRIVE_C ? ui::ICON_SAVE : d == DRIVE_D ? ui::ICON_FOLDER : ui::ICON_LOAD };
+      items[ROW_DRIVES + d] = { kDriveNames[d], vals[d].c_str(),
+                                d == DRIVE_C ? ui::ICON_SAVE : d == DRIVE_D ? ui::ICON_FOLDER : ui::ICON_LOAD };
     }
+    items[ROW_BOOT] = { "Boot from", cdFirst ? "CD, then C:" : "C:", ui::ICON_SKIP };
+    items[ROW_BOOT].adjust = true;
+    items[ROW_RENAME] = { "Rename", nullptr, ui::ICON_GEAR };
+    items[ROW_DELETE] = { "Delete this startup", nullptr, ui::ICON_EXIT, "Only the settings; the disks stay" };
     ui::Screen scr;
     scr.title = title;
     scr.subtitle = "Pick the disks, then Start";
     scr.hints = "Enter|Select;Esc|Back";
-    const uint8_t k = ui::list(scr, items, 1 + DRIVE_COUNT, &sel);
-    if (k == KEY_ESC || k == KEY_BACKSPACE) return false;
+    const uint8_t k = ui::list(scr, items, canDelete ? ROW_DELETE + 1 : ROW_DELETE, &sel);
+    if (k == KEY_ESC || k == KEY_BACKSPACE) return MACHINE_BACK;
+    if (sel == ROW_BOOT && (k == KEY_ENTER || k == KEY_LEFT || k == KEY_RIGHT)) {
+      // SeaBIOS's CMOS boot order (pc_glue.c): without it a CD only boots when C: cannot
+      if (!pcini_set_in(ini, "pico", "boot", cdFirst ? "" : "cd")) ui::message("Error", "Cannot write the .ini", 1500);
+      continue;
+    }
     if (k != KEY_ENTER) continue;
-    if (sel == 0) {
+    if (sel == ROW_RENAME) return MACHINE_RENAME;
+    if (sel == ROW_DELETE) {
+      if (confirm(("Delete " + std::string(title) + "?").c_str(), "The disk images are kept")) return MACHINE_DELETE;
+      continue;
+    }
+    if (sel == ROW_START) {
       const std::string c = pcdisk_drive(ini, DRIVE_C);
       if (!c.empty() && fileSize(pcdisk_abs(c)) < 0) {
         ui::message("C: is missing", (baseName(c) + ": make it with Create a hard disk").c_str(), 2200);
         continue;
       }
       const std::string dd = pcdisk_drive(ini, DRIVE_D);
-      if (!dd.empty() && !isDir(pcdisk_abs(dd))) {
-        ui::message("D: is missing", ("No folder " + dd).c_str(), 2200);
+      if (!dd.empty() && !isDir(pcdisk_abs(dd)) && fileSize(pcdisk_abs(dd)) < 0) {
+        ui::message("D: is missing", ((hasExt(dd, ".zip") ? "No zip " : "No folder ") + dd).c_str(), 2200);
         continue;
       }
-      return true;
+      return MACHINE_START;
     }
-    const int d = sel - 1;
+    const int d = sel - ROW_DRIVES;
     std::string path;
     const int r = pcdisk_choose(d, pcdisk_drive(ini, d), nullptr, path);
     if (r && !pcdisk_set_drive(ini, d, path)) ui::message("Error", "Cannot write the .ini", 1500);

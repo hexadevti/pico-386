@@ -66,6 +66,10 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
 - **`misc.c`:** no host-console code (`termios`/`CaptureKeyboardInput` become no-ops).
   Emulink command 0x100 always reports two 1.44 MB floppy drives, so a disk can be put in A: or
   B: while the PC runs, even if the drive was empty at power-on.
+  `emulink_attach_floppy` also takes a folder: it becomes a 1.44 MB FAT12 floppy over
+  `pc_folder.cpp` (`fdf[]`, read and written a sector at a time through `fdbuf`), and taking it
+  out writes the guest's changes back to the folder. `emulink_floppy_folder()` (new, `misc.h`)
+  returns it. Commands 0x101/0x102 also reject a drive number above 1 before using it.
 - **`ide.c`:** a CD drive given an empty path starts empty instead of `exit(1)`, and
   `block_device_reinit` with an empty path ejects the disc. This gives every machine a CD drive
   that can be filled later.

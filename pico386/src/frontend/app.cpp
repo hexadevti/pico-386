@@ -23,6 +23,7 @@ const EmuCore *const kCores[] = { &kPC386 };
 const int kNumCores = sizeof(kCores) / sizeof(kCores[0]);
 
 static const char *const kFrameskipNames[] = { "Auto", "1 of 2", "1 of 3", "1 of 4" };
+static const char *const kFontSizeNames[] = { "4x12", "4x8" };
 
 // ------------------------------------------------------------------------------------------------
 // keyboard -> pad (cores without keyEvent)
@@ -42,7 +43,7 @@ static uint32_t padBit(uint8_t code) {
 // ------------------------------------------------------------------------------------------------
 // settings rows shared by the home and in-game menus
 // ------------------------------------------------------------------------------------------------
-enum SettingRow { ROW_VOLUME, ROW_FRAMESKIP, ROW_FPS };
+enum SettingRow { ROW_VOLUME, ROW_FRAMESKIP, ROW_FPS, ROW_FONT };
 
 // Returns true when the key changed the row's setting.
 static bool adjustSetting(int row, uint8_t key) {
@@ -56,6 +57,7 @@ static bool adjustSetting(int row, uint8_t key) {
       return true;
     case ROW_FRAMESKIP: g_settings.frameskip = (g_settings.frameskip + d + 4) % 4; return true;
     case ROW_FPS: g_settings.showFps = !g_settings.showFps; return true;
+    case ROW_FONT: g_settings.fontSize ^= 1; return true;
   }
   return false;
 }
@@ -72,6 +74,8 @@ static int settingItems(const EmuCore &core, ui::Item *out, int *rowOf) {
   }
   rowOf[n] = ROW_FPS;
   out[n++] = { "Show FPS", g_settings.showFps ? "On" : "Off", ui::ICON_CHART, nullptr, -1, true };
+  rowOf[n] = ROW_FONT;   // 80x25 text cells; pc_video picks it up on the next frame
+  out[n++] = { "Font size", kFontSizeNames[g_settings.fontSize], ui::ICON_PAD, nullptr, -1, true };
   return n;
 }
 
@@ -108,8 +112,8 @@ static void settingsMenu(const EmuCore &core) {
   scr.subtitle = "Saved to /pc-386/pico386.cfg";
   scr.hints = "<>|Change;Esc|Back";
   for (;;) {
-    ui::Item items[4];
-    int rowOf[4];
+    ui::Item items[5];
+    int rowOf[5];
     int n = settingItems(core, items, rowOf);
     // BIOS folder: home menu only, it takes effect at the next power-on
     const std::string biosShown = "/" + g_settings.biosDir;
@@ -177,9 +181,9 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
   MenuResult result = MenuResult::Resume;
   enum Kind : uint8_t { K_RESUME, K_RESET, K_SAVE, K_LOAD, K_CORE, K_SETTING, K_QUIT };
   for (;;) {
-    ui::Item items[16];
-    Kind kind[16];
-    int arg[16];
+    ui::Item items[24];
+    Kind kind[24];
+    int arg[24];
     int n = 0;
     items[n] = { "Resume", nullptr, ui::ICON_PLAY }; kind[n++] = K_RESUME;
     items[n] = { "Reset", nullptr, ui::ICON_RESET }; kind[n++] = K_RESET;
@@ -188,14 +192,14 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
       items[n] = { "Load state", nullptr, ui::ICON_LOAD }; kind[n++] = K_LOAD;
     }
     if (core.menuItems) {
-      CoreMenuItem ci[8];
-      const int m = core.menuItems(ci, 8);
+      CoreMenuItem ci[12];
+      const int m = core.menuItems(ci, 12);
       for (int i = 0; i < m; i++) {
         items[n] = { ci[i].label, ci[i].value, ui::ICON_PAD, nullptr, -1, ci[i].adjust };
         kind[n] = K_CORE; arg[n++] = i;
       }
     }
-    int rowOf[3];
+    int rowOf[4];
     const int s = settingItems(core, items + n, rowOf);
     for (int i = 0; i < s; i++) { kind[n + i] = K_SETTING; arg[n + i] = rowOf[i]; }
     n += s;

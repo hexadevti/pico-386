@@ -108,6 +108,19 @@ static void blendRound(int x, int y, int w, int h, int r, uint16_t c, uint8_t al
 // ------------------------------------------------------------------------------------------------
 int textWidth(const char *s, uint8_t font) { return uiTextWidth(s, font); }
 
+// s cut to maxW pixels, ending in ".." when it had to be cut.
+static void fitText(char *buf, size_t n, const char *s, uint8_t font, int maxW) {
+  snprintf(buf, n, "%s", s);
+  if (uiTextWidth(buf, font) <= maxW) return;
+  for (size_t len = strlen(buf); len-- > 0;) {    // the first len characters, then ".."
+    if (len + 3 > n) continue;
+    buf[len] = buf[len + 1] = '.';
+    buf[len + 2] = 0;
+    if (uiTextWidth(buf, font) <= maxW) return;
+  }
+  buf[0] = 0;
+}
+
 template <class Col>
 static void textWith(int x, int y, const char *s, uint8_t font, uint8_t datum, int scale, Col col) {
   int32_t left, top;
@@ -358,6 +371,45 @@ void message(const char *title, const char *line, uint32_t holdMs) {
   if (holdMs) hal_delay(holdMs);
 }
 
+bool editText(const char *title, const char *prompt, char *buf, size_t cap) {
+  char text_[64];
+  if (cap > sizeof text_) cap = sizeof text_;
+  snprintf(text_, cap, "%s", buf);
+  size_t len = strlen(text_);
+  for (;;) {
+    drawBackground();
+    const int w = 280, h = 96, x = (PANEL_W - w) / 2, y = (PANEL_H - h) / 2;
+    blendRound(x + 4, y + 5, w, h, 8, 0, 130);               // shadow
+    fillRoundGrad(x - 1, y - 1, w + 2, h + 2, 9, kAccent, kAccent2);
+    fillRound(x + 1, y + 1, w - 2, h - 2, 7, kCard);
+    ui::text(PANEL_W / 2, y + 17, title, kText, 2, MC);
+    if (prompt) ui::text(PANEL_W / 2, y + 36, prompt, kDim, 3, MC);
+    // the field: the end of the text when it is wider than the box, then the cursor
+    const int fx = x + 12, fw = w - 24, fy = y + 50;
+    fillRound(fx, fy, fw, 22, 4, kLine);
+    const char *shown = text_;
+    while (*shown && textWidth(shown) > fw - 16) shown++;
+    ui::text(fx + 6, fy + 11, shown, kSelText, 1, ML);
+    fill(fx + 7 + textWidth(shown), fy + 5, 2, 12, kAccent);
+    drawHints("Enter|OK;Del|Erase;Esc|Cancel");
+    present();
+    const uint8_t k = waitKey();
+    if (k == KEY_ESC) return false;
+    if (k == KEY_ENTER) {
+      while (len && text_[len - 1] == ' ') text_[--len] = 0;  // trailing spaces
+      if (!len) continue;
+      snprintf(buf, cap, "%s", text_);
+      return true;
+    }
+    if (k == KEY_BACKSPACE || k == KEY_DEL) {
+      if (len) text_[--len] = 0;
+    } else if (k >= 0x20 && k < 0x7F && len + 1 < cap && (len || k != ' ')) {
+      text_[len++] = (char)k;
+      text_[len] = 0;
+    }
+  }
+}
+
 uint8_t waitKey(uint32_t timeoutMs) {
   const uint32_t t0 = hal_millis();
   for (;;) {
@@ -372,6 +424,34 @@ uint8_t waitKey(uint32_t timeoutMs) {
     if (timeoutMs && hal_millis() - t0 >= timeoutMs) return 0;
     hal_delay(10);
   }
+}
+
+// The row typing k jumps to, or sel when none matches. One letter (or the same one again) goes to
+// the next row after sel starting with it, so pressing it repeatedly cycles through them; several
+// different letters typed in a row find the first row from sel on that starts with them.
+static int typeAhead(const Item *items, int n, int sel, uint8_t k) {
+  static char typed[16];
+  static size_t len;
+  static uint32_t at;
+  const uint32_t now = hal_millis();
+  if (now - at > 1000) len = 0;
+  at = now;
+  const char c = (char)((k >= 'A' && k <= 'Z') ? k + 32 : k);
+  if (len < sizeof typed - 1) typed[len++] = c;
+  bool same = true;
+  for (size_t i = 0; i < len; i++) same &= typed[i] == c;
+  const char *want = same ? &typed[len - 1] : typed;
+  const size_t wantLen = same ? 1 : len;
+  const int start = same ? sel + 1 : sel;
+  for (int i = 0; i < n; i++) {
+    const int j = (start + i) % n;
+    const char *l = items[j].label;
+    if (!l) continue;
+    size_t m = 0;
+    while (m < wantLen && l[m] && ((l[m] >= 'A' && l[m] <= 'Z') ? l[m] + 32 : l[m]) == want[m]) m++;
+    if (m == wantLen) return j;
+  }
+  return sel;
 }
 
 uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
@@ -394,6 +474,7 @@ uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
     drawHeader(screen);
     blendRound(cardX, cardY, cardW, cardH, 10, kCard, 190);
 
+    if (screen.prepare && n > 0) screen.prepare(screen.ctx, first, n - first < rows ? n - first : rows);
     const bool scroll = n > rows;
     const int rowX = cardX + 4, rowW = cardW - 8 - (scroll ? 8 : 0);
     for (int i = 0; i < rows && first + i < n; i++) {
@@ -421,9 +502,13 @@ uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
         valueW = 68 + (it.adjust ? 20 : 0);
         if (on && it.adjust) { arrow(right - 88, cy, false, kSelText); arrow(right - 4, cy, true, kSelText); }
       } else if (it.value) {
-        const int vw = textWidth(it.value, 3);
+        // a long value (a game's file name) gets what the label leaves, and at least half the row
+        const int lw = textWidth(it.label, it.sub ? 2 : 3), avail = right - lx - (it.adjust ? 20 : 0) - 10;
+        char vbuf[96];
+        fitText(vbuf, sizeof vbuf, it.value, 3, avail - (lw < avail / 2 ? lw : avail / 2));
+        const int vw = textWidth(vbuf, 3);
         const int vr = right - (it.adjust ? 10 : 0);
-        text(vr, cy, it.value, on ? kSelText : kAccent, 3, MR);
+        text(vr, cy, vbuf, on ? kSelText : kAccent, 3, MR);
         valueW = vw + (it.adjust ? 20 : 0);
         if (on && it.adjust) { arrow(vr - vw - 10, cy, false, kSelText); arrow(right - 4, cy, true, kSelText); }
       }
@@ -458,7 +543,15 @@ uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
       case KEY_END:  *sel = n - 1; break;
       case KEY_ENTER: case KEY_LEFT: case KEY_RIGHT: case KEY_ESC: case KEY_BACKSPACE:
         return k;
-      default: break;
+      default:
+        if (n > 0 && ((k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z') || (k >= '0' && k <= '9')))
+        {
+          const int found = typeAhead(items, n, *sel, k);
+          // a row found off screen comes in at the top, with the rows after it below
+          if (found != *sel && (found < first || found >= first + rows)) first = found < n - rows ? found : n - rows;
+          *sel = found;
+        }
+        break;
     }
   }
 }

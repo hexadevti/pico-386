@@ -7,12 +7,18 @@
 //
 // Text modes are not drawn through tiny386 at all (720x400 would not survive the scaling). Text
 // RAM is read directly and drawn with the guest's own font, shrunk to the cell size that fits
-// the panel (4x12 for 80x25: 320x300) with 4 levels of antialiasing. The frame is skipped when
-// neither the text, the attributes, the palette nor the cursor changed.
+// the panel (4x12 for 80x25: 320x300, or 4x8 with Settings > Font size) with 4 levels of
+// antialiasing; 80x25 swaps in a font drawn for that cell (pc_textfont.h, from
+// tools/gen_textfont.py). The frame is skipped when neither the text, the attributes, the palette
+// nor the cursor changed.
 #include <string.h>
 #include "pc_internal.h"
 #include "pc_glue.h"
 #include "../hal/hal.h"
+#include "../frontend/settings.h"
+#include "pc_textfont.h"
+
+extern "C" const uint8_t vgafont16[];          // tiny386's copy of the VGA BIOS's 8x16 font
 
 namespace {
 
@@ -20,6 +26,7 @@ constexpr int kOutH = SCREEN_W * 3 / 4;        // 240: every graphics mode is sh
 constexpr int kMaxCellW = 8, kMaxCellH = 16;
 
 int s_lastMode = -1, s_lastW, s_lastH;
+int s_lastFontSize = -1;
 int s_clearFrames;                             // both video buffers need their borders cleared
 bool s_gfxFull = true;
 
@@ -70,13 +77,30 @@ uint32_t hashBytes(uint32_t h, const uint8_t *p, int n, int step) {
   return h;
 }
 
+// True when the guest's glyph c is still the stock VGA one, so the hand-drawn version
+// stands in for it. A glyph a program loaded itself is shrunk like any other.
+bool stockGlyph(const uint8_t *font, int c) {
+  for (int y = 0; y < 16; y++)
+    if (font[(c * 32 + y) * 4] != vgafont16[c * 16 + y]) return false;
+  return true;
+}
+
 // Shrinks the VGA font (8 dots wide, cheight lines) to cellW x cellH: each output dot is the
 // share of lit source dots under it, rounded up to the next of 4 levels so thin strokes survive.
+// 80x25 (4x12 or 4x8 cells from the 8x16 font) uses pc_textfont.h instead wherever it has the glyph.
 void buildGlyphs(const uint8_t *font, int cheight, int cw, int ch) {
   if (!s_glyphs) s_glyphs = (uint8_t *)hal_alloc_big(256 * kMaxCellW * kMaxCellH);
   if (!s_glyphs) return;
+  const bool hand = cw == 4 && cheight == 16 && (ch == 12 || ch == 8);
+  const uint32_t *has = ch == 12 ? kFont4x12Has : kFont4x8Has;
   for (int c = 0; c < 256; c++) {
     uint8_t *g = s_glyphs + c * cw * ch;
+    if (hand && (has[c >> 5] >> (c & 31) & 1) && stockGlyph(font, c)) {
+      const uint8_t *rows = ch == 12 ? kFont4x12[c] : kFont4x8[c];
+      for (int y = 0; y < ch; y++)
+        for (int x = 0; x < 4; x++) g[y * 4 + x] = (rows[y] >> (6 - 2 * x)) & 3;
+      continue;
+    }
     for (int y = 0; y < ch; y++) {
       const int sy0 = y * cheight / ch, sy1 = (y + 1) * cheight / ch > sy0 ? (y + 1) * cheight / ch : sy0 + 1;
       for (int x = 0; x < cw; x++) {
@@ -109,7 +133,8 @@ bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force
   if (cols <= 0 || rows <= 0 || cols > 160 || rows > 100 || in.cheight <= 0) return false;
   const int cw = SCREEN_W / cols < 1 ? 1 : SCREEN_W / cols > kMaxCellW ? kMaxCellW : SCREEN_W / cols;
   int ch = SCREEN_H / rows;
-  if (ch > 12) ch = 12;
+  const int maxCh = g_settings.fontSize == 1 ? 8 : 12;
+  if (ch > maxCh) ch = maxCh;
   if (ch < 1) ch = 1;
   const int cheight = in.cheight > 32 ? 32 : in.cheight;
 
@@ -193,7 +218,8 @@ void pcvid_reset() {
 bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
   VGAPicoInfo in;
   t386_info(&in);
-  bool changed = in.mode != s_lastMode;
+  bool changed = in.mode != s_lastMode || g_settings.fontSize != s_lastFontSize;
+  s_lastFontSize = g_settings.fontSize;
   if (in.mode == 2) {
     t386_refresh(s_gfxFull || changed);
     s_gfxFull = false;

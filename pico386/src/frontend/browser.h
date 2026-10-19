@@ -11,6 +11,10 @@ struct BrowseOpts {
   // Called for each file with a matching extension: false hides it; tag (empty by default) is
   // shown at the right of the row instead of the extension.
   bool (*accept)(const std::string &path, std::string &tag) = nullptr;
+  // The tag of a file, asked only for the rows on screen. For tags that need the file's size:
+  // on a FAT card each stat searches the folder from its start, so stat-ing every file of a big
+  // folder up front (as accept must) takes seconds.
+  std::string (*tag)(const std::string &path) = nullptr;
   const char *exts = nullptr;           // instead of the core's romExts (".bin")
   // Opens here (a full path) instead of the last folder, and leaves the last folder alone.
   const char *startDir = nullptr;

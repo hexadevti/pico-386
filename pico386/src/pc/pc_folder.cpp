@@ -1,4 +1,5 @@
-// pc_folder.cpp -- a folder on the SD card as a guest hard disk (the D: drive).
+// pc_folder.cpp -- a folder on the SD card as a guest disk: a hard disk (the D: drive), or a
+// 1.44 MB floppy in A: or B:.
 //
 // The guest sees a FAT16 disk that exists only here: at power-on the folder is scanned, and the
 // boot sector, FAT and directories are built in RAM. A file's clusters are read straight from the
@@ -20,9 +21,14 @@
 // Safety: if the guest rewrote the partition table or the boot sector (FDISK, FORMAT), nothing is
 // applied, so a FORMAT D: cannot wipe the folder.
 //
-// The disk is the smallest of 64 MB to 2000 MB that holds the files with at least 32 MB free.
+// The hard disk is the smallest of 64 MB to 2000 MB that holds the files with at least 32 MB free.
 // Up to 504 MB it is an ordinary FAT16 partition for any DOS. Larger, it is type 0Eh (FAT16 LBA),
 // for FreeDOS and Windows 95. Files that do not fit are left out, and so are dot-files.
+//
+// The floppy is a standard 1.44 MB FAT12 disk (no partition table), so the BIOS and DOS take it
+// like any other: it can be swapped while DOS runs, as a floppy is meant to be. Each one gets a
+// new volume serial, which is how DOS tells that the disk changed. A folder that does not fit is
+// refused rather than left incomplete. It is written back when it is ejected or swapped.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,7 +50,8 @@
 namespace {
 
 constexpr uint32_t kSpt = 63, kPartStart = 63, kCyl = 16 * 63;
-constexpr uint32_t kRsvd = 1, kNFats = 2, kRootEnt = 512, kRootSecs = kRootEnt * 32 / 512;
+constexpr uint32_t kRsvd = 1, kNFats = 2, kRootEnt = 512;
+constexpr uint32_t kFdSectors = 2880, kFdSpt = 18, kFdRootEnt = 224, kFdFatSz = 9;   // 1.44 MB
 constexpr uint32_t kMaxClusters = 65524;            // FAT16's limit
 constexpr int kMaxDepth = 24;
 constexpr uint32_t kSizesMB[] = { 64, 128, 256, 504, 1000, 2000 };
@@ -89,7 +96,7 @@ struct PicoFolder {
   std::string root, label;
   std::vector<Node> nodes;
   std::vector<uint8_t> rootDir;
-  std::vector<uint16_t> fat;                         // the first FAT; both copies read from it
+  std::vector<uint8_t> fat;                          // the first FAT as on disk; both copies read from it
   std::map<uint32_t, std::vector<uint8_t>> extra;    // written sectors outside FAT/root/data
   std::unordered_map<uint32_t, uint32_t> spill;      // cluster -> its slot in the scratch file
   std::vector<std::pair<uint32_t, int>> byFirst;     // (first cluster, node), ascending
@@ -100,7 +107,10 @@ struct PicoFolder {
   uint32_t total = 0, part = 0, spc = 0, cb = 0, fatSz = 0;
   uint32_t fat0 = 0, root0 = 0, data0 = 0, maxClus = 0;   // maxClus: one past the last cluster
   uint32_t serial = 0;
-  uint8_t ptype = 0;
+  uint32_t boot = kPartStart;                        // the boot sector's LBA (0 on a floppy)
+  uint32_t rootEnt = kRootEnt, rootSecs = kRootEnt * 32 / 512;
+  bool floppy = false;                               // FAT12, no partition table
+  uint8_t ptype = 0, media = 0xF8;
   bool dirty = false, spillFailed = false;
 };
 
@@ -251,8 +261,8 @@ bool geometry(PicoFolder &f, uint32_t mb) {
   f.part = f.total - kPartStart;
   for (f.spc = 1; f.spc <= 64; f.spc *= 2) {
     const uint32_t tmp2 = 256 * f.spc + kNFats;
-    f.fatSz = (f.part - kRsvd - kRootSecs + tmp2 - 1) / tmp2;
-    const uint32_t clusters = (f.part - kRsvd - kNFats * f.fatSz - kRootSecs) / f.spc;
+    f.fatSz = (f.part - kRsvd - f.rootSecs + tmp2 - 1) / tmp2;
+    const uint32_t clusters = (f.part - kRsvd - kNFats * f.fatSz - f.rootSecs) / f.spc;
     if (clusters <= kMaxClusters) {
       f.maxClus = clusters + 2;
       break;
@@ -262,9 +272,42 @@ bool geometry(PicoFolder &f, uint32_t mb) {
   f.cb = f.spc * 512;
   f.fat0 = kPartStart + kRsvd;
   f.root0 = f.fat0 + kNFats * f.fatSz;
-  f.data0 = f.root0 + kRootSecs;
+  f.data0 = f.root0 + f.rootSecs;
   f.ptype = f.part < 65536 ? 0x04 : f.total <= 1024 * kCyl ? 0x06 : 0x0E;
   return true;
+}
+
+// The 1.44 MB floppy, as FORMAT A: makes it.
+void floppyGeometry(PicoFolder &f) {
+  f.floppy = true;
+  f.boot = 0;
+  f.media = 0xF0;
+  f.rootEnt = kFdRootEnt;
+  f.rootSecs = kFdRootEnt * 32 / 512;
+  f.total = f.part = kFdSectors;
+  f.spc = 1;
+  f.cb = 512;
+  f.fatSz = kFdFatSz;
+  f.fat0 = kRsvd;
+  f.root0 = f.fat0 + kNFats * f.fatSz;
+  f.data0 = f.root0 + f.rootSecs;
+  f.maxClus = (f.total - f.data0) / f.spc + 2;
+}
+
+// FAT entries: 16 bits, or 12 on a floppy. An end-of-chain mark reads as >= 0xFFF8 either way.
+uint32_t fatGet(const PicoFolder &f, uint32_t c) {
+  if (!f.floppy) return get16(f.fat.data() + 2 * c);
+  const uint32_t v = get16(f.fat.data() + c * 3 / 2);
+  const uint32_t e = c & 1 ? v >> 4 : v & 0xFFF;
+  return e >= 0xFF8 ? 0xF000 | e : e;
+}
+
+void fatSet(PicoFolder &f, uint32_t c, uint32_t v) {
+  if (!f.floppy) { put16(f.fat.data() + 2 * c, v); return; }
+  uint8_t *p = f.fat.data() + c * 3 / 2;
+  v &= 0xFFF;
+  if (c & 1) { p[0] = (uint8_t)((p[0] & 0x0F) | (v << 4)); p[1] = (uint8_t)(v >> 4); }
+  else { p[0] = (uint8_t)v; p[1] = (uint8_t)((p[1] & 0xF0) | (v >> 8)); }
 }
 
 uint32_t clustersNeeded(const PicoFolder &f, const Node &n) {
@@ -358,19 +401,19 @@ void bootSector(const PicoFolder &f, uint8_t *s) {
   s[13] = (uint8_t)f.spc;
   put16(s + 14, kRsvd);
   s[16] = kNFats;
-  put16(s + 17, kRootEnt);
+  put16(s + 17, f.rootEnt);
   put16(s + 19, f.part < 65536 ? f.part : 0);
-  s[21] = 0xF8;
+  s[21] = f.media;
   put16(s + 22, f.fatSz);
-  put16(s + 24, kSpt);
-  put16(s + 26, f.total <= 1024 * kCyl ? 16 : 255);
-  put32(s + 28, kPartStart);
+  put16(s + 24, f.floppy ? kFdSpt : kSpt);
+  put16(s + 26, f.floppy ? 2 : f.total <= 1024 * kCyl ? 16 : 255);
+  put32(s + 28, f.boot);
   put32(s + 32, f.part < 65536 ? 0 : f.part);
-  s[36] = 0x81;
+  s[36] = f.floppy ? 0x00 : 0x81;
   s[38] = 0x29;
   put32(s + 39, f.serial);
   memcpy(s + 43, f.label.data(), 11);
-  memcpy(s + 54, "FAT16   ", 8);
+  memcpy(s + 54, f.floppy ? "FAT12   " : "FAT16   ", 8);
   s[62] = 0xCD; s[63] = 0x18;
   s[510] = 0x55; s[511] = 0xAA;
 }
@@ -408,10 +451,10 @@ void readSector(PicoFolder &f, uint32_t s, uint8_t *buf) {
   auto it = f.extra.find(s);
   if (it != f.extra.end()) { memcpy(buf, it->second.data(), 512); return; }
   memset(buf, 0, 512);
+  if (s == f.boot) { bootSector(f, buf); return; }
   if (s == 0) { mbrSector(f, buf); return; }
-  if (s == kPartStart) { bootSector(f, buf); return; }
   if (s >= f.fat0 && s < f.root0) {
-    memcpy(buf, (const uint8_t *)f.fat.data() + (size_t)((s - f.fat0) % f.fatSz) * 512, 512);
+    memcpy(buf, f.fat.data() + (size_t)((s - f.fat0) % f.fatSz) * 512, 512);
     return;
   }
   if (s >= f.root0 && s < f.data0) { memcpy(buf, f.rootDir.data() + (size_t)(s - f.root0) * 512, 512); return; }
@@ -425,7 +468,7 @@ void writeSector(PicoFolder &f, uint32_t s, const uint8_t *buf) {
   f.dirty = true;
   if (s >= f.fat0 && s < f.root0) {
     // the second FAT is a copy DOS keeps in step; the first one is the one that counts
-    if (s < f.fat0 + f.fatSz) memcpy((uint8_t *)f.fat.data() + (size_t)(s - f.fat0) * 512, buf, 512);
+    if (s < f.fat0 + f.fatSz) memcpy(f.fat.data() + (size_t)(s - f.fat0) * 512, buf, 512);
     return;
   }
   if (s >= f.root0 && s < f.data0) { memcpy(f.rootDir.data() + (size_t)(s - f.root0) * 512, buf, 512); return; }
@@ -467,7 +510,7 @@ std::vector<uint32_t> chainOf(const PicoFolder &f, uint32_t c) {
   std::vector<uint32_t> chain;
   while (c >= 2 && c < f.maxClus && chain.size() < f.maxClus) {
     chain.push_back(c);
-    const uint32_t next = f.fat[c];
+    const uint32_t next = fatGet(f, c);
     if (next >= 0xFFF8) break;
     c = next;
   }
@@ -634,7 +677,7 @@ void applyTree(PicoFolder &f, const Final &d, const std::string &dpath, std::vec
 }
 
 void commit(PicoFolder &f) {
-  if (f.extra.count(0) || f.extra.count(kPartStart)) {
+  if (f.extra.count(0) || f.extra.count(f.boot)) {
     hal_log("folder: %s was repartitioned or formatted; its changes are not applied", f.root.c_str());
     return;
   }
@@ -683,12 +726,19 @@ void freeFolder(PicoFolder *f) {
 
 extern "C" int pfolder_is_dir(const char *path) { return path && path[0] && isDir(path); }
 
-extern "C" PicoFolder *pfolder_open(const char *dir) {
+static PicoFolder *openFolder(const char *dir, bool floppy) {
   PicoFolder *f = new (std::nothrow) PicoFolder;
   if (!f) return nullptr;
   f->root = dir;
   while (f->root.size() > 1 && f->root.back() == '/') f->root.pop_back();
-  f->spillPath = sdPath(("pc-386/.pico386-d" + std::to_string(s_open.size()) + ".tmp").c_str());
+  // a scratch file no open folder uses (floppies come and go while the PC runs)
+  for (int i = 0; f->spillPath.empty(); i++) {
+    const std::string p = sdPath(("pc-386/.pico386-d" + std::to_string(i) + ".tmp").c_str());
+    bool used = false;
+    for (PicoFolder *o : s_open) used |= o->spillPath == p;
+    if (!used) f->spillPath = p;
+  }
+  if (floppy) floppyGeometry(*f);
   f->serial = hal_micros() ^ 0x50433836;
 
   // the volume label: the folder's name
@@ -710,14 +760,15 @@ extern "C" PicoFolder *pfolder_open(const char *dir) {
   uint32_t rootUsed = 1;
   for (int k : f->nodes[0].kids) {
     Node &n = f->nodes[k];
-    if (rootUsed + 1 + n.lfn > kRootEnt) n.skipped = true;
+    if (rootUsed + 1 + n.lfn > f->rootEnt) n.skipped = true;
     else rootUsed += 1 + n.lfn;
   }
   for (size_t i = 1; i < f->nodes.size(); i++)
     if (f->nodes[f->nodes[i].parent].skipped) f->nodes[i].skipped = true;
 
-  // the smallest size with room to spare
+  // the smallest size with room to spare (a floppy has one size)
   for (uint32_t mb : kSizesMB) {
+    if (floppy) break;
     geometry(*f, mb);
     uint64_t need = 0;
     for (size_t i = 1; i < f->nodes.size(); i++)
@@ -725,9 +776,9 @@ extern "C" PicoFolder *pfolder_open(const char *dir) {
     if ((f->maxClus - 2 - need) * (uint64_t)f->cb >= kMinFree && need < f->maxClus - 2) break;
   }
 
-  f->fat.assign((size_t)f->fatSz * 256, 0);
-  f->fat[0] = 0xFFF8;
-  f->fat[1] = 0xFFFF;
+  f->fat.assign((size_t)f->fatSz * 512, 0);
+  fatSet(*f, 0, 0xFF00 | f->media);
+  fatSet(*f, 1, 0xFFFF);
   uint32_t next = 2;
   for (size_t i = 1; i < f->nodes.size(); i++) {
     Node &n = f->nodes[i];
@@ -741,17 +792,27 @@ extern "C" PicoFolder *pfolder_open(const char *dir) {
     }
     n.first = c ? next : 0;
     n.nclus = c;
-    for (uint32_t j = 0; j < c; j++) f->fat[next + j] = (uint16_t)(j + 1 < c ? next + j + 1 : 0xFFFF);
+    for (uint32_t j = 0; j < c; j++) fatSet(*f, next + j, j + 1 < c ? next + j + 1 : 0xFFFF);
     if (c) f->byFirst.push_back({ next, (int)i });
     next += c;
   }
 
   // the directories, now that every first cluster is known
-  f->rootDir.assign(kRootEnt * 32, 0);
+  // a floppy with something left out would be a game with files missing: refuse it
+  if (floppy) {
+    for (size_t i = 1; i < f->nodes.size(); i++) {
+      if (!f->nodes[i].skipped) continue;
+      hal_log("folder: %s does not fit on a floppy", f->root.c_str());
+      delete f;
+      return nullptr;
+    }
+  }
+
+  f->rootDir.assign(f->rootEnt * 32, 0);
   uint8_t sfnLabel[11];
   memcpy(sfnLabel, f->label.data(), 11);
   putEntry(f->rootDir.data(), sfnLabel, 0x08, 0, 0, f->nodes.size() > 1 ? f->nodes[1].date : 0x21, 0);
-  fillDir(*f, f->nodes[0], f->rootDir.data() + 32, kRootEnt - 1);
+  fillDir(*f, f->nodes[0], f->rootDir.data() + 32, f->rootEnt - 1);
   for (size_t i = 1; i < f->nodes.size(); i++) {
     Node &n = f->nodes[i];
     if (!n.dir || n.skipped) continue;
@@ -770,11 +831,23 @@ extern "C" PicoFolder *pfolder_open(const char *dir) {
   // the desktop build quits through exit() (window closed, test scripts): save on the way out
   static bool hooked = false;
   if (!hooked) { atexit(pfolder_close_all); hooked = true; }
-  hal_log("folder: %s as a %u MB disk, %u files (%u KB), %u-byte clusters",
-          f->root.c_str(), (unsigned)(f->total / 2048), (unsigned)files, (unsigned)(bytes >> 10),
-          (unsigned)f->cb);
+  hal_log("folder: %s as a %u KB %s, %u files (%u KB), %u-byte clusters",
+          f->root.c_str(), (unsigned)(f->total / 2), floppy ? "floppy" : "disk", (unsigned)files,
+          (unsigned)(bytes >> 10), (unsigned)f->cb);
   s_open.push_back(f);
   return f;
+}
+
+extern "C" PicoFolder *pfolder_open(const char *dir) { return openFolder(dir, false); }
+
+extern "C" PicoFolder *pfolder_open_floppy(const char *dir) { return openFolder(dir, true); }
+
+extern "C" int pfolder_in_use(const char *dir) {
+  std::string d = dir ? dir : "";
+  while (d.size() > 1 && d.back() == '/') d.pop_back();
+  for (PicoFolder *f : s_open)
+    if (!strcasecmp(f->root.c_str(), d.c_str())) return 1;
+  return 0;
 }
 
 extern "C" int64_t pfolder_sectors(PicoFolder *f) { return f ? f->total : 0; }
@@ -795,6 +868,18 @@ extern "C" int pfolder_dirty(void) {
   for (PicoFolder *f : s_open)
     if (f->dirty) return 1;
   return 0;
+}
+
+extern "C" int pfolder_is_dirty(PicoFolder *f) { return f && f->dirty; }
+
+extern "C" void pfolder_close(PicoFolder *f) {
+  for (size_t i = 0; i < s_open.size(); i++) {
+    if (s_open[i] != f) continue;
+    s_open.erase(s_open.begin() + i);
+    if (f->dirty) commit(*f);
+    freeFolder(f);
+    return;
+  }
 }
 
 extern "C" void pfolder_close_all(void) {

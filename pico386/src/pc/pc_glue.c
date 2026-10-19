@@ -3,12 +3,17 @@
 #include "tiny386/tiny386_port.h"
 #include <stdint.h>
 #include <string.h>
+#include <strings.h>
 #include "tiny386/pc.h"
 #include "pc_glue.h"
 #include "pc_folder.h"
+#include "pc_zip.h"
 
 static PC *s_pc;
 static char s_err_file[160];
+// What A: and B: hold, as emulink got it (a zip as the folder it unpacked to), so a swap can tell
+// a folder in the other drive or in D: from the one it replaces.
+static char s_fd_path[2][256];
 
 const char *t386_error_file() { return s_err_file; }
 
@@ -52,6 +57,19 @@ static const char *join(const char *dir, const char *name) {
   if (!full) return name;
   snprintf(full, n, "%s%s%s", dir, dir[0] ? "/" : "", name);
   return full;
+}
+
+// A floppy as emulink takes it: an image or a folder as it is, a zip as the folder it unpacks to.
+// T386_FD_* on failure.
+static int floppy_source(const char *path, char *out, size_t n) {
+  if (pczip_is_zip(path)) {
+    if (!file_exists(path)) return T386_FD_MISSING;
+    if (pczip_folder(path, out, n) != 0) return T386_FD_UNPACK;
+    return 0;
+  }
+  if (!file_exists(path) && !pfolder_is_dir(path)) return T386_FD_MISSING;
+  snprintf(out, n, "%s", path);
+  return 0;
 }
 
 // tiny386's .ini keys, plus [pico] boot = cd. The rest of [pico] is read by pc_profiles.cpp.
@@ -103,6 +121,17 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
   int ok = check_file(conf.bios) && check_file(conf.vga_bios);
   for (int i = 0; ok && i < 4; i++) {
     conf.disks[i] = resolve(conf.disks[i], sd_root);
+    // A zip is a folder disk: the folder it unpacks to (pc_zip.cpp).
+    if (!conf.iscd[i] && pczip_is_zip(conf.disks[i]) && file_exists(conf.disks[i])) {
+      char dir[256];
+      if (pczip_folder(conf.disks[i], dir, sizeof dir) != 0) {
+        snprintf(s_err_file, sizeof s_err_file, "%s", conf.disks[i]);
+        t386_log("tiny386: cannot unpack %s", conf.disks[i]);
+        t386_release_all();
+        return T386_ERR_ZIP;
+      }
+      conf.disks[i] = join("", dir);
+    }
     // A missing CD image just means an empty drive; a missing hard disk is an error.
     if (conf.iscd[i] && conf.disks[i] && conf.disks[i][0] && !file_exists(conf.disks[i])) {
       t386_log("tiny386: no CD image %s, drive left empty", conf.disks[i]);
@@ -112,11 +141,28 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
     }
   }
   for (int i = 0; ok && i < 2; i++) {
+    s_fd_path[i][0] = 0;
     conf.fdd[i] = resolve(conf.fdd[i], sd_root);
-    if (conf.fdd[i] && conf.fdd[i][0] && !file_exists(conf.fdd[i])) {
-      t386_log("tiny386: no floppy image %s, drive left empty", conf.fdd[i]);
+    if (!conf.fdd[i] || !conf.fdd[i][0]) continue;
+    char src[256];
+    const int r = floppy_source(conf.fdd[i], src, sizeof src);
+    if (r != 0) {
+      t386_log("tiny386: %s %s, drive left empty", r == T386_FD_UNPACK ? "cannot unpack" : "no floppy",
+               conf.fdd[i]);
       conf.fdd[i] = NULL;
+      continue;
     }
+    // one folder in two drives would be two disks writing back over each other
+    int clash = i == 1 && conf.fdd[0] && !strcasecmp(s_fd_path[0], src);
+    for (int j = 0; j < 4; j++)
+      clash |= !conf.iscd[j] && conf.disks[j] && !strcasecmp(conf.disks[j], src);
+    if (clash) {
+      t386_log("tiny386: %s is in another drive, %c: left empty", src, 'A' + i);
+      conf.fdd[i] = NULL;
+      continue;
+    }
+    conf.fdd[i] = join("", src);
+    snprintf(s_fd_path[i], sizeof s_fd_path[i], "%s", src);
   }
   if (!ok) {
     t386_release_all();
@@ -130,8 +176,10 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
     for (int i = 0; probe && i < 2; i++) {
       if (!conf.fdd[i]) continue;
       if (emulink_attach_floppy(probe, i, conf.fdd[i]) != 0) {
-        t386_log("tiny386: %s is not a floppy image size, drive left empty", conf.fdd[i]);
+        t386_log("tiny386: %s %s, drive left empty", conf.fdd[i],
+                 pfolder_is_dir(conf.fdd[i]) ? "does not fit on a floppy" : "is not a floppy image size");
         conf.fdd[i] = NULL;
+        s_fd_path[i][0] = 0;
       }
       emulink_attach_floppy(probe, i, NULL);
     }
@@ -228,8 +276,24 @@ void t386_info(VGAPicoInfo *info) {
 }
 
 int t386_swap_floppy(int drive, const char *path) {
-  if (!s_pc || drive < 0 || drive > 1) return -1;
-  return emulink_attach_floppy(s_pc->emulink, drive, path);
+  if (!s_pc || drive < 0 || drive > 1) return T386_FD_SIZE;
+  char src[256] = "";
+  if (path && path[0]) {
+    const int r = floppy_source(path, src, sizeof src);
+    if (r != 0) return r;
+    // a folder already open elsewhere (the other drive, or D:); the one this drive holds is fine
+    if (pfolder_is_dir(src) && pfolder_in_use(src) && strcasecmp(src, s_fd_path[drive]))
+      return T386_FD_IN_USE;
+  }
+  const int folder = src[0] && pfolder_is_dir(src);
+  const int r = emulink_attach_floppy(s_pc->emulink, drive, src[0] ? src : NULL);
+  snprintf(s_fd_path[drive], sizeof s_fd_path[drive], "%s", r == 0 ? src : "");
+  if (!src[0]) return 0;
+  return r == 0 ? 0 : folder ? T386_FD_TOO_BIG : T386_FD_SIZE;
+}
+
+int t386_floppy_dirty(int drive) {
+  return s_pc && drive >= 0 && drive < 2 && pfolder_is_dirty(emulink_floppy_folder(s_pc->emulink, drive));
 }
 
 void t386_change_cd(int ide_drive, const char *path) {

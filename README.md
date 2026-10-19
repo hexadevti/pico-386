@@ -14,10 +14,11 @@ plays. The P4 firmware builds but has not yet been run on the device.
 ```
 /roms/pc/bios.bin        SeaBIOS        } from the tiny386 release tarball
 /roms/pc/vgabios.bin     SeaVGABIOS     } (tiny386-*.tar.gz on its GitHub releases page)
-/pc-386/pc.ini           the PC: written with defaults the first time, then yours to edit
-/pc-386/pico386.cfg      frontend settings (volume, FPS meter, last machine)
+/pc-386/pc.ini           the PC startup: written with defaults the first time, then yours to edit
+/pc-386/startN.ini       the startups made with "Create new startup"
+/pc-386/pico386.cfg      frontend settings (volume, FPS meter, last startup)
 /pc-386/c.img            the PC's hard disk (a new pc.ini takes c.img, else dos.img or win.img)
-/pc-386/*.img *.ima *.iso *.vhd    anything else, for "Boot a disk image"
+/pc-386/*.img *.ima *.iso *.vhd    disk images to mount on a startup's drives screen
 ```
 
 Disk images are raw: a hard disk is a flat sector dump (a `.vhd` must be a *fixed* VHD) and a
@@ -38,7 +39,7 @@ The CPU type only changes what programs detect, not the speed.
 | Row | What it does |
 |---|---|
 | **Start** | Turns the PC on. It boots from A: if a floppy is in, otherwise from C:. |
-| **A: floppy**, **B: floppy** | Put in a floppy image, or eject it. |
+| **A: floppy**, **B: floppy** | Put in a floppy image, a folder or a `.zip`, or eject it. |
 | **C: hard disk** | Pick the hard-disk image. |
 | **D: SD folder** | Pick a folder on the SD card. The PC sees it as drive D:. |
 | **CD-ROM** | Put in an `.iso`, or eject it. |
@@ -53,13 +54,22 @@ programs or games in a folder from your computer, then pick that folder as D:.
   long names.
 - What the PC changes on D: (new, edited, renamed or deleted files) is saved into the folder
   **when you turn the PC off** with Quit in the in-game menu, or when you change C: or D:.
-  "Saving D:" shows while it writes. If the PicoCalc loses power first, those changes are lost.
+  "Saving" shows while it writes. If the PicoCalc loses power first, those changes are lost.
 - Files DOS creates get DOS names (`NEW.TXT`). Files that were already there keep their names.
 - If no C: is set, the folder is C: instead.
 - Formatting or repartitioning D: is never written back, so it cannot wipe the folder.
 - The disk is sized for the folder plus 32 MB free, up to 2 GB. Above 504 MB, plain MS-DOS
   can't read it; FreeDOS and Windows 95 can.
 - `/pc-386` itself can't be D:, since it holds the PC's own disks.
+
+**A: and B: take a folder or a zip too**, as a 1.44 MB floppy. Unlike D:, it can be swapped
+while DOS runs, so you can go through a folder of game zips without restarting the PC.
+
+- A zip is unpacked once to `/pc-386/.unzipped/`, as for D:. The game then runs from that copy.
+- A folder or zip holding more than 1.44 MB is refused ("Too big for a floppy (use D:)").
+- What the PC writes on the floppy is saved to its folder when you eject it, swap it, or turn
+  the PC off. "Saving A:" shows while it writes.
+- The same folder can't be in two drives at once.
 
 **While it runs**, the in-game menu (Ctrl-Esc) has the same drive rows:
 
@@ -75,27 +85,41 @@ programs or games in a folder from your computer, then pick that folder as D:.
 The disk comes out partitioned and formatted (FAT16). Until DOS is installed on it, it shows
 "This hard disk has no DOS yet". To install DOS, put a DOS install floppy in A:, then Start.
 
-**Boot a disk image** puts any image in the PC and starts it: a floppy goes in A:, an `.iso` in
-the CD drive (and the PC boots from the CD before C:), anything else becomes C:.
+**Startups.** The home menu lists each startup: the same PC with its own drives, such as DOS on
+C:, a Windows CD, or a game's zip as D:. **Create new startup** asks for a name and opens its
+drives screen. That screen also has **Boot from** (C:, or the CD before C:) and **Rename**, and
+every startup except PC has **Delete**. Deleting a startup removes only its `.ini`; the disk
+images stay. Startups are saved as `/pc-386/startN.ini`, and the home menu shows the name in
+`[pico] name`.
 
-**Everything is remembered.** The drives (whether chosen on the drives screen, in-game or with
-Boot a disk image), the keyboard mouse on/off and the settings are saved as you change them, so
-the PC starts the same way next time. A floppy left in A: boots again, as on a real PC; eject it
+**Everything is remembered.** The drives (whether chosen on the drives screen or in-game), the
+keyboard mouse mode and buttons, and the settings are saved to the startup as you change them, so it starts
+the same way next time. A floppy left in A: boots again, as on a real PC; eject it
 to boot from C:.
 
 `pc.ini` is a tiny386 `.ini` file. Every key tiny386 knows works in it (`fda`, `fdb`,
 `hda`..`hdd`, `cda`..`cdd`, `mem_size`, `vga_mem_size`, `[cpu] gen`/`fpu`), and paths are relative
-to the card root. `[pico]` holds ours: `mouse = 1` (keyboard mouse on) and `boot = cd`.
+to the card root. `[pico]` holds ours: `name`, `boot = cd`, `mouse` (0 arrows, 1 mouse, 2 both) and the
+button keys `mouse_left`/`mouse_right` (`alt`, `rshift`, `lshift`, `ctrl`, `space`, `enter`, `tab`,
+`bs`, `z`, `x` or `none`).
 
 **Keys.** Every key goes to the PC except the frontend's Ctrl hotkeys:
 
-- **Ctrl-Esc**: the in-game menu. It has Reset, the A:/B:/C:/D:/CD drives, the keyboard mouse,
-  Ctrl+Alt+Del, volume and FPS. The FPS line also shows the PC's speed in MIPS (millions of
+- **Ctrl-Esc**: the in-game menu. It has Reset, the A:/B:/C:/D:/CD drives, the arrows' mode,
+  the two mouse button keys, Ctrl+Alt+Del, volume and FPS. The FPS line also shows the PC's speed in MIPS (millions of
   instructions per second). It reads low while DOS sits idle at a prompt.
-- **Ctrl-Tab**: the keyboard mouse on/off. While it's on, the arrows move the pointer, speeding up
-  while held; Alt is the left button and Right Shift the right one. A DOS mouse driver
-  (CTMOUSE) or Windows sees a PS/2 mouse.
+- **Both Shifts together** (or **Ctrl-Tab**): the next mode for the arrows, shown for 2 s under the
+  picture:
+  - **Arrows**: arrow keys, as normal.
+  - **Mouse**: the arrows move the pointer, speeding up while held. The button keys click.
+  - **Both**: the arrows move the pointer and are also sent as arrow keys.
+
+  In Mouse and Both, the button keys (Alt and Right Shift unless changed in the in-game menu) are
+  only mouse buttons. A DOS mouse driver (CTMOUSE) or Windows sees a PS/2 mouse.
 - **Ctrl-Shift-Up**: back to esp32loader. **Ctrl-Shift-F3**: restart.
+- **Ctrl+Alt+Del** restarts the PC from the keyboard, as does **Ctrl+Alt+Backspace**.
+- **Caps Lock** works on letters (Shift gives lower case while it's on). The PC's own Caps Lock
+  stays off.
 
 Shifted characters are sent as Shift plus the US-layout key, so set the guest to the US keyboard
 layout. Keys repeat like a real keyboard (500 ms, then 30/s).

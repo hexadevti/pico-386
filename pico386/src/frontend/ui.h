@@ -7,6 +7,7 @@
 // a footer of keycap hints.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define RGB565(r, g, b) (uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
@@ -59,6 +60,10 @@ void drawBackground();
 // A centred box over whatever is on the canvas now.
 void message(const char *title, const char *line, uint32_t holdMs = 0);
 
+// A one-line text box over the background: typing edits buf (printable ASCII, up to cap - 1
+// characters), Backspace deletes. true = Enter with a non-empty text, false = Esc (buf unchanged).
+bool editText(const char *title, const char *prompt, char *buf, size_t cap);
+
 // Next key press (PRESSED or HELD events only), 0 if none arrives within timeoutMs (0 = wait).
 // PgUp (Ctrl-Shift-Up) reboots to the loader and F8 (Ctrl-Shift-F3) restarts, from any menu.
 uint8_t waitKey(uint32_t timeoutMs = 0);
@@ -77,10 +82,16 @@ struct Screen {
   const char *subtitle = nullptr;
   const char *hints = nullptr;         // "Enter|Select;Esc|Back": keycap, label pairs
   bool logo = false;                   // draw the title as the big logo
+  // Called before the rows on screen are drawn, with their range: fills in what is slow to find
+  // out (the browser's file sizes), so only the rows that are shown pay for it.
+  void (*prepare)(void *ctx, int first, int count) = nullptr;
+  void *ctx = nullptr;
 };
 
-// Draws the list and handles Up/Down/PgDn/Home/End. Returns the key that ends the
-// interaction: KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_ESC or KEY_BACKSPACE; *sel is updated.
+// Draws the list and handles Up/Down/PgDn/Home/End. Typing a letter or digit jumps to the next
+// row starting with it (letters typed within a second add up: "pr" finds "Prince"). Returns the
+// key that ends the interaction: KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_ESC or KEY_BACKSPACE; *sel
+// is updated.
 uint8_t list(const Screen &screen, const Item *items, int n, int *sel);
 
 } // namespace ui

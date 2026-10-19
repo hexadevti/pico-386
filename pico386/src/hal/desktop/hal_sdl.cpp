@@ -155,18 +155,19 @@ void hal_yield() {
 }
 
 // Test hook: PC_KEYS is a comma-separated script run once the queue is empty. Tokens: a key
-// name (up down left right enter esc bs f1..f10 home end pgup pgdn space ctrl alt) or a single
-// character is pressed and released; "ctrl+esc" holds the first key while tapping the second;
+// name (up down left right enter esc bs del caps f1..f10 home end pgup pgdn space ctrl alt shift)
+// or a single character is pressed and released; "ctrl+esc" holds the first keys while tapping the
+// last ("ctrl+alt+del" holds two);
 // wNNN waits NNN ms; "shot" saves <sd>/shotN.bmp; "quit" exits.
 static void scriptStep() {
   static const char *s = getenv("PC_KEYS");
   static uint32_t waitUntil = 0;
   static int shots = 0;
-  static uint8_t held = 0, mod = 0;
+  static uint8_t held = 0, mods[2], nmods = 0;
   if (held && hal_millis() >= waitUntil) {
     qPush(held, KEYSTATE_RELEASED);
-    if (mod) qPush(mod, KEYSTATE_RELEASED);
-    held = mod = 0;
+    while (nmods) qPush(mods[--nmods], KEYSTATE_RELEASED);
+    held = 0;
     waitUntil = hal_millis() + 60;
   }
   if (!s || !*s || held || s_qHead != s_qTail || hal_millis() < waitUntil) return;
@@ -177,7 +178,7 @@ static void scriptStep() {
     { "up", KEY_UP }, { "down", KEY_DOWN }, { "left", KEY_LEFT }, { "right", KEY_RIGHT },
     { "enter", KEY_ENTER }, { "esc", KEY_ESC }, { "bs", KEY_BACKSPACE }, { "tab", KEY_TAB }, { "home", KEY_HOME },
     { "end", KEY_END }, { "pgup", KEY_PGUP }, { "pgdn", KEY_PGDN }, { "space", KEY_SPACE },
-    { "ctrl", KEY_CTRL }, { "alt", KEY_ALT },
+    { "ctrl", KEY_CTRL }, { "alt", KEY_ALT }, { "shift", KEY_SHIFT_L }, { "rshift", KEY_SHIFT_R }, { "del", KEY_DEL }, { "caps", KEY_CAPS },
     { "f1", KEY_F1 }, { "f2", KEY_F2 }, { "f3", KEY_F3 }, { "f4", KEY_F4 }, { "f5", KEY_F5 },
     { "f6", KEY_F6 }, { "f7", KEY_F7 }, { "f8", KEY_F8 }, { "f9", KEY_F9 }, { "f10", KEY_F10 },
   };
@@ -188,11 +189,17 @@ static void scriptStep() {
     for (const auto &k : kNames) if (n == k.n) return k.c;
     return n.size() == 1 ? (uint8_t)n[0] : 0;
   };
-  const size_t plus = t.size() > 1 ? t.find('+') : std::string::npos;
-  const uint8_t m = plus != std::string::npos ? code(t.substr(0, plus)) : 0;
-  const uint8_t c = code(plus != std::string::npos ? t.substr(plus + 1) : t);
+  // the tokens before the last '+' are held (a lone "+" is the character)
+  std::string rest = t;
+  uint8_t m[2];
+  int nm = 0;
+  for (size_t plus; rest.size() > 1 && (plus = rest.find('+')) != std::string::npos && nm < 2;) {
+    if (const uint8_t mc = code(rest.substr(0, plus))) m[nm++] = mc;
+    rest = rest.substr(plus + 1);
+  }
+  const uint8_t c = code(rest);
   if (c) {
-    if (m) { qPush(m, KEYSTATE_PRESSED); mod = m; }
+    for (int i = 0; i < nm; i++) { qPush(m[i], KEYSTATE_PRESSED); mods[nmods++] = m[i]; }
     qPush(c, KEYSTATE_PRESSED);
     held = c;
   }

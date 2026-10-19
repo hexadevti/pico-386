@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
+#ifdef TINY386_PICO
+#include "../pc_folder.h"   /* pico-386: a folder or zip as a floppy */
+#endif
 
 #ifndef BUILD_ESP32
 #if !defined(_WIN32) && !defined(__wasm__) && !defined(TINY386_PICO) /* pico-386 */
@@ -429,7 +432,50 @@ struct EMULINK {
 	// fake floppy drive
 	FILE *fdd[2];
 	int fdfmti[2];
+#ifdef TINY386_PICO
+	/* pico-386: a drive holds either an image (fdd) or a folder floppy (fdf), which is read a
+	   sector at a time through fdbuf from byte fdpos */
+	PicoFolder *fdf[2];
+	uint32_t fdpos;
+	uint8_t fdbuf[512];
+#endif
 };
+
+#ifdef TINY386_PICO
+#define FD_LOADED(e, i) ((e)->fdd[i] || (e)->fdf[i])
+
+PicoFolder *emulink_floppy_folder(EMULINK *e, int i)
+{
+	return i >= 0 && i < 2 ? e->fdf[i] : NULL;
+}
+
+/* moves len bytes of the current transfer between buf and the folder floppy */
+static int fdf_io(EMULINK *e, uint8_t *buf, int len, int wr)
+{
+	PicoFolder *f = e->fdf[e->args[0]];
+	while (len > 0) {
+		int off = e->fdpos & 511, n = 512 - off;
+		uint32_t sec = e->fdpos >> 9;
+		if (n > len)
+			n = len;
+		if (wr) {
+			memcpy(e->fdbuf + off, buf, n);
+			if (off + n == 512 && pfolder_write(f, sec, e->fdbuf, 1) != 0)
+				return -1;
+		} else {
+			if (off == 0 && pfolder_read(f, sec, e->fdbuf, 1) != 0)
+				return -1;
+			memcpy(buf, e->fdbuf + off, n);
+		}
+		e->fdpos += n;
+		buf += n;
+		len -= n;
+	}
+	return 0;
+}
+#else
+#define FD_LOADED(e, i) ((e)->fdd[i])
+#endif
 
 EMULINK *emulink_init()
 {
@@ -446,6 +492,18 @@ int emulink_attach_floppy(EMULINK *e, int i, const char *filename)
 			fclose(e->fdd[i]);
 			e->fdd[i] = NULL;
 		}
+#ifdef TINY386_PICO
+		/* taking a folder floppy out writes back what the guest changed on it */
+		if (e->fdf[i]) {
+			pfolder_close(e->fdf[i]);
+			e->fdf[i] = NULL;
+		}
+		if (filename && pfolder_is_dir(filename)) {
+			e->fdf[i] = pfolder_open_floppy(filename);
+			e->fdfmti[i] = 0;   /* 1.44 MB */
+			return e->fdf[i] ? 0 : -1;
+		}
+#endif
 		if (filename)
 			e->fdd[i] = fopen(filename, "r+b");
 		if (!e->fdd[i])
@@ -495,7 +553,7 @@ static void exec_cmd(EMULINK *e)
 	case 0x102:
 		if (e->argi == 3) {
 			int ret;
-			if (!e->fdd[e->args[0]]) {
+			if (e->args[0] >= 2 || !FD_LOADED(e, e->args[0])) {
 				e->status = -EIO;
 				e->cmd = -1;
 				break;
@@ -506,6 +564,12 @@ static void exec_cmd(EMULINK *e)
 				int s = e->args[1] & 0xff;
 				const struct fdfmt *f = &(fmt[e->fdfmti[e->args[0]]]);
 				int lba = (c * f->heads + h) * f->sectors + (s - 1);
+#ifdef TINY386_PICO
+				if (e->fdf[e->args[0]]) {
+					e->fdpos = 512 * lba;
+					ret = 0;
+				} else
+#endif
 				ret = fseek(e->fdd[e->args[0]], 512 * lba, SEEK_SET);
 				if (ret < 0) {
 					e->status = -errno;
@@ -544,14 +608,19 @@ int emulink_data_write_string(void *s, uint8_t *buf, int size, int count)
 	EMULINK *e = s;
 	switch (e->cmd) {
 	case 0x102: // floppy write
-		if (!e->fdd[e->args[0]])
+		if (e->args[0] >= 2 || !FD_LOADED(e, e->args[0]))
 			break;
 		if (e->argi == 3) {
 			int len = size * count;
 			if (len > e->dataleft)
 				break;
-			int ret = fwrite(buf, 1, len, e->fdd[e->args[0]]);
-			if (ret != len)
+#ifdef TINY386_PICO
+			if (e->fdf[e->args[0]]) {
+				if (fdf_io(e, buf, len, 1) != 0)
+					break;
+			} else
+#endif
+			if ((int)fwrite(buf, 1, len, e->fdd[e->args[0]]) != len)
 				break;
 			e->dataleft -= len;
 			if (e->dataleft == 0) {
@@ -573,14 +642,19 @@ int emulink_data_read_string(void *s, uint8_t *buf, int size, int count)
 	EMULINK *e = s;
 	switch (e->cmd) {
 	case 0x101: // floppy read
-		if (!e->fdd[e->args[0]])
+		if (e->args[0] >= 2 || !FD_LOADED(e, e->args[0]))
 			break;
 		if (e->argi == 3) {
 			int len = size * count;
 			if (len > e->dataleft)
 				break;
-			int ret = fread(buf, 1, len, e->fdd[e->args[0]]);
-			if (ret != len)
+#ifdef TINY386_PICO
+			if (e->fdf[e->args[0]]) {
+				if (fdf_io(e, buf, len, 0) != 0)
+					break;
+			} else
+#endif
+			if ((int)fread(buf, 1, len, e->fdd[e->args[0]]) != len)
 				break;
 			e->dataleft -= len;
 			if (e->dataleft == 0) {

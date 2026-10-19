@@ -94,30 +94,72 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     top-left) to 320x240 at y=40.
   - Text is rendered from text RAM with the guest font shrunk to 4x12 and 2-bit antialiasing.
     Unchanged frames are skipped by hashing.
+  - 80x25 uses the hand-drawn fonts in `pc_textfont.h` instead (2026-10-19): ASCII, accents, box
+    drawing and blocks. They cover only glyphs that still match `vgafont16`, so a font a program
+    loads itself is still shrunk. Edit `tools/gen_textfont.py` (`--preview x.png` draws both)
+    and rerun it; never edit the header.
+  - Settings > Font size (`fontsize` in pico386.cfg, also in the in-game menu) picks 4x12 (fills
+    300 lines) or 4x8 (200 lines, centred). It caps the cell height in `renderText`.
 - **`pc_keymap.cpp`:**
   - PicoCalc characters are mapped to US-layout Linux keycodes, with Shift faked as needed.
   - It handles typematic repeat and the keyboard mouse.
+  - The keyboard mouse has three modes (2026-10-19): `MOUSE_ARROWS`, `MOUSE_ON` (arrows move the
+    pointer only) and `MOUSE_BOTH` (pointer and arrow keys). Both Shifts held together, or Ctrl+Tab,
+    cycles them; the first Shift has already reached the guest by then. The two button keys come
+    from `kButtonKeys` (`[pico] mouse_left`/`mouse_right`, default alt/rshift); outside ARROWS
+    they are only buttons. `pc_core` saves the mode and keys to the ini and shows a 2 s note
+    in the bottom strip (`showNote`). Test with `PC_KEYS=...,shift+rshift,...`.
+  - Shift as a mouse button (2026-10-19, from the device's serial log): the STM32 sends Shift+Up/
+    Down as PgUp/PgDn (0xD6/0xD7), and sends nothing at all for Shift+Left/Right. While a Shift
+    that is a button is held (or any Shift, in Mouse mode), `shiftedArrowOf` turns PgUp/PgDn back
+    into pointer arrows, so vertical drags work on the device. Sideways drags with a Shift button
+    can't work. The desktop never sends them that way.
+  - Caps Lock (2026-10-19) is kept in `s_caps` and never sent to the guest. The STM32 applies
+    its own Caps Lock to letters and the desktop doesn't, so a guest Caps Lock as well turned
+    'A' back into 'a' on the device. `mapKeyCaps` sets a letter's Shift from the Shift keys held.
+  - Ctrl+Alt+Del from the keyboard did not reach the guest on the device. Ctrl+Alt+Backspace is
+    now also sent as Ctrl+Alt+Del, and every key pressed with Ctrl+Alt held is logged
+    (`kbd: Ctrl+Alt+0xNN`), so the serial log shows what the STM32 sends. Never tested on the
+    device. On the desktop both combinations reboot SeaBIOS.
+  - `PC_KEYS` chords take two held keys (`ctrl+alt+del`); `del`, `caps` and `shift` are names.
   - tiny386's `ps2_put_keycode` takes Linux codes: below 96 is the set-1 scancode, 96 and above
     are extended keys.
   - The guest's own reads drain the PS/2 queue. A prompt only reacts once the guest polls, so
     a scripted key needs the guest to be ready (FreeDOS needs about 15 s to reach its first
     prompt).
 - **`pc_profiles.cpp`:**
-  - The home menu offers PC, "Boot a disk image", "Create a hard disk", Settings and
-    Exit. The PC row opens its drives screen (`pcdisk_machine_menu`) before Start.
+  - Startups (2026-10-19, replacing "Boot a disk image"): the home menu lists each startup, then
+    "Create new startup", "Create a hard disk", Settings and Exit. A startup is a machine .ini in
+    `/pc-386` with `[pico] name`. `pc.ini` comes first and is "PC" when it has no name. Other
+    named .ini files follow, sorted by name. Unnamed test .ini files are not listed.
+    - "Create new startup" asks for a name (`ui::editText`) and writes the first free
+      `startN.ini`, which mounts only C:.
+    - A startup's row opens its drives screen (`pcdisk_machine_menu`, which returns `MACHINE_*`).
+      The screen has Start, the drives, "Boot from" (`[pico] boot = cd`), Rename, and Delete
+      (every startup but pc.ini). Delete removes only the .ini.
+    - `startup=` in pico386.cfg remembers the last startup's file for the home menu's cursor.
   - It writes `/pc-386/pc.ini` when it is missing (C: = c.img, else dos.img or win.img). It asks
     for `T386_MEM_MAX_MB` (32 MB) of RAM; `t386_start` steps down 4 MB at a time until guest
     RAM + VRAM + 2 MB fits in PSRAM.
-  - Everything persists in pc.ini (the user asked, 2026-10-19). "Boot a disk image" mounts the
-    image into pc.ini (A:, C: or the CD) instead of the old throwaway image.ini. A CD sets
-    `[pico] boot = cd`, which `t386_start` turns into SeaBIOS's CMOS boot order (3Dh/38h); without
-    it SeaBIOS tries C: before the CD. `pc_core` writes `[pico] mouse` when the keyboard mouse
-    changes. `pcini_get_in`/`pcini_set_in` edit any section.
+  - Everything persists in the startup's .ini (the user asked, 2026-10-19).
+    `[pico] boot = cd` becomes SeaBIOS's CMOS boot order in `t386_start` (3Dh/38h); without
+    it SeaBIOS tries C: before the CD. `pc_core` writes `[pico] mouse` (0/1/2) and the
+    button keys when they change. `pcini_get_in`/`pcini_set_in` edit any section.
   - Test: `sdcard/pc-386/m13.iso` is an El Torito CD (m13.img, floppy emulation); `cdt.ini` boots
     it ahead of `dos.img`.
+  - The CD in DOS needs a guest driver. `sdcard/pc-386/cdrv.img` is a floppy holding FreeDOS's
+    `UDVD2.SYS`. Add `DEVICE=C:\DOS\UDVD2.SYS /D:CDROM1 /UX` to CONFIG.SYS, and
+    `C:\DOS\MSCDEX.EXE /D:CDROM1 /L:E` to AUTOEXEC.BAT ahead of SMARTDRV. This works on
+    DOSHDD (MS-DOS 6 + Win 3.11) on the desktop and on the device (2026-10-19).
 - **`pc_disks.cpp`:**
   - It classifies images: .iso is a CD, up to 2.88 MB is a floppy, larger is a hard disk.
   - The browser filter labels each file with its type and size.
+  - Big folders (2026-10-19, 500 game zips): on the card's FAT, each `stat` searches the folder
+    from its start. So the browser takes folders from `d_type` (the P4 has it; MinGW falls back to
+    stat), and for any disk, CD or zip it reads sizes only for the rows on screen
+    (`BrowseOpts::tag` + `ui::Screen::prepare`). The floppy and hard-disk choosers still stat
+    every file, because only the size tells those two apart. "Reading the folder" progress shows
+    after 250 ms. `ui::list` jumps to rows by typed letters (several letters within 1 s add up).
   - It edits the ini's drive keys (`pcini_get`/`pcini_set`, where "" comments the key out).
   - It provides the per-drive chooser and the drives screen.
   - `makeHardDisk` writes an MBR, a FAT16 partition at LBA 63 and the format, using 16 heads,
@@ -133,10 +175,32 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     new and changed files in `<folder>/.pico386-commit`, then deletes, renames and moves them in.
   - If sector 0 or 63 was rewritten (FDISK/FORMAT), nothing is applied.
   - Tested on the desktop with FreeDOS: dir, type, echo >, copy, ren, md, del, overwrite, reboot.
+- **`pc_zip.cpp`, zips as D: (2026-10-19):**
+  - The ini keeps the zip itself (`hdb = pc-386/games/x.zip`). `t386_start` calls `pczip_folder`,
+    which unpacks the zip once to `/pc-386/.unzipped/<name>/` and hands that folder to the folder disk.
+    Guest writes go to that folder, not to the zip.
+  - A `.pico386-zip` marker in the folder records the zip's path, size and mtime. If they match,
+    the folder is reused. If not, it is emptied and unpacked again.
+  - The inflater is our own (stored and deflate, CRC checked). It has no zlib dependency.
+  - The D: chooser has "Choose a zip file". (The old "Boot a disk image" also booted a zip
+    holding a single image; that went with it on 2026-10-19.)
+  - Tested on the desktop: all the example zips in `sdcard/pc-386/games` unpack with matching
+    CRCs. `zipt.ini` (C: = DOSHDD.img, D: = Alley Cat) runs the game from D:. Never tested on the device.
 - **Drives in-game (`pc_core.cpp`):**
   - A:/B: swap through emulink.
+  - A:/B: also take a folder or a zip (2026-10-19), as a 1.44 MB FAT12 floppy
+    (`pfolder_open_floppy`, emulink's `fdf[]` in misc.c). `t386_swap_floppy` maps a zip through
+    `pczip_folder` and returns `T386_FD_*` codes: too big, in use (other drive or D:), unpack.
+    A swap or eject commits the old folder (`pfolder_close`). Each floppy gets a new serial, so
+    DOS sees the change even with SMARTDRV caching A:. Tested on the desktop with `fdzip.ini`:
+    Crossfire to Mine Shaft in-game, and `echo > a:\t.txt` was committed on the swap. Never
+    tested on the device. Live swap of D: was tried and dropped: DOS has no media change for
+    fixed disks.
   - The CD goes through `ide_change_cd`. Every machine has an empty secondary-master CD.
   - C: and D: rewrite the ini and restart the machine (`stopMachine` shows "Saving D:").
+    A live D: swap was tried on 2026-10-19 and dropped, because it failed on the device. DOS has no
+    media change for a fixed disk: it keeps the BPB from boot, and SMARTDRV serves the old
+    sectors (on the desktop it only worked after `SMARTDRV /R`). The user chose the restart.
   - DOS sees floppy swaps; this was tested by copying from B: before and after a swap.
     Emulink itself has no change line.
 - **`core.h`:** the EmuCore gained `keyEvent`, `menuItems`/`menuAction` (core rows in the in-game
