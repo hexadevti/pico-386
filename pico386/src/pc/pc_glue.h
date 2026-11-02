@@ -36,8 +36,30 @@ enum T386Error {
 int  t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, uint16_t *fb);
 const char *t386_error_file();
 void t386_stop();                       // closes the disk images and frees the whole machine
+// Before and after the in-game menu. On the RP2350 the menu's canvas shares SRAM with VRAM,
+// so VRAM is saved to PSRAM meanwhile; elsewhere they do nothing. Call hal_job_wait() first.
+void pcmem_park();
+void pcmem_unpark();
+// RP2350: SRAM lent by the pager while a PC runs (pm_lend), for the folder floppy's large
+// buffers; the heap has only about 10 KB left then. NULL elsewhere, or when none is free.
+// pcmem_free returns 0 for a pointer that is not the arena's (free it as usual).
+void *pcmem_lend(size_t n);
+int   pcmem_free(void *p);
+// RP2350: a PSRAM address with PCMEM_SCRATCH_BYTES no machine uses (the zip inflater's window);
+// -1 elsewhere.
+#define PCMEM_SCRATCH_BYTES 32768
+long  pcmem_scratch();
+// RP2350: PSRAM that nothing uses, just past the most guest RAM a PC can have (PM_MAX_RAM): its
+// address, and its size in *bytes. The file browser keeps its names there. -1 elsewhere.
+#define PCMEM_SPARE_BYTES (512L * 1024)
+long  pcmem_spare(long *bytes);
+// RP2350: the rest of the PSRAM up to the scratch area, for the folder disks' FATs, directories
+// and nodes (pc_folder). -1 elsewhere.
+long  pcmem_folders(long *bytes);
 void t386_reset();                      // the reset button (BIOS reload on the next step)
 uint32_t t386_instructions();           // guest instructions run so far (wraps)
+void t386_where(uint32_t *cs, uint32_t *eip);   // bring-up diagnostics
+void t386_timer_info(uint32_t *count, uint32_t *behind, uint32_t *fired, uint32_t *lost);
 
 // The guest's clock in µs (wraps). It is wall time, except that t386_clock_skip(us) takes us
 // out of it: time the machine spent stopped (the menu) must not reach the guest, or its timer
@@ -46,6 +68,9 @@ uint32_t get_uticks();
 void t386_clock_skip(uint32_t us);
 // Emulates until the guest's clock reaches deadline_us.
 void t386_run_until(uint32_t deadline_us);
+// Called after every step of t386_run_until; sound_written: the guest wrote the Adlib or the
+// speaker during that step.
+void t386_set_audio_hook(void (*hook)(int sound_written));
 // Mixes n frames of 44.1 kHz stereo s16 (SB16 + Adlib + speaker); n <= 1024.
 void t386_mix(int16_t *stereo, int n);
 uint32_t t386_sb_starved();             // mixes in which the SB16 ran out of DMA data (diagnostics)
@@ -55,6 +80,10 @@ void t386_mouse(int dx, int dy, int buttons);   // dy > 0 = down; buttons bit 0 
 
 // vga_refresh() into fb (size in VGAPicoInfo.gfx_*); 1 when any line of it was redrawn.
 int  t386_refresh(int full);
+// PICO386_LOWMEM: there is no framebuffer; t386_refresh hands each finished line of a graphics
+// picture to f (line y of h, w pixels) instead. Set it before each refresh.
+typedef void T386LineFunc(void *opaque, int y, const uint16_t *line, int w, int h);
+void t386_set_line_sink(T386LineFunc *f, void *opaque);
 void t386_info(VGAPicoInfo *info);
 
 // Puts an image, a folder or a zip (as a 1.44 MB floppy) in A: (0) or B: (1); NULL or "" ejects.

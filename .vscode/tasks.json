@@ -1,6 +1,8 @@
 {
   // pico-386 build tasks (the same toolchains as emu16).
   //   * "P4: Build" / "P4: Build & Upload" -> PicoCalc + Waveshare ESP32-P4-WIFI6 (arduino-cli), COM9
+  //   * "RP2350: Build" / "... & Upload"    -> PicoCalc + Pico 2 (arduino-cli, arduino-pico), COM7
+  //   * "PicoMultiLoader: Package"         -> both firmwares as a PicoMultiLoader app (build-pml/)
   //   * "desktop: build" / "desktop: run"   -> SDL2 debug build (CMake, MSYS2 MinGW32)
   //
   // The P4 tasks use the same isolated arduino-cli data directory as emu8 (~/.emu6502-p4), which
@@ -61,6 +63,71 @@
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     },
     {
+      // PicoCalc + a plain Pico 2 (RP2350, no PSRAM on the module). arduino-pico 6.x from the
+      // default arduino-cli data directory (the same core as emu8's PicoCalc build).
+      //   arch=arm      FreeRTOS SMP does not work in RISC-V mode.
+      //   os=freertos   the HAL is built on tasks, semaphores and core affinity.
+      //   freq=300      the interpreter is CPU-bound (250 gave CheckIt 3.15x PC-XT). The panel's
+      //                 SPI drops to clk_peri/6 = 50 MHz (62.5 MHz at 250).
+      // The -I puts src/hal/picocalc_rp2350/include first, for its <dirent.h>; the C files get
+      // the board flag too. Output goes to build-rp2350/pico386.ino.uf2.
+      "label": "RP2350: Build",
+      "type": "shell",
+      "command": "arduino-cli",
+      "args": [
+        "compile",
+        "--fqbn",
+        "rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=picosdk,opt=Optimize2,exceptions=Enabled",
+        "--build-property",
+        "compiler.cpp.extra_flags=-DBOARD_PICOCALC_RP2350 -I{build.source.path}/src/hal/picocalc_rp2350/include",
+        "--build-property",
+        "compiler.c.extra_flags=-DBOARD_PICOCALC_RP2350 -I{build.source.path}/src/hal/picocalc_rp2350/include",
+        "--build-path",
+        "${userHome}/.pico386-rp2350-build",
+        "--output-dir",
+        "${workspaceFolder}/build-rp2350",
+        "${workspaceFolder}/pico386"
+      ],
+      "group": "build",
+      "problemMatcher": ["$gcc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "RP2350: Build & Upload",
+      "type": "shell",
+      "command": "arduino-cli",
+      "args": [
+        "upload",
+        "-p",
+        "COM7",
+        "--fqbn",
+        "rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=picosdk,opt=Optimize2,exceptions=Enabled",
+        "--input-dir",
+        "${workspaceFolder}/build-rp2350",
+        "${workspaceFolder}/pico386"
+      ],
+      "dependsOn": "RP2350: Build",
+      "dependsOrder": "sequence",
+      "group": "build",
+      "problemMatcher": ["$gcc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      // Both firmwares plus app.ini and the icon in build-pml/pico-386/ and a zip, for the root of
+      // the SD card under PicoMultiLoader (tools/pml-app/package.ps1).
+      "label": "PicoMultiLoader: Package",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "${workspaceFolder}/tools/pml-app/package.ps1",
+        "-Version", "${input:pmlVersion}"
+      ],
+      "group": "build",
+      "problemMatcher": ["$gcc"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
       "label": "desktop: build",
       "type": "process",
       "command": "C:\\msys64\\usr\\bin\\bash.exe",
@@ -81,5 +148,8 @@
       "problemMatcher": [],
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     }
+  ],
+  "inputs": [
+    { "id": "pmlVersion", "type": "promptString", "description": "pico-386 version", "default": "0.1.0" }
   ]
 }

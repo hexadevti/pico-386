@@ -1345,7 +1345,7 @@ void sb16_audio_callback (void *opaque, uint8_t *stream, int free)
 
     const int width = s->fmt >= AUDIO_FORMAT_U16 ? 2 : 1;
     const unsigned int frame = width << s->fmt_stereo;
-    const uint32_t step = (uint32_t) (((uint64_t) s->freq << 16) / 44100);
+    const uint32_t step = (uint32_t) (((uint64_t) s->freq << 16) / T386_AUDIO_RATE);   /* pico-386 */
     int16_t *out = (int16_t *) stream;
     unsigned int p = s->audio_p;
     for (int j = 0; j < free / 4; j++) {

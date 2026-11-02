@@ -40,6 +40,10 @@ enum Icon : uint8_t {
 
 bool begin();
 uint16_t *canvas();                    // PANEL_W x PANEL_H
+// PICO386_LOWMEM: the canvas shares SRAM with the guest's VRAM, so while a machine runs only the
+// bottom 10 rows (the FPS meter, notes) may be drawn: on = those rows only, off = the full panel
+// (once VRAM is parked or the machine is gone). A no-op elsewhere.
+void setStrip(bool on);
 
 // drawing on the canvas (panel coordinates)
 void fill(int x, int y, int w, int h, uint16_t c);
@@ -86,6 +90,9 @@ struct Screen {
   // out (the browser's file sizes), so only the rows that are shown pay for it.
   void (*prepare)(void *ctx, int first, int count) = nullptr;
   void *ctx = nullptr;
+  // With items null, list asks for each row here instead (also with ctx): a folder of hundreds
+  // of files then needs no Item for every one of them.
+  Item (*itemAt)(void *ctx, int i) = nullptr;
 };
 
 // Draws the list and handles Up/Down/PgDn/Home/End. Typing a letter or digit jumps to the next

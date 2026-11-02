@@ -155,6 +155,8 @@ struct VGAState {
 
 #ifdef TINY386_PICO
     int pico_gw, pico_gh; /* pico-386: size of the last graphics picture */
+    VGAPicoLineFunc *pico_sink; /* T386_PAGED: where finished lines go */
+    void *pico_sink_opaque;
 #endif
 
 #if defined(SCALE_3_2) || defined(SCALE_2_1) || defined(SWAPXY)
@@ -173,6 +175,9 @@ static int after_eq(uint32_t a, uint32_t b)
 
 static void simplefb_clear(FBDevice *fb_dev)
 {
+#ifdef T386_PAGED
+    return; /* pico-386: fb_data is a single line */
+#endif
     memset(fb_dev->fb_data, 0, fb_dev->width * fb_dev->height * (BPP / 8));
 }
 
@@ -1268,6 +1273,8 @@ static void vga_graphic_refresh(VGAState *s,
             int i = (BPP / 8) * (yyt * w + x);
             s->tmpbuf[i + 0] = color;
             s->tmpbuf[i + 1] = color >> 8;
+#elif defined(TINY386_PICO) && defined(T386_PAGED)
+            ((uint16_t *)fb_dev->fb_data)[x] = color;
 #elif defined(TINY386_PICO)
             ((uint16_t *)fb_dev->fb_data)[pico_y * fb_dev->width + x] = color;
 #else
@@ -1279,6 +1286,11 @@ static void vga_graphic_refresh(VGAState *s,
 #error "bad bpp"
 #endif
         }
+#if defined(TINY386_PICO) && defined(T386_PAGED)
+        if (pico_w && s->pico_sink)
+            s->pico_sink(s->pico_sink_opaque, pico_y, (const uint16_t *)fb_dev->fb_data,
+                         w, s->pico_gh);
+#endif
         if (!multi_run) {
             int mask = (s->cr[0x17] & 3) ^ 3;
             if ((y1 & mask) == mask)
@@ -1370,7 +1382,9 @@ void vga_refresh(VGAState *s,
     if (s->graphic_mode == 2) {
         vga_graphic_refresh(s, redraw_func, opaque, full_update);
     } else if (s->graphic_mode == 1) {
+#ifndef T386_PAGED /* pico-386: text is drawn from text RAM by the frontend, not from fb */
         vga_text_refresh(s, redraw_func, opaque, full_update);
+#endif
     }
 }
 
@@ -2302,6 +2316,12 @@ void vga_set_text_ops(VGAState *s, VGATextOps *ops, void *o)
 #ifdef TINY386_PICO
 /* pico-386: what the frontend needs to show the screen itself (its own text renderer and
    scalers). Mirrors the register decoding of vga_refresh() and vga_text_refresh(). */
+void vga_set_line_sink(VGAState *s, VGAPicoLineFunc *f, void *opaque)
+{
+    s->pico_sink = f;
+    s->pico_sink_opaque = opaque;
+}
+
 void vga_pico_info(VGAState *s, VGAPicoInfo *p)
 {
     memset(p, 0, sizeof(*p));

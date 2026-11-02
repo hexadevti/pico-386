@@ -11,6 +11,10 @@
 // antialiasing; 80x25 swaps in a font drawn for that cell (pc_textfont.h, from
 // tools/gen_textfont.py). The frame is skipped when neither the text, the attributes, the palette
 // nor the cursor changed.
+//
+// PICO386_LOWMEM (the RP2350) has no framebuffer and no 320x320 back buffer: tiny386 hands over
+// each finished line of the picture (lineSink), it is scaled on the spot, and 16 output rows at a
+// time go straight to the panel. Text is drawn and pushed one character row at a time.
 #include <string.h>
 #include "pc_internal.h"
 #include "pc_glue.h"
@@ -36,6 +40,67 @@ inline uint16_t avg2(uint16_t a, uint16_t b) {
 }
 
 int16_t s_x0[SCREEN_W], s_x1[SCREEN_W];
+
+#if defined(PICO386_LOWMEM)
+constexpr int kBandH = 16;                     // output rows per panel push (>= the tallest text cell)
+uint16_t s_band[SCREEN_W * kBandH];
+int s_bandY0, s_bandRows;                      // the band's first output row, rows filled
+int s_srcW = -1, s_outY;                       // the picture's width the columns are for; next output row
+uint16_t s_rowCur[SCREEN_W], s_rowPend[SCREEN_W];
+
+void flushBand() {
+  if (s_bandRows)
+    hal_panel_push(0, SCREEN_Y0 + (SCREEN_H - kOutH) / 2 + s_bandY0, SCREEN_W, s_bandRows, s_band, SCREEN_W);
+  s_bandY0 += s_bandRows;
+  s_bandRows = 0;
+}
+
+void emitRow(const uint16_t *row) {
+  memcpy(s_band + s_bandRows * SCREEN_W, row, SCREEN_W * 2);
+  if (++s_bandRows == kBandH) flushBand();
+}
+
+// One source line y (of h) of the picture: filtered across, then it becomes the output rows that
+// take it, averaged with the line it is paired with (the same 2x2 box as renderGraphics).
+void lineSink(void *, int y, const uint16_t *line, int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  if (w > T386_FB_W) w = T386_FB_W;
+  if (y == 0) {
+    s_outY = 0;
+    s_bandY0 = 0;
+    s_bandRows = 0;
+  }
+  if (w != s_srcW) {
+    for (int x = 0; x < SCREEN_W; x++) {
+      int a = x * w / SCREEN_W, b = (x + 1) * w / SCREEN_W - 1;
+      if (b < a) b = a;
+      s_x0[x] = (int16_t)a;
+      s_x1[x] = (int16_t)b;
+    }
+    s_srcW = w;
+  }
+  if (w == SCREEN_W) memcpy(s_rowCur, line, SCREEN_W * 2);
+  else for (int x = 0; x < SCREEN_W; x++) s_rowCur[x] = avg2(line[s_x0[x]], line[s_x1[x]]);
+  while (s_outY < kOutH) {
+    int a = s_outY * h / kOutH, b = (s_outY + 1) * h / kOutH - 1;
+    if (b < a) b = a;
+    if (y < a) return;                         // a line no output row takes (h > 480)
+    if (y == a && a < b) {
+      memcpy(s_rowPend, s_rowCur, SCREEN_W * 2);
+      return;
+    }
+    if (y > b) { s_outY++; continue; }         // missed (should not happen): skip the row
+    if (a == b) {
+      emitRow(s_rowCur);
+    } else {
+      uint16_t *p = s_rowPend;
+      for (int x = 0; x < SCREEN_W; x++) p[x] = avg2(p[x], s_rowCur[x]);
+      emitRow(p);
+    }
+    s_outY++;
+  }
+}
+#endif
 
 void renderGraphics(uint16_t *dst, const uint16_t *fb, int w, int h) {
   if (w <= 0 || h <= 0) return;
@@ -67,7 +132,14 @@ void renderGraphics(uint16_t *dst, const uint16_t *fb, int w, int h) {
 }
 
 // ---- text --------------------------------------------------------------------------------------
+#if defined(PICO386_LOWMEM)
+// No glyph cache: it is 12 KB for 80x25 and the heap has less than that left once the PC runs
+// (2026-10-28, a black screen on the device). Each cell is shrunk as it is drawn instead; the
+// hand-drawn ones come straight from flash. Bit c: glyph c is a hand-drawn one.
+uint32_t s_handBits[8];
+#else
 uint8_t *s_glyphs;                             // 256 glyphs x cellW x cellH coverage levels 0..3
+#endif
 int s_glyphW, s_glyphH, s_glyphCh;
 uint32_t s_fontHash;
 uint32_t s_textHash;
@@ -88,31 +160,43 @@ bool stockGlyph(const uint8_t *font, int c) {
 // Shrinks the VGA font (8 dots wide, cheight lines) to cellW x cellH: each output dot is the
 // share of lit source dots under it, rounded up to the next of 4 levels so thin strokes survive.
 // 80x25 (4x12 or 4x8 cells from the 8x16 font) uses pc_textfont.h instead wherever it has the glyph.
+// Glyph c as cw x ch coverage levels 0..3, row by row, into g.
+void shrinkGlyph(const uint8_t *font, int cheight, int c, int cw, int ch, bool hand, uint8_t *g) {
+  if (hand) {
+    const uint8_t *rows = ch == 12 ? kFont4x12[c] : kFont4x8[c];
+    for (int y = 0; y < ch; y++)
+      for (int x = 0; x < 4; x++) g[y * 4 + x] = (rows[y] >> (6 - 2 * x)) & 3;
+    return;
+  }
+  for (int y = 0; y < ch; y++) {
+    const int sy0 = y * cheight / ch, sy1 = (y + 1) * cheight / ch > sy0 ? (y + 1) * cheight / ch : sy0 + 1;
+    for (int x = 0; x < cw; x++) {
+      const int sx0 = x * 8 / cw, sx1 = (x + 1) * 8 / cw > sx0 ? (x + 1) * 8 / cw : sx0 + 1;
+      int lit = 0, all = 0;
+      for (int sy = sy0; sy < sy1; sy++) {
+        const uint8_t bits = font[(c * 32 + sy) * 4];
+        for (int sx = sx0; sx < sx1; sx++, all++) lit += (bits >> (7 - sx)) & 1;
+      }
+      g[y * cw + x] = (uint8_t)((lit * 3 + all - 1) / all);
+    }
+  }
+}
+
 void buildGlyphs(const uint8_t *font, int cheight, int cw, int ch) {
+#if !defined(PICO386_LOWMEM)
   if (!s_glyphs) s_glyphs = (uint8_t *)hal_alloc_big(256 * kMaxCellW * kMaxCellH);
   if (!s_glyphs) return;
+#endif
   const bool hand = cw == 4 && cheight == 16 && (ch == 12 || ch == 8);
   const uint32_t *has = ch == 12 ? kFont4x12Has : kFont4x8Has;
   for (int c = 0; c < 256; c++) {
-    uint8_t *g = s_glyphs + c * cw * ch;
-    if (hand && (has[c >> 5] >> (c & 31) & 1) && stockGlyph(font, c)) {
-      const uint8_t *rows = ch == 12 ? kFont4x12[c] : kFont4x8[c];
-      for (int y = 0; y < ch; y++)
-        for (int x = 0; x < 4; x++) g[y * 4 + x] = (rows[y] >> (6 - 2 * x)) & 3;
-      continue;
-    }
-    for (int y = 0; y < ch; y++) {
-      const int sy0 = y * cheight / ch, sy1 = (y + 1) * cheight / ch > sy0 ? (y + 1) * cheight / ch : sy0 + 1;
-      for (int x = 0; x < cw; x++) {
-        const int sx0 = x * 8 / cw, sx1 = (x + 1) * 8 / cw > sx0 ? (x + 1) * 8 / cw : sx0 + 1;
-        int lit = 0, all = 0;
-        for (int sy = sy0; sy < sy1; sy++) {
-          const uint8_t bits = font[(c * 32 + sy) * 4];
-          for (int sx = sx0; sx < sx1; sx++, all++) lit += (bits >> (7 - sx)) & 1;
-        }
-        g[y * cw + x] = (uint8_t)((lit * 3 + all - 1) / all);
-      }
-    }
+    const bool h = hand && (has[c >> 5] >> (c & 31) & 1) && stockGlyph(font, c);
+#if defined(PICO386_LOWMEM)
+    if (h) s_handBits[c >> 5] |= 1u << (c & 31);
+    else s_handBits[c >> 5] &= ~(1u << (c & 31));
+#else
+    shrinkGlyph(font, cheight, c, cw, ch, h, s_glyphs + c * cw * ch);
+#endif
   }
   s_glyphW = cw;
   s_glyphH = ch;
@@ -128,6 +212,7 @@ uint16_t mix(uint16_t bg, uint16_t fg, int k) {   // k of 3 parts fg
   return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+// LOWMEM: dst is ignored and each character row goes to the panel through s_band.
 bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force) {
   const int cols = in.cols, rows = in.rows;
   if (cols <= 0 || rows <= 0 || cols > 160 || rows > 100 || in.cheight <= 0) return false;
@@ -141,12 +226,17 @@ bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force
   // font: rebuilt when its bits (or the cell size) change
   uint32_t fh = 2166136261u;
   for (int c = 0; c < 256; c++) fh = hashBytes(fh, in.font + c * 32 * 4, cheight * 4, 4);
+#if defined(PICO386_LOWMEM)
+  if (ch > kBandH) ch = kBandH;
+#endif
   if (fh != s_fontHash || cw != s_glyphW || ch != s_glyphH || cheight != s_glyphCh) {
     buildGlyphs(in.font, cheight, cw, ch);
     s_fontHash = fh;
     force = true;
   }
+#if !defined(PICO386_LOWMEM)
   if (!s_glyphs) return false;
+#endif
 
   const uint8_t *vram = in.vram;
   const bool blinkOn = (nowMs / 267) & 1;      // VGA: the cursor blinks every 16 frames
@@ -181,7 +271,13 @@ bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force
 
   for (int y = 0; y < rows; y++) {
     const uint32_t row = in.start_addr + y * in.line_offset;
+#if defined(PICO386_LOWMEM)
+    (void)dst;
+    memset(s_band, 0, (size_t)SCREEN_W * ch * 2);    // the margins
+    uint16_t *line = s_band + x0;
+#else
     uint16_t *line = dst + (y0 + y * ch) * SCREEN_W + x0;
+#endif
     for (int x = 0; x < cols; x++, line += cw) {
       const uint32_t a = (row + x * 4) & 0x3fffc;
       const uint8_t c = vram[a], attr = vram[a + 1];
@@ -192,7 +288,13 @@ bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force
       }
       const uint16_t fg = in.palette[fgi], bg = in.palette[bgi];
       const uint16_t lut[4] = { bg, mix(bg, fg, 1), mix(bg, fg, 2), fg };
+#if defined(PICO386_LOWMEM)
+      uint8_t cell[kMaxCellW * kBandH];
+      shrinkGlyph(in.font, cheight, c, cw, ch, s_handBits[c >> 5] >> (c & 31) & 1, cell);
+      const uint8_t *g = cell;
+#else
       const uint8_t *g = s_glyphs + c * cw * ch;
+#endif
       uint16_t *p = line;
       for (int gy = 0; gy < ch; gy++, p += SCREEN_W, g += cw)
         for (int gx = 0; gx < cw; gx++) p[gx] = lut[g[gx]];
@@ -202,6 +304,9 @@ bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force
           for (int gx = 0; gx < cw; gx++) q[gx] = fg;
       }
     }
+#if defined(PICO386_LOWMEM)
+    hal_panel_push(0, SCREEN_Y0 + y0 + y * ch, SCREEN_W, ch, s_band, SCREEN_W);
+#endif
   }
   return true;
 }
@@ -221,12 +326,30 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
   bool changed = in.mode != s_lastMode || g_settings.fontSize != s_lastFontSize;
   s_lastFontSize = g_settings.fontSize;
   if (in.mode == 2) {
+#if defined(PICO386_LOWMEM)
+    // A new picture size: clear the panel first, or this frame's rows would be wiped after it.
+    if (changed || in.gfx_w != s_lastW || in.gfx_h != s_lastH)
+      hal_panel_fill(0, SCREEN_Y0, SCREEN_W, SCREEN_H - 10, 0);
+    t386_set_line_sink(lineSink, nullptr);
+    s_outY = kOutH;                              // nothing is emitted until line 0 arrives
+#endif
+#if defined(PICO386_LOWMEM)
+    const int preW = in.gfx_w, preH = in.gfx_h;
+#endif
     t386_refresh(s_gfxFull || changed);
+#if defined(PICO386_LOWMEM)
+    flushBand();
+#endif
     s_gfxFull = false;
     if (in.gfx_w != s_lastW || in.gfx_h != s_lastH) changed = true;
     // read again: the refresh is what measures the picture
     t386_info(&in);
     if (in.gfx_w != s_lastW || in.gfx_h != s_lastH) changed = true;
+#if defined(PICO386_LOWMEM)
+    // The refresh found a new size and drew it over the old picture's borders: clear them now,
+    // the next frame draws the picture again.
+    if (in.gfx_w != preW || in.gfx_h != preH) hal_panel_fill(0, SCREEN_Y0, SCREEN_W, SCREEN_H - 10, 0);
+#endif
   } else {
     s_gfxFull = true;
   }
@@ -238,6 +361,15 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
     s_textHash = 0;
   }
   const bool clear = s_clearFrames > 0;
+#if defined(PICO386_LOWMEM)
+  // Straight to the panel: one clear is enough, and graphics were drawn by the refresh above.
+  if (clear) {
+    if (in.mode != 2) hal_panel_fill(0, SCREEN_Y0, SCREEN_W, SCREEN_H - 10, 0);
+    s_clearFrames = 0;
+  }
+  if (in.mode == 2) return true;
+  (void)fb;
+#else
   if (clear) {
     memset(dst, 0, SCREEN_W * SCREEN_H * 2);
     s_clearFrames--;
@@ -247,6 +379,7 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
     renderGraphics(dst, fb, in.gfx_w, in.gfx_h);
     return true;
   }
+#endif
   if (in.mode == 1) {
     // the cleared buffer needs the text again even if the text did not change
     const bool drawn = renderText(dst, in, nowMs, clear);

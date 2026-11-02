@@ -7,7 +7,9 @@
 //
 // While the PC runs, nothing it writes reaches the folder:
 // - FAT and directory changes stay in RAM.
-// - Written data clusters go to a scratch file, /pc-386/.pico386-d.tmp.
+// - Written data clusters go to a scratch file, /pc-386/.pico386-dN.tmp.
+// On the RP2350 the FAT, the directories and the scan's nodes live in the PSRAM (a hard disk's
+// FAT alone is up to 128 KB, and the heap has about 10 KB with a PC running).
 // When the machine powers off, the final FAT16 tree is read back through the same view and
 // compared with the scan. New and changed files are written, deleted ones are removed, and
 // renamed or moved ones are renamed. If the emulator crashes or the battery is pulled first, the
@@ -39,11 +41,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
+#include <array>
 #include <map>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include "pc_folder.h"
+#include "pc_glue.h"
 #include "../frontend/settings.h"
 #include "../hal/hal.h"
 
@@ -57,49 +62,164 @@ constexpr int kMaxDepth = 24;
 constexpr uint32_t kSizesMB[] = { 64, 128, 256, 504, 1000, 2000 };
 constexpr uint32_t kMinFree = 32u << 20;
 
+// RP2350: while a disk is built, the scan's nodes and names take SRAM the pager lends
+// (pcmem_lend) when it can, as with a PC running the heap has only about 10 KB; so does the tree
+// read back when it is written back (s_lendOk). Once built, the disk's tables move to the PSRAM.
+bool s_lendOk = false;
+template <class T> struct LentAlloc {
+  using value_type = T;
+  LentAlloc() = default;
+  template <class U> LentAlloc(const LentAlloc<U> &) {}
+  T *allocate(size_t n) {
+    if (s_lendOk && n * sizeof(T) >= 1024)
+      if (void *p = pcmem_lend(n * sizeof(T))) return (T *)p;
+    return (T *)::operator new(n * sizeof(T));
+  }
+  void deallocate(T *p, size_t) { if (!pcmem_free(p)) ::operator delete(p); }
+};
+template <class T, class U> bool operator==(const LentAlloc<T> &, const LentAlloc<U> &) { return true; }
+template <class T, class U> bool operator!=(const LentAlloc<T> &, const LentAlloc<U> &) { return false; }
+using Bytes = std::vector<uint8_t, LentAlloc<uint8_t>>;
+
 void put16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 void put32(uint8_t *p, uint32_t v) { put16(p, v); put16(p + 2, v >> 16); }
 uint32_t get16(const uint8_t *p) { return p[0] | (p[1] << 8); }
 uint32_t get32(const uint8_t *p) { return get16(p) | (get16(p + 2) << 16); }
 
-// What the scan found: one per file or folder ([0] is the folder itself).
+// ---- where the tables live -------------------------------------------------------------------------
+// A disk's FAT, root directory and folders, and on the RP2350 its nodes too, each in a Store. On
+// the RP2350 a Store is a block of the PSRAM (pcmem_folders), reached through hal_psram_read and
+// write: a hard disk's FAT alone is up to 128 KB, and the heap has about 10 KB with a PC running,
+// which is what froze the device as soon as D: held a folder or a zip. Elsewhere it is RAM.
+#if defined(PICO386_LOWMEM)
+struct PsBlock { uint32_t at, size; };
+PsBlock s_ps[48];                // the blocks in use, by address
+int s_nps = 0;
+
+// First fit; 0 when there is no room (the region never starts at 0, which is guest RAM).
+uint32_t psAlloc(uint32_t n) {
+  long room = 0;
+  const long base = pcmem_folders(&room);
+  if (base <= 0 || !n || s_nps == (int)(sizeof s_ps / sizeof *s_ps)) return 0;
+  n = (n + 63) & ~63u;
+  const uint32_t top = (uint32_t)(base + room);
+  uint32_t at = (uint32_t)base;
+  int i = 0;
+  for (;; i++) {
+    const uint32_t end = i < s_nps ? s_ps[i].at : top;
+    if (end - at >= n) break;
+    if (i == s_nps) {
+      hal_log("folder: no PSRAM left for %u KB", (unsigned)(n >> 10));
+      return 0;
+    }
+    at = s_ps[i].at + s_ps[i].size;
+  }
+  memmove(s_ps + i + 1, s_ps + i, (size_t)(s_nps - i) * sizeof *s_ps);
+  s_ps[i] = { at, n };
+  s_nps++;
+  const uint8_t zero[256] = {};
+  for (uint32_t k = 0; k < n; k += sizeof zero) hal_psram_write(at + k, zero, std::min<uint32_t>(sizeof zero, n - k));
+  return at;
+}
+
+void psFree(uint32_t at) {
+  for (int i = 0; i < s_nps; i++)
+    if (s_ps[i].at == at) {
+      memmove(s_ps + i, s_ps + i + 1, (size_t)(s_nps - i - 1) * sizeof *s_ps);
+      s_nps--;
+      return;
+    }
+}
+
+struct Store {
+  uint32_t at = 0, n = 0;
+  Store() = default;
+  Store(const Store &) = delete;
+  Store &operator=(const Store &) = delete;
+  ~Store() { release(); }
+  bool alloc(size_t size) {
+    release();
+    at = psAlloc((uint32_t)size);
+    n = at ? (uint32_t)size : 0;
+    return at || !size;
+  }
+  void release() { if (at) psFree(at); at = n = 0; }
+  size_t size() const { return n; }
+  void read(size_t off, void *dst, size_t len) const { hal_psram_read(at + (uint32_t)off, dst, len); }
+  void write(size_t off, const void *src, size_t len) { hal_psram_write(at + (uint32_t)off, src, len); }
+};
+#else
+struct Store {
+  Bytes v;
+  bool alloc(size_t size) { v.assign(size, 0); return true; }
+  void release() { Bytes().swap(v); }
+  size_t size() const { return v.size(); }
+  void read(size_t off, void *dst, size_t len) const { memcpy(dst, v.data() + off, len); }
+  void write(size_t off, const void *src, size_t len) {
+    if (off + len > v.size()) v.resize(off + len);   // the scan's nodes and names, not counted first
+    memcpy(v.data() + off, src, len);
+  }
+};
+#endif
+
+// What the scan found: one per file or folder ([0] is the folder itself), in a Store with their
+// names, read one at a time (nodeAt, nameOf). On the RP2350 that is the PSRAM from the start: in
+// SRAM, a game of 430 files took 30 KB, more than the heap and the pager's frames had.
 struct Node {
-  std::string host;              // its path on the card
-  std::string name;              // its name there
+  uint32_t name = 0;             // its name on the card, in the names pool
+  int parent = -1;
+  int kid0 = 0;                  // its children are nodes kid0 .. kid0 + nkids - 1
+  uint32_t size = 0;
+  uint32_t first = 0, nclus = 0; // first rises with the index: a node with no clusters has the
+                                 // next one's first, and its entry says 0 (entryFirst)
+  uint32_t dirOff = 0;           // a folder's clusters, in PicoFolder::dirs
+  uint16_t date = 0, time = 0;
+  uint16_t nkids = 0;
   uint8_t sfn[11];               // the 8.3 name the guest sees
-  int lfn = 0;                   // long-name entries it has (0: the short name is its name)
+  uint8_t lfn = 0;               // long-name entries it has (0: the short name is its name)
   bool dir = false;
   bool skipped = false;          // left out: no room
-  int parent = -1;
-  uint32_t size = 0, first = 0, nclus = 0;
-  uint16_t date = 0, time = 0;
-  std::vector<int> kids;
-  std::vector<uint8_t> dirBuf;   // a folder's clusters; the guest's writes to them land here
 };
 
-// The tree as the guest left it, read back at power-off.
+// The tree as the guest left it, read back at power-off: one flat list in which each folder's
+// entries are one run, with the names in one pool, as the scan keeps its nodes. A tree of
+// strings and vectors took about 200 bytes a file, more than the RP2350's heap has for a floppy.
 struct Final {
-  std::string name;
-  uint8_t sfn[11];
-  bool dir = false;
-  uint32_t first = 0, size = 0;
-  std::vector<uint32_t> chain;
-  std::vector<Final> kids;
+  uint32_t name = 0;             // in the names pool
+  int parent = -1, kid0 = 0, nkids = 0;
   int orig = -1;                 // the scanned node it is, or -1 when new
+  int stage = -1;                // a changed file's copy in the staging folder
+  uint32_t first = 0, size = 0;
+  uint8_t sfn[11];
+  uint8_t depth = 0;
+  bool dir = false;
+  bool open = false;             // a folder whose entries are read (not a loop, not too deep)
   bool changed = false;          // a file whose content must be written
-  std::string stage;             // where that content waits until it is moved into place
+  bool hostName = false;         // it keeps the name it had on the card
 };
+using FinalList = std::vector<Final, LentAlloc<Final>>;
+using NamePool = std::vector<char, LentAlloc<char>>;
 
 } // namespace
 
 struct PicoFolder {
   std::string root, label;
-  std::vector<Node> nodes;
-  std::vector<uint8_t> rootDir;
-  std::vector<uint8_t> fat;                          // the first FAT as on disk; both copies read from it
-  std::map<uint32_t, std::vector<uint8_t>> extra;    // written sectors outside FAT/root/data
+  Store nodeStore;                                   // the scan's nodes
+  Store nameStore;                                   // their names, each ending in a NUL
+  uint32_t namesLen = 0;
+  size_t nodeCap = (size_t)-1;                       // what the stores were sized for (RP2350)
+#if defined(PICO386_LOWMEM)
+  Store spillMap;                                    // cluster -> its slot in the scratch file + 1, 2 bytes each
+#else
   std::unordered_map<uint32_t, uint32_t> spill;      // cluster -> its slot in the scratch file
-  std::vector<std::pair<uint32_t, int>> byFirst;     // (first cluster, node), ascending
+#endif
+  uint32_t nnodes = 0, nspill = 0;
+  Store rootDir;
+  Store fat;                                         // the first FAT as on disk; both copies read from it
+  Store dirs;                                        // every folder's clusters; the guest's writes to them land here
+  std::map<uint32_t, std::vector<uint8_t>> extra;    // written sectors outside FAT/root/data
+  int own = -1;                                      // ownerOf's last answer, and a copy of that node
+  Node ownNode;
   std::string spillPath;
   FILE *spillF = nullptr;
   FILE *cur = nullptr;                               // the last file read, kept open
@@ -111,12 +231,52 @@ struct PicoFolder {
   uint32_t rootEnt = kRootEnt, rootSecs = kRootEnt * 32 / 512;
   bool floppy = false;                               // FAT12, no partition table
   uint8_t ptype = 0, media = 0xF8;
-  bool dirty = false, spillFailed = false;
+  bool dirty = false, spillFailed = false, extraFull = false;
 };
 
 namespace {
 
 std::vector<PicoFolder *> s_open;
+
+Node nodeAt(const PicoFolder &f, int i) {
+  Node n;
+  f.nodeStore.read((size_t)i * sizeof(Node), &n, sizeof n);
+  return n;
+}
+
+void setNode(PicoFolder &f, int i, const Node &n) { f.nodeStore.write((size_t)i * sizeof(Node), &n, sizeof n); }
+
+uint32_t entryFirst(const Node &n) { return n.nclus ? n.first : 0; }
+
+std::string nameOf(const PicoFolder &f, const Node &n) {
+  std::string s;
+  char buf[64];
+  for (size_t at = n.name; at < f.namesLen; at += sizeof buf) {
+    const size_t k = std::min<size_t>(sizeof buf, f.namesLen - at);
+    f.nameStore.read(at, buf, k);
+    const char *z = (const char *)memchr(buf, 0, k);
+    s.append(buf, z ? (size_t)(z - buf) : k);
+    if (z) break;
+  }
+  return s;
+}
+
+// Adds a name to the pool; false when the pool is full (the folder grew since it was counted).
+bool addName(PicoFolder &f, const char *name, uint32_t &at) {
+  const size_t len = strlen(name) + 1;
+  if (f.nodeCap != (size_t)-1 && f.namesLen + len > f.nameStore.size()) return false;
+  at = f.namesLen;
+  f.nameStore.write(at, name, len);
+  f.namesLen += (uint32_t)len;
+  return true;
+}
+
+// A node's path on the card, from its parents' names.
+std::string hostOf(const PicoFolder &f, int i) {
+  const Node n = nodeAt(f, i);
+  if (n.parent < 0) return f.root;
+  return hostOf(f, n.parent) + "/" + nameOf(f, n);
+}
 
 // ---- names ----------------------------------------------------------------------------------------
 
@@ -134,9 +294,16 @@ std::string shortText(const uint8_t *sfn) {
   return s;
 }
 
-// The 8.3 name for name, unique among used (11-char keys). Returns true when it is not the name
-// itself, so the long name has to be stored too.
-bool makeShort(const std::string &name, std::vector<std::string> &used, uint8_t out[11]) {
+// The 8.3 name for name, unique among the short names of sibs[0..nsibs). Returns true when it is
+// not the name itself, so the long name has to be stored too.
+using Sfn = std::array<uint8_t, 11>;
+
+bool makeShort(const std::string &name, const Sfn *sibs, int nsibs, uint8_t out[11]) {
+  auto taken = [&](const std::string &k) {
+    for (int i = 0; i < nsibs; i++)
+      if (!memcmp(sibs[i].data(), k.data(), 11)) return true;
+    return false;
+  };
   const size_t dot = name.find_last_of('.');
   const std::string base = dot == std::string::npos || dot == 0 ? name : name.substr(0, dot);
   const std::string ext = dot == std::string::npos || dot == 0 ? "" : name.substr(dot + 1);
@@ -158,15 +325,13 @@ bool makeShort(const std::string &name, std::vector<std::string> &used, uint8_t 
     return (bb + "        ").substr(0, 8) + (ee + "   ").substr(0, 3);
   };
   std::string k = key(b, e);
-  const bool taken = std::find(used.begin(), used.end(), k) != used.end();
-  if (lossy || taken) {
+  if (lossy || taken(k)) {
     for (int i = 1; i < 1000000; i++) {
       const std::string tail = "~" + std::to_string(i);
       k = key(b.substr(0, 8 - tail.size()) + tail, e);
-      if (std::find(used.begin(), used.end(), k) == used.end()) break;
+      if (!taken(k)) break;
     }
   }
-  used.push_back(k);
   memcpy(out, k.data(), 11);
   return name != shortText(out);
 }
@@ -215,43 +380,125 @@ void dosTime(time_t t, uint16_t &date, uint16_t &tm) {
   tm = (uint16_t)((l->tm_hour << 11) | (l->tm_min << 5) | (l->tm_sec / 2));
 }
 
-void scanDir(PicoFolder &f, int di, int depth) {
-  DIR *d = opendir(f.nodes[di].host.c_str());
+bool entryIsDir(const std::string &dir, const dirent *e) {
+#if defined(DT_DIR) && defined(DT_UNKNOWN)
+  if (e->d_type == DT_DIR) return true;
+  if (e->d_type != DT_UNKNOWN) return false;
+#endif
+  return isDir(dir + "/" + e->d_name);
+}
+
+// The files and folders under dir (at most what scanDir keeps), and the bytes their names take,
+// so a floppy's nodes and names can be sized once instead of growing: a vector that grows holds
+// its old and new blocks at once. A folder is closed before the ones in it are counted, as each
+// one open costs heap; finding the k-th subfolder again reads the folder again.
+void countTree(const std::string &dir, int depth, size_t &nodes, size_t &bytes) {
+  size_t dirs = 0;
+  DIR *d = opendir(dir.c_str());
   if (!d) return;
-  std::vector<std::string> names;
-  while (dirent *e = readdir(d))
-    if (e->d_name[0] != '.') names.push_back(e->d_name);
-  closedir(d);
-  std::sort(names.begin(), names.end(),
-            [](const std::string &a, const std::string &b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
-  std::vector<std::string> used;
-  for (const std::string &name : names) {
-    Node n;
-    n.host = f.nodes[di].host + "/" + name;
-    struct stat st;
-    if (stat(n.host.c_str(), &st) != 0) continue;
-    n.dir = S_ISDIR(st.st_mode);
-    if (!n.dir && !S_ISREG(st.st_mode)) continue;
-    if (n.dir && depth >= kMaxDepth) continue;
-    n.name = name;
-    n.parent = di;
-    n.size = n.dir ? 0 : (uint32_t)st.st_size;
-    dosTime(st.st_mtime, n.date, n.time);
-    if (makeShort(name, used, n.sfn)) {
-      const size_t len = toUtf16(name).size();
-      n.lfn = len <= 255 ? (int)((len + 12) / 13) : 0;
-    }
-    const int idx = (int)f.nodes.size();
-    f.nodes.push_back(std::move(n));
-    f.nodes[di].kids.push_back(idx);
-    if (f.nodes[idx].dir) scanDir(f, idx, depth + 1);
+  while (dirent *e = readdir(d)) {
+    if (e->d_name[0] == '.') continue;
+    nodes++;
+    bytes += strlen(e->d_name) + 1;
+    if (entryIsDir(dir, e)) dirs++;
   }
+  closedir(d);
+  for (size_t k = 0; k < dirs && depth < kMaxDepth; k++) {
+    std::string sub;
+    if ((d = opendir(dir.c_str()))) {
+      size_t seen = 0;
+      while (dirent *e = readdir(d))
+        if (e->d_name[0] != '.' && entryIsDir(dir, e) && seen++ == k) { sub = dir + "/" + e->d_name; break; }
+      closedir(d);
+    }
+    if (!sub.empty()) countTree(sub, depth + 1, nodes, bytes);
+  }
+}
+
+// Folder di's children go in one run of nodes, sorted by name; then each subfolder's, after them.
+// They go to the node store as they are read, and SRAM holds 13 bytes a child while they are
+// sorted and given short names: a game's folder can have a thousand files.
+void scanDir(PicoFolder &f, int di, int depth) {
+  const std::string dir = hostOf(f, di);
+  size_t cap;
+  {
+    DIR *d = opendir(dir.c_str());
+    if (!d) return;
+    size_t count = 0;
+    while (dirent *e = readdir(d)) count += e->d_name[0] != '.';
+    closedir(d);
+    cap = std::min<size_t>({ count, 65535, f.nodeCap - f.nnodes });
+  }
+  const int kid0 = (int)f.nnodes;
+  int n = 0;
+  DIR *d = opendir(dir.c_str());
+  if (!d) return;
+  while (dirent *e = readdir(d)) {
+    if (e->d_name[0] == '.') continue;
+    if ((size_t)n == cap) break;                     // FAT's most entries a folder has, or what was counted
+    struct stat st;
+    if (stat((dir + "/" + e->d_name).c_str(), &st) != 0) continue;
+    Node k;
+    k.dir = S_ISDIR(st.st_mode);
+    if (!k.dir && !S_ISREG(st.st_mode)) continue;
+    if (k.dir && depth >= kMaxDepth) continue;
+    if (!addName(f, e->d_name, k.name)) break;
+    k.parent = di;
+    k.size = k.dir ? 0 : (uint32_t)st.st_size;
+    dosTime(st.st_mtime, k.date, k.time);
+    setNode(f, kid0 + n++, k);
+  }
+  closedir(d);
+  f.nnodes = (uint32_t)(kid0 + n);
+
+  // sorted by name: the order, then the nodes moved along its cycles, two at a time in SRAM
+  {
+    std::vector<uint16_t, LentAlloc<uint16_t>> order(n);
+    for (int i = 0; i < n; i++) order[i] = (uint16_t)i;
+    std::sort(order.begin(), order.end(), [&f, kid0](uint16_t a, uint16_t b) {
+      return strcasecmp(nameOf(f, nodeAt(f, kid0 + a)).c_str(), nameOf(f, nodeAt(f, kid0 + b)).c_str()) < 0;
+    });
+    for (int s0 = 0; s0 < n; s0++) {
+      if (order[s0] == s0) continue;
+      const Node held = nodeAt(f, kid0 + s0);
+      int j = s0;
+      while (order[j] != s0) {
+        const int from = order[j];
+        setNode(f, kid0 + j, nodeAt(f, kid0 + from));
+        order[j] = (uint16_t)j;
+        j = from;
+      }
+      setNode(f, kid0 + j, held);
+      order[j] = (uint16_t)j;
+    }
+  }
+  {
+    std::vector<Sfn, LentAlloc<Sfn>> sfns(n);
+    for (int i = 0; i < n; i++) {
+      Node k = nodeAt(f, kid0 + i);
+      const std::string name = nameOf(f, k);
+      if (makeShort(name, sfns.data(), i, k.sfn)) {
+        const size_t len = toUtf16(name).size();
+        k.lfn = len <= 255 ? (uint8_t)((len + 12) / 13) : 0;
+      }
+      memcpy(sfns[i].data(), k.sfn, 11);
+      setNode(f, kid0 + i, k);
+    }
+  }
+  Node p = nodeAt(f, di);
+  p.kid0 = kid0;
+  p.nkids = (uint16_t)n;
+  setNode(f, di, p);
+  for (int i = kid0; i < kid0 + n; i++)
+    if (nodeAt(f, i).dir) scanDir(f, i, depth + 1);
 }
 
 uint32_t dirEntries(const PicoFolder &f, const Node &d) {
   uint32_t n = d.parent < 0 ? 1 : 2;                 // the volume label, or "." and ".."
-  for (int k : d.kids)
-    if (!f.nodes[k].skipped) n += 1 + f.nodes[k].lfn;
+  for (int k = d.kid0; k < d.kid0 + d.nkids; k++) {
+    const Node c = nodeAt(f, k);
+    if (!c.skipped) n += 1 + c.lfn;
+  }
   return n;
 }
 
@@ -294,20 +541,61 @@ void floppyGeometry(PicoFolder &f) {
   f.maxClus = (f.total - f.data0) / f.spc + 2;
 }
 
+// The FAT's byte at off. On the RP2350 through a one-sector cache that every folder shares, as
+// building the FAT sets every entry one by one; fatSync writes it back before the guest reads
+// the FAT, and fatDrop forgets it.
+#if defined(PICO386_LOWMEM)
+struct FatCache {
+  PicoFolder *f = nullptr;
+  uint32_t sec = 0;
+  bool dirty = false;
+  uint8_t b[512];
+};
+FatCache s_fc;
+
+void fatSync(PicoFolder &f) {
+  if (s_fc.f != &f || !s_fc.dirty) return;
+  f.fat.write((size_t)s_fc.sec * 512, s_fc.b, 512);
+  s_fc.dirty = false;
+}
+
+void fatDrop(PicoFolder &f) { if (s_fc.f == &f) s_fc.f = nullptr; }
+
+uint8_t *fatByte(PicoFolder &f, uint32_t off, bool write) {
+  const uint32_t sec = off / 512;
+  if (s_fc.f != &f || s_fc.sec != sec) {
+    if (s_fc.f) fatSync(*s_fc.f);
+    s_fc.f = &f;
+    s_fc.sec = sec;
+    s_fc.dirty = false;
+    f.fat.read((size_t)sec * 512, s_fc.b, 512);
+  }
+  s_fc.dirty |= write;
+  return s_fc.b + off % 512;
+}
+#else
+void fatSync(PicoFolder &) {}
+void fatDrop(PicoFolder &) {}
+uint8_t *fatByte(PicoFolder &f, uint32_t off, bool) { return f.fat.v.data() + off; }
+#endif
+
 // FAT entries: 16 bits, or 12 on a floppy. An end-of-chain mark reads as >= 0xFFF8 either way.
-uint32_t fatGet(const PicoFolder &f, uint32_t c) {
-  if (!f.floppy) return get16(f.fat.data() + 2 * c);
-  const uint32_t v = get16(f.fat.data() + c * 3 / 2);
+uint32_t fatGet(PicoFolder &f, uint32_t c) {
+  if (!f.floppy) return get16(fatByte(f, 2 * c, false));
+  const uint32_t lo = *fatByte(f, c * 3 / 2, false), hi = *fatByte(f, c * 3 / 2 + 1, false);
+  const uint32_t v = lo | hi << 8;
   const uint32_t e = c & 1 ? v >> 4 : v & 0xFFF;
   return e >= 0xFF8 ? 0xF000 | e : e;
 }
 
 void fatSet(PicoFolder &f, uint32_t c, uint32_t v) {
-  if (!f.floppy) { put16(f.fat.data() + 2 * c, v); return; }
-  uint8_t *p = f.fat.data() + c * 3 / 2;
+  if (!f.floppy) { put16(fatByte(f, 2 * c, true), v); return; }
+  const uint32_t off = c * 3 / 2;
   v &= 0xFFF;
-  if (c & 1) { p[0] = (uint8_t)((p[0] & 0x0F) | (v << 4)); p[1] = (uint8_t)(v >> 4); }
-  else { p[0] = (uint8_t)v; p[1] = (uint8_t)((p[1] & 0xF0) | (v >> 8)); }
+  uint8_t *p = fatByte(f, off, true);
+  *p = c & 1 ? (uint8_t)((*p & 0x0F) | (v << 4)) : (uint8_t)v;
+  p = fatByte(f, off + 1, true);
+  *p = c & 1 ? (uint8_t)(v >> 4) : (uint8_t)((*p & 0xF0) | (v >> 8));
 }
 
 uint32_t clustersNeeded(const PicoFolder &f, const Node &n) {
@@ -329,19 +617,18 @@ void putEntry(uint8_t *e, const uint8_t *sfn, uint8_t attr, uint32_t first, uint
   put32(e + 28, size);
 }
 
-// A folder's entries: long-name entries before each short one, as VFAT has them.
-void fillDir(PicoFolder &f, const Node &d, uint8_t *p, uint32_t cap) {
+// A folder's entries, into st from base: long-name entries before each short one, as VFAT has them.
+void fillDir(PicoFolder &f, const Node &d, Store &st, size_t base, uint32_t cap) {
   uint32_t i = 0;
-  auto next = [&]() -> uint8_t * { return i < cap ? p + 32 * i++ : nullptr; };
-  for (int k : d.kids) {
-    const Node &n = f.nodes[k];
+  uint8_t e[32];
+  auto put = [&]() { if (i < cap) st.write(base + 32 * (size_t)i++, e, 32); return i < cap; };
+  for (int k = d.kid0; k < d.kid0 + d.nkids; k++) {
+    const Node n = nodeAt(f, k);
     if (n.skipped) continue;
     if (n.lfn) {
-      const std::vector<uint16_t> u = toUtf16(n.name);
+      const std::vector<uint16_t> u = toUtf16(nameOf(f, n));
       const uint8_t sum = sfnSum(n.sfn);
       for (int s = n.lfn; s >= 1; s--) {
-        uint8_t *e = next();
-        if (!e) return;
         memset(e, 0, 32);
         e[0] = (uint8_t)(s | (s == n.lfn ? 0x40 : 0));
         e[11] = 0x0F;
@@ -350,20 +637,34 @@ void fillDir(PicoFolder &f, const Node &d, uint8_t *p, uint32_t cap) {
           const size_t j = (size_t)(s - 1) * 13 + c;
           put16(e + kLfnOff[c], j < u.size() ? u[j] : j == u.size() ? 0 : 0xFFFF);
         }
+        if (!put()) return;
       }
     }
-    uint8_t *e = next();
-    if (!e) return;
-    putEntry(e, n.sfn, n.dir ? 0x10 : 0x20, n.first, n.size, n.date, n.time);
+    putEntry(e, n.sfn, n.dir ? 0x10 : 0x20, entryFirst(n), n.size, n.date, n.time);
+    if (!put()) return;
   }
 }
 
-int ownerOf(const PicoFolder &f, uint32_t c) {
-  auto it = std::upper_bound(f.byFirst.begin(), f.byFirst.end(), std::make_pair(c, 0x7FFFFFFF));
-  if (it == f.byFirst.begin()) return -1;
-  --it;
-  const Node &n = f.nodes[it->second];
-  return c < n.first + n.nclus ? it->second : -1;
+// The node whose clusters hold c, or -1; *out gets a copy of it. Clusters were handed out in node
+// order, so it is the last node with clusters that starts at or before c. The last answer is
+// kept, as the guest reads a file's clusters in a row.
+int ownerOf(PicoFolder &f, uint32_t c, Node *out) {
+  if (f.own < 0 || c < f.ownNode.first || c >= f.ownNode.first + f.ownNode.nclus) {
+    uint32_t lo = 1, hi = f.nnodes;                  // the first node starting after c
+    while (lo < hi) {
+      const uint32_t mid = (lo + hi) / 2;
+      if (nodeAt(f, (int)mid).first <= c) lo = mid + 1;
+      else hi = mid;
+    }
+    int o = (int)lo - 1;
+    Node n;
+    while (o >= 1 && (n = nodeAt(f, o)).nclus == 0) o--;
+    if (o < 1 || c >= n.first + n.nclus) return -1;
+    f.own = o;
+    f.ownNode = n;
+  }
+  if (out) *out = f.ownNode;
+  return f.own;
 }
 
 void closeCur(PicoFolder &f) {
@@ -418,27 +719,53 @@ void bootSector(const PicoFolder &f, uint8_t *s) {
   s[510] = 0x55; s[511] = 0xAA;
 }
 
-// len bytes of cluster c from off: the scratch copy, a folder's RAM, the file, or zeros.
+// The scratch file's slot that holds cluster c, or -1. On the RP2350 a table in the PSRAM, made
+// at the first write: a map entry per written cluster would soon run the heap out.
+long spillSlot(PicoFolder &f, uint32_t c) {
+  if (!f.nspill) return -1;
+#if defined(PICO386_LOWMEM)
+  uint16_t v = 0;
+  f.spillMap.read((size_t)c * 2, &v, 2);
+  return v ? (long)v - 1 : -1;
+#else
+  auto it = f.spill.find(c);
+  return it == f.spill.end() ? -1 : (long)it->second;
+#endif
+}
+
+bool spillAdd(PicoFolder &f, uint32_t c, uint32_t slot) {
+#if defined(PICO386_LOWMEM)
+  if (!f.spillMap.size() && !f.spillMap.alloc((size_t)f.maxClus * 2)) return false;
+  const uint16_t v = (uint16_t)(slot + 1);
+  f.spillMap.write((size_t)c * 2, &v, 2);
+#else
+  f.spill.emplace(c, slot);
+#endif
+  f.nspill++;
+  return true;
+}
+
+// len bytes of cluster c from off: the scratch copy, a folder's clusters, the file, or zeros.
 void readCluster(PicoFolder &f, uint32_t c, uint32_t off, uint8_t *buf, uint32_t len) {
-  auto sp = f.spill.find(c);
-  if (sp != f.spill.end()) {
-    fseek(f.spillF, (long)((uint64_t)sp->second * f.cb + off), SEEK_SET);
+  const long sp = spillSlot(f, c);
+  if (sp >= 0) {
+    fseek(f.spillF, (long)((uint64_t)sp * f.cb + off), SEEK_SET);
     if (fread(buf, 1, len, f.spillF) != len) memset(buf, 0, len);
     return;
   }
   memset(buf, 0, len);
-  const int o = ownerOf(f, c);
+  Node n;
+  const int o = ownerOf(f, c, &n);
   if (o < 0) return;
-  const Node &n = f.nodes[o];
   const uint64_t at = (uint64_t)(c - n.first) * f.cb + off;
   if (n.dir) {
-    memcpy(buf, n.dirBuf.data() + at, len);
+    f.dirs.read(n.dirOff + (size_t)at, buf, len);
     return;
   }
   if (at >= n.size) return;
   if (f.curNode != o) {
     closeCur(f);
-    f.cur = fopen(n.host.c_str(), "rb");
+    f.cur = fopen(hostOf(f, o).c_str(), "rb");
     if (!f.cur) return;
     f.curNode = o;
   }
@@ -454,10 +781,11 @@ void readSector(PicoFolder &f, uint32_t s, uint8_t *buf) {
   if (s == f.boot) { bootSector(f, buf); return; }
   if (s == 0) { mbrSector(f, buf); return; }
   if (s >= f.fat0 && s < f.root0) {
-    memcpy(buf, f.fat.data() + (size_t)((s - f.fat0) % f.fatSz) * 512, 512);
+    fatSync(f);
+    f.fat.read((size_t)((s - f.fat0) % f.fatSz) * 512, buf, 512);
     return;
   }
-  if (s >= f.root0 && s < f.data0) { memcpy(buf, f.rootDir.data() + (size_t)(s - f.root0) * 512, 512); return; }
+  if (s >= f.root0 && s < f.data0) { f.rootDir.read((size_t)(s - f.root0) * 512, buf, 512); return; }
   if (s >= f.data0) {
     const uint32_t rel = s - f.data0, c = 2 + rel / f.spc;
     if (c < f.maxClus) readCluster(f, c, rel % f.spc * 512, buf, 512);
@@ -468,54 +796,59 @@ void writeSector(PicoFolder &f, uint32_t s, const uint8_t *buf) {
   f.dirty = true;
   if (s >= f.fat0 && s < f.root0) {
     // the second FAT is a copy DOS keeps in step; the first one is the one that counts
-    if (s < f.fat0 + f.fatSz) memcpy(f.fat.data() + (size_t)(s - f.fat0) * 512, buf, 512);
+    if (s < f.fat0 + f.fatSz) {
+      fatSync(f);
+      fatDrop(f);
+      f.fat.write((size_t)(s - f.fat0) * 512, buf, 512);
+    }
     return;
   }
-  if (s >= f.root0 && s < f.data0) { memcpy(f.rootDir.data() + (size_t)(s - f.root0) * 512, buf, 512); return; }
+  if (s >= f.root0 && s < f.data0) { f.rootDir.write((size_t)(s - f.root0) * 512, buf, 512); return; }
   if (s >= f.data0) {
     const uint32_t rel = s - f.data0, c = 2 + rel / f.spc, off = rel % f.spc * 512;
     if (c >= f.maxClus) return;
-    auto sp = f.spill.find(c);
-    if (sp == f.spill.end()) {
-      const int o = ownerOf(f, c);
-      if (o >= 0 && f.nodes[o].dir) {
-        Node &n = f.nodes[o];
-        memcpy(n.dirBuf.data() + (size_t)(c - n.first) * f.cb + off, buf, 512);
+    long sp = spillSlot(f, c);
+    if (sp < 0) {
+      Node n;
+      if (ownerOf(f, c, &n) >= 0 && n.dir) {
+        f.dirs.write(n.dirOff + (size_t)(c - n.first) * f.cb + off, buf, 512);
         return;
       }
-      // the first write to a cluster: its scratch copy starts as what the cluster holds now
+      // the first write to a cluster: its scratch copy starts as what the cluster holds now,
+      // copied a sector at a time (a cluster is up to 32 KB)
       if (!f.spillF) f.spillF = fopen(f.spillPath.c_str(), "w+b");
-      if (!f.spillF) {
-        if (!f.spillFailed) hal_log("folder: cannot create %s, writes are lost", f.spillPath.c_str());
+      if (f.spillF) {
+        sp = (long)f.nspill;
+        uint8_t tmp[512];
+        for (uint32_t k = 0; k < f.cb; k += 512) {
+          readCluster(f, c, k, tmp, 512);
+          fseek(f.spillF, (long)((uint64_t)sp * f.cb + k), SEEK_SET);
+          fwrite(tmp, 1, 512, f.spillF);
+        }
+      }
+      if (!f.spillF || !spillAdd(f, c, (uint32_t)sp)) {
+        if (!f.spillFailed) hal_log("folder: cannot keep the writes to %s, they are lost", f.root.c_str());
         f.spillFailed = true;
         return;
       }
-      std::vector<uint8_t> tmp(f.cb);
-      readCluster(f, c, 0, tmp.data(), f.cb);
-      const uint32_t slot = (uint32_t)f.spill.size();
-      fseek(f.spillF, (long)((uint64_t)slot * f.cb), SEEK_SET);
-      fwrite(tmp.data(), 1, f.cb, f.spillF);
-      sp = f.spill.emplace(c, slot).first;
     }
-    fseek(f.spillF, (long)((uint64_t)sp->second * f.cb + off), SEEK_SET);
+    fseek(f.spillF, (long)((uint64_t)sp * f.cb + off), SEEK_SET);
     fwrite(buf, 1, 512, f.spillF);
     return;
   }
+#if defined(PICO386_LOWMEM)
+  // a few at most, as each is 512 bytes of heap; past that the disk counts as reformatted (the
+  // commit refuses it), as that is what writes all over these sectors
+  if (!f.extra.count(s) && f.extra.size() >= 4) {
+    if (!f.extraFull) hal_log("folder: sector %u written outside the FAT, ignored", (unsigned)s);
+    f.extraFull = true;
+    return;
+  }
+#endif
   f.extra[s].assign(buf, buf + 512);
 }
 
 // ---- power-off: the guest's tree back onto the card ----------------------------------------------
-
-std::vector<uint32_t> chainOf(const PicoFolder &f, uint32_t c) {
-  std::vector<uint32_t> chain;
-  while (c >= 2 && c < f.maxClus && chain.size() < f.maxClus) {
-    chain.push_back(c);
-    const uint32_t next = fatGet(f, c);
-    if (next >= 0xFFF8) break;
-    c = next;
-  }
-  return chain;
-}
 
 bool goodName(const std::string &n) {
   if (n.empty() || n == "." || n == "..") return false;
@@ -524,83 +857,177 @@ bool goodName(const std::string &n) {
   return true;
 }
 
-void parseEntries(const uint8_t *p, size_t count, std::vector<Final> &out) {
-  std::vector<uint16_t> lname;
+// Calls fn with each 32-byte entry of a folder, the root directory when first is 0, a sector at a
+// time, until fn returns false.
+template <class Fn> void eachEntry(PicoFolder &f, uint32_t first, Fn fn) {
+  uint8_t sec[512];
+  if (!first) {
+    for (size_t s = 0; s < f.rootDir.size(); s += 512) {
+      f.rootDir.read(s, sec, 512);
+      for (int i = 0; i < 16; i++)
+        if (!fn(sec + 32 * i)) return;
+    }
+    return;
+  }
+  for (uint32_t c = first, steps = 0; c >= 2 && c < f.maxClus && steps < f.maxClus; steps++) {
+    for (uint32_t s = 0; s < f.spc; s++) {
+      readCluster(f, c, s * 512, sec, 512);
+      for (int i = 0; i < 16; i++)
+        if (!fn(sec + 32 * i)) return;
+    }
+    c = fatGet(f, c);
+  }
+}
+
+// Turns a folder's entries back into names, long ones included.
+struct EntryParser {
+  uint16_t lname[20 * 13];
   int lnext = 0;
   uint8_t lsum = 0;
   bool lvalid = false;
-  for (size_t i = 0; i < count; i++) {
-    const uint8_t *e = p + 32 * i;
-    if (e[0] == 0) break;
-    if (e[0] == 0xE5) { lvalid = false; continue; }
+
+  // 0 at the end of the folder; 2 when e is a file or folder (fn and name set); else 1.
+  int feed(const uint8_t *e, Final &fn, std::string &name) {
+    if (e[0] == 0) return 0;
+    if (e[0] == 0xE5) { lvalid = false; return 1; }
     if (e[11] == 0x0F) {
       const int seq = e[0] & 0x1F;
       if (e[0] & 0x40) {
         lvalid = seq >= 1 && seq <= 20;
         lnext = seq;
         lsum = e[13];
-        lname.assign((size_t)seq * 13, 0);
+        if (lvalid) memset(lname, 0, (size_t)seq * 13 * 2);
       }
-      if (!lvalid || seq != lnext || e[13] != lsum) { lvalid = false; continue; }
-      for (int c = 0; c < 13; c++) lname[(size_t)(seq - 1) * 13 + c] = (uint16_t)get16(e + kLfnOff[c]);
+      if (!lvalid || seq != lnext || e[13] != lsum) { lvalid = false; return 1; }
+      for (int c = 0; c < 13; c++) lname[(seq - 1) * 13 + c] = (uint16_t)get16(e + kLfnOff[c]);
       lnext--;
-      continue;
+      return 1;
     }
     const bool hadLong = lvalid && lnext == 0 && sfnSum(e) == lsum;
     lvalid = false;
-    if (e[11] & 0x08 || e[0] == '.') continue;      // the volume label, "." and ".."
-    Final fn;
+    if (e[11] & 0x08 || e[0] == '.') return 1;       // the volume label, "." and ".."
+    fn = Final();
     memcpy(fn.sfn, e, 11);
     if (fn.sfn[0] == 0x05) fn.sfn[0] = 0xE5;
+    name.clear();
     if (hadLong) {
       std::vector<uint16_t> u;
-      for (uint16_t c : lname) { if (!c) break; u.push_back(c); }
-      fn.name = toUtf8(u);
+      for (int i = 0; i < 20 * 13 && lname[i]; i++) u.push_back(lname[i]);
+      name = toUtf8(u);
     }
-    if (!goodName(fn.name)) fn.name = shortText(fn.sfn);
-    if (!goodName(fn.name)) continue;
+    if (!goodName(name)) name = shortText(fn.sfn);
+    if (!goodName(name)) return 1;
     fn.dir = (e[11] & 0x10) != 0;
     fn.first = get16(e + 26);
     fn.size = fn.dir ? 0 : get32(e + 28);
-    out.push_back(std::move(fn));
+    return 2;
   }
+};
+
+// Whether a folder entry is one to read too: not too deep, and not one already read (a loop).
+// The folders read so far are a list of first clusters, as a bit per cluster is 8 KB.
+using SeenDirs = std::vector<uint32_t, LentAlloc<uint32_t>>;
+bool opens(const PicoFolder &f, const Final &k, int depth, SeenDirs &seenDir) {
+  if (!k.dir || depth >= kMaxDepth || k.first < 2 || k.first >= f.maxClus) return false;
+  if (std::find(seenDir.begin(), seenDir.end(), k.first) != seenDir.end()) return false;
+  seenDir.push_back(k.first);
+  return true;
 }
 
-void parseTree(PicoFolder &f, Final &d, const std::vector<uint8_t> &bytes, int depth,
-               std::vector<bool> &seenDir) {
-  parseEntries(bytes.data(), bytes.size() / 32, d.kids);
-  for (Final &k : d.kids) {
-    k.chain = chainOf(f, k.first);
-    if (!k.dir || depth >= kMaxDepth || k.chain.empty() || seenDir[k.chain[0]]) continue;
-    seenDir[k.chain[0]] = true;
-    std::vector<uint8_t> sub(k.chain.size() * f.cb);
-    for (size_t i = 0; i < k.chain.size(); i++) readCluster(f, k.chain[i], 0, sub.data() + i * f.cb, f.cb);
-    parseTree(f, k, sub, depth + 1, seenDir);
-  }
-}
-
-// First pass: a file or folder whose first cluster is still the one the scan gave it is that
-// node, wherever it is now (renamed, moved).
-void matchByCluster(PicoFolder &f, Final &d, std::vector<bool> &claimed) {
-  for (Final &k : d.kids) {
-    if (k.first) {
-      const int o = ownerOf(f, k.first);
-      if (o > 0 && f.nodes[o].first == k.first && f.nodes[o].dir == k.dir && !claimed[o]) {
-        k.orig = o;
-        claimed[o] = true;
-      }
+// The guest's tree, breadth first: list[0] is the root, and each folder's entries follow as one
+// run. A first pass counts the entries and their names' bytes, so both are sized once (a vector
+// that grows holds its old and new blocks at once).
+void readTree(PicoFolder &f, FinalList &list, NamePool &names) {
+  size_t count = 1, bytes = 1;
+  {
+    SeenDirs seenDir;
+    std::vector<uint32_t> queue(1, 0);               // first cluster | depth << 24
+    for (size_t q = 0; q < queue.size(); q++) {
+      const int depth = (int)(queue[q] >> 24);
+      EntryParser p;
+      Final k;
+      std::string name;
+      eachEntry(f, queue[q] & 0xFFFFFF, [&](const uint8_t *e) {
+        const int r = p.feed(e, k, name);
+        if (r == 2) {
+          count++;
+          bytes += name.size() + 1;
+          if (opens(f, k, depth + 1, seenDir)) queue.push_back(k.first | (uint32_t)(depth + 1) << 24);
+        }
+        return r != 0;
+      });
     }
-    if (k.dir) matchByCluster(f, k, claimed);
+  }
+  list.reserve(count);
+  names.reserve(bytes);
+  SeenDirs seenDir;
+  Final top;
+  top.dir = top.open = true;
+  top.orig = 0;
+  list.push_back(top);
+  names.push_back(0);
+  for (size_t i = 0; i < list.size(); i++) {
+    if (!list[i].open) continue;
+    list[i].kid0 = (int)list.size();
+    EntryParser p;
+    Final k;
+    std::string name;
+    const int depth = list[i].depth;
+    eachEntry(f, list[i].first, [&](const uint8_t *e) {
+      const int r = p.feed(e, k, name);
+      if (r == 2 && list.size() < list.capacity()) {
+        k.parent = (int)i;
+        k.depth = (uint8_t)(depth + 1);
+        k.open = opens(f, k, depth + 1, seenDir);
+        k.name = (uint32_t)names.size();
+        names.insert(names.end(), name.c_str(), name.c_str() + name.size() + 1);
+        list.push_back(k);
+      }
+      return r != 0;
+    });
+    list[i].nkids = (int)list.size() - list[i].kid0;
   }
 }
 
-// Second pass: a file saved anew (new clusters) is still the one with its short name there.
-void matchByName(PicoFolder &f, Final &d, int dOrig, std::vector<bool> &claimed) {
-  for (Final &k : d.kids) {
+// Whether a file the guest left is still exactly the one the scan found: the same clusters, in a
+// row as the scan laid them out, none of them written.
+bool unchanged(PicoFolder &f, const Final &k) {
+  if (k.orig < 0) return false;
+  const Node o = nodeAt(f, k.orig);
+  if (k.first != entryFirst(o) || k.size != o.size) return false;
+  uint32_t n = 0;
+  for (uint32_t c = k.first; c >= 2 && c < f.maxClus && n < f.maxClus;) {
+    if (c != k.first + n || spillSlot(f, c) >= 0) return false;
+    n++;
+    const uint32_t next = fatGet(f, c);
+    if (next >= 0xFFF8) break;
+    c = next;
+  }
+  return n == o.nclus;
+}
+
+// Matches what the guest left to what the scan found. First: a file or folder whose first cluster
+// is still the one the scan gave it is that node, wherever it is now (renamed, moved). Then a file
+// saved anew (new clusters) is still the one with its short name in the same folder. Breadth
+// first, so a folder is matched before its entries.
+void matchTree(PicoFolder &f, FinalList &list, const NamePool &names, std::vector<bool> &claimed) {
+  for (size_t i = 1; i < list.size(); i++) {
+    Final &k = list[i];
+    Node n;
+    if (k.first && ownerOf(f, k.first, &n) > 0 && n.first == k.first && n.dir == k.dir && !claimed[f.own]) {
+      k.orig = f.own;
+      claimed[f.own] = true;
+    }
+  }
+  for (size_t i = 1; i < list.size(); i++) {
+    Final &k = list[i];
+    const int dOrig = list[k.parent].orig;
     if (k.orig < 0 && dOrig >= 0) {
-      for (int n : f.nodes[dOrig].kids) {
-        const Node &o = f.nodes[n];
-        if (!claimed[n] && !o.skipped && o.dir == k.dir && !memcmp(o.sfn, k.sfn, 11)) {
+      const Node dn = nodeAt(f, dOrig);
+      for (int n = dn.kid0; n < dn.kid0 + dn.nkids; n++) {
+        if (claimed[n]) continue;
+        const Node o = nodeAt(f, n);
+        if (!o.skipped && o.dir == k.dir && !memcmp(o.sfn, k.sfn, 11)) {
           k.orig = n;
           claimed[n] = true;
           break;
@@ -608,35 +1035,33 @@ void matchByName(PicoFolder &f, Final &d, int dOrig, std::vector<bool> &claimed)
       }
     }
     // the host name is kept unless the guest gave it another one
-    if (k.orig >= 0 && !memcmp(f.nodes[k.orig].sfn, k.sfn, 11) && k.name == shortText(k.sfn))
-      k.name = f.nodes[k.orig].name;
-    if (!k.dir) {
-      bool same = k.orig >= 0 && k.first == f.nodes[k.orig].first && k.size == f.nodes[k.orig].size &&
-                  k.chain.size() == f.nodes[k.orig].nclus;
-      for (size_t i = 0; same && i < k.chain.size(); i++)
-        same = k.chain[i] == k.first + i && !f.spill.count(k.chain[i]);
-      k.changed = !same;
-    }
-    if (k.dir) matchByName(f, k, k.orig, claimed);
+    if (k.orig >= 0 && !memcmp(nodeAt(f, k.orig).sfn, k.sfn, 11) && names.data() + k.name == shortText(k.sfn))
+      k.hostName = true;
+    if (!k.dir) k.changed = !unchanged(f, k);
   }
 }
 
 int s_stageSeq;
 
-void stageFiles(PicoFolder &f, Final &d, const std::string &staging) {
-  std::vector<uint8_t> buf(f.cb);
-  for (Final &k : d.kids) {
-    if (k.dir) { stageFiles(f, k, staging); continue; }
-    if (!k.changed) continue;
-    k.stage = staging + "/" + std::to_string(s_stageSeq++);
-    FILE *o = fopen(k.stage.c_str(), "wb");
-    if (!o) { hal_log("folder: cannot write %s", k.stage.c_str()); k.stage.clear(); continue; }
+std::string stagePath(const std::string &staging, int n) { return staging + "/" + std::to_string(n); }
+
+void stageFiles(PicoFolder &f, FinalList &list, const std::string &staging) {
+  uint8_t buf[512];
+  for (Final &k : list) {
+    if (k.dir || !k.changed) continue;
+    k.stage = s_stageSeq++;
+    const std::string path = stagePath(staging, k.stage);
+    FILE *o = fopen(path.c_str(), "wb");
+    if (!o) { hal_log("folder: cannot write %s", path.c_str()); k.stage = -1; continue; }
     uint32_t left = k.size;
-    for (size_t i = 0; i < k.chain.size() && left; i++) {
-      const uint32_t n = left < f.cb ? left : f.cb;
-      readCluster(f, k.chain[i], 0, buf.data(), n);
-      fwrite(buf.data(), 1, n, o);
-      left -= n;
+    for (uint32_t c = k.first, steps = 0; left && c >= 2 && c < f.maxClus && steps < f.maxClus; steps++) {
+      for (uint32_t s = 0; s < f.spc && left; s++) {
+        const uint32_t n = left < 512 ? left : 512;
+        readCluster(f, c, s * 512, buf, n);
+        fwrite(buf, 1, n, o);
+        left -= n;
+      }
+      c = fatGet(f, c);
     }
     fclose(o);
   }
@@ -644,77 +1069,101 @@ void stageFiles(PicoFolder &f, Final &d, const std::string &staging) {
 
 bool samePath(const std::string &a, const std::string &b) { return !strcasecmp(a.c_str(), b.c_str()); }
 
-// Renames a folder and keeps every path below it up to date.
-void moveTree(std::vector<std::string> &cur, const std::string &from, const std::string &to) {
-  if (rename(from.c_str(), to.c_str()) != 0) {
-    hal_log("folder: cannot move %s to %s", from.c_str(), to.c_str());
-    return;
-  }
-  for (std::string &p : cur)
+// Renames done so far (old path, new path), so a node's path now can be worked out from the one
+// the scan saw (curOf), instead of keeping every path.
+using Moves = std::vector<std::pair<std::string, std::string>>;
+
+std::string curOf(const PicoFolder &f, const Moves &moves, int i) {
+  std::string p = hostOf(f, i);
+  for (const auto &m : moves) {
+    const std::string &from = m.first;
     if (p == from || (p.size() > from.size() && !p.compare(0, from.size(), from) && p[from.size()] == '/'))
-      p = to + p.substr(from.size());
+      p = m.second + p.substr(from.size());
+  }
+  return p;
 }
 
-void applyTree(PicoFolder &f, const Final &d, const std::string &dpath, std::vector<std::string> &cur) {
-  for (const Final &k : d.kids) {
-    const std::string target = dpath + "/" + k.name;
+void moveTo(Moves &moves, const std::string &from, const std::string &to) {
+  if (rename(from.c_str(), to.c_str()) != 0) hal_log("folder: cannot move %s to %s", from.c_str(), to.c_str());
+  else moves.emplace_back(from, to);
+}
+
+std::string targetOf(const PicoFolder &f, const FinalList &list, const NamePool &names, int i) {
+  const Final &k = list[i];
+  if (k.parent < 0) return f.root;
+  return targetOf(f, list, names, k.parent) + "/" +
+         (k.hostName ? nameOf(f, nodeAt(f, k.orig)) : std::string(names.data() + k.name));
+}
+
+// Folders made or moved, files moved or put in place; parents before their entries.
+void applyTree(PicoFolder &f, const FinalList &list, const NamePool &names, const std::string &staging,
+               Moves &moves) {
+  for (size_t i = 1; i < list.size(); i++) {
+    const Final &k = list[i];
+    const std::string target = targetOf(f, list, names, (int)i);
     if (k.dir) {
-      if (k.orig >= 0 && !samePath(cur[k.orig], target)) moveTree(cur, cur[k.orig], target);
-      else if (k.orig < 0) makeDirs(target);
-      applyTree(f, k, target, cur);
-    } else if (!k.changed) {
-      if (!samePath(cur[k.orig], target)) {
-        if (rename(cur[k.orig].c_str(), target.c_str()) != 0)
-          hal_log("folder: cannot move %s to %s", cur[k.orig].c_str(), target.c_str());
-        else cur[k.orig] = target;
+      if (k.orig < 0) makeDirs(target);
+      else {
+        const std::string cur = curOf(f, moves, k.orig);
+        if (!samePath(cur, target)) moveTo(moves, cur, target);
       }
-    } else if (!k.stage.empty()) {
-      if (k.orig >= 0) remove(cur[k.orig].c_str());
-      if (rename(k.stage.c_str(), target.c_str()) != 0)
-        hal_log("folder: cannot write %s (kept as %s)", target.c_str(), k.stage.c_str());
+    } else if (!k.changed) {
+      const std::string cur = curOf(f, moves, k.orig);
+      if (!samePath(cur, target)) moveTo(moves, cur, target);
+    } else if (k.stage >= 0) {
+      if (k.orig >= 0) remove(curOf(f, moves, k.orig).c_str());
+      const std::string stage = stagePath(staging, k.stage);
+      if (rename(stage.c_str(), target.c_str()) != 0)
+        hal_log("folder: cannot write %s (kept as %s)", target.c_str(), stage.c_str());
     }
   }
 }
 
 void commit(PicoFolder &f) {
-  if (f.extra.count(0) || f.extra.count(f.boot)) {
+  if (f.extra.count(0) || f.extra.count(f.boot) || f.extraFull) {
     hal_log("folder: %s was repartitioned or formatted; its changes are not applied", f.root.c_str());
     return;
   }
-  Final top;
-  std::vector<bool> seenDir(f.maxClus, false), claimed(f.nodes.size(), false);
-  parseTree(f, top, f.rootDir, 0, seenDir);
-  matchByCluster(f, top, claimed);
-  matchByName(f, top, 0, claimed);
+  FinalList list;
+  NamePool names;
+  readTree(f, list, names);
+  std::vector<bool> claimed(f.nnodes, false);
+  matchTree(f, list, names, claimed);
 
   // 1. New and changed files are written aside first, while every old file is still in place.
   const std::string staging = f.root + "/.pico386-commit";
   makeDirs(staging);
-  stageFiles(f, top, staging);
+  stageFiles(f, list, staging);
   closeCur(f);
 
   // 2. Files the guest deleted go.
   int removed = 0;
-  for (size_t i = 1; i < f.nodes.size(); i++)
-    if (!claimed[i] && !f.nodes[i].skipped && !f.nodes[i].dir && remove(f.nodes[i].host.c_str()) == 0) removed++;
+  for (uint32_t i = 1; i < f.nnodes; i++) {
+    if (claimed[i]) continue;
+    const Node n = nodeAt(f, (int)i);
+    if (!n.skipped && !n.dir && remove(hostOf(f, (int)i).c_str()) == 0) removed++;
+  }
 
   // 3. Folders made or moved, files moved or put in place.
-  std::vector<std::string> cur(f.nodes.size());
-  for (size_t i = 0; i < f.nodes.size(); i++) cur[i] = f.nodes[i].host;
-  applyTree(f, top, f.root, cur);
+  Moves moves;
+  applyTree(f, list, names, staging, moves);
 
   // 4. Folders the guest deleted, deepest first (one that still holds files left out stays).
-  std::vector<int> gone;
-  for (size_t i = 1; i < f.nodes.size(); i++)
-    if (!claimed[i] && !f.nodes[i].skipped && f.nodes[i].dir) gone.push_back((int)i);
-  std::sort(gone.begin(), gone.end(), [&cur](int a, int b) { return cur[a].size() > cur[b].size(); });
-  for (int i : gone) rmdir(cur[i].c_str());
+  std::vector<std::string> gone;
+  for (uint32_t i = 1; i < f.nnodes; i++) {
+    if (claimed[i]) continue;
+    const Node n = nodeAt(f, (int)i);
+    if (!n.skipped && n.dir) gone.push_back(curOf(f, moves, (int)i));
+  }
+  std::sort(gone.begin(), gone.end(), [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
+  for (const std::string &d : gone) rmdir(d.c_str());
   rmdir(staging.c_str());
   hal_log("folder: %s updated (%d files removed)", f.root.c_str(), removed);
 }
 
 void freeFolder(PicoFolder *f) {
   closeCur(*f);
+  fatDrop(*f);
   if (f->spillF) fclose(f->spillF);
   if (!f->spillPath.empty()) remove(f->spillPath.c_str());
   delete f;
@@ -726,7 +1175,134 @@ void freeFolder(PicoFolder *f) {
 
 extern "C" int pfolder_is_dir(const char *path) { return path && path[0] && isDir(path); }
 
-static PicoFolder *openFolder(const char *dir, bool floppy) {
+namespace {
+
+// Builds the disk; false when there is no memory for it, or a floppy's files do not fit.
+bool build(PicoFolder &f, bool floppy) {
+  if (floppy) floppyGeometry(f);
+  f.serial = hal_micros() ^ 0x50433836;
+
+  // the volume label: the folder's name
+  const std::string base = f.root.substr(f.root.find_last_of('/') + 1);
+  f.label = "           ";
+  for (size_t i = 0, j = 0; i < base.size() && j < 11; i++) {
+    const char u = (char)toupper((unsigned char)base[i]);
+    if (sfnChar((unsigned char)u) || u == ' ') f.label[j++] = u;
+  }
+  if (f.label == "           ") f.label = "SD FOLDER  ";
+
+  // The RP2350 keeps the nodes and names in the PSRAM, sized by a first walk; elsewhere they grow.
+#if defined(PICO386_LOWMEM)
+  {
+    size_t count = 1, bytes = 1;
+    countTree(f.root, 0, count, bytes);
+    if (!f.nodeStore.alloc(count * sizeof(Node)) || !f.nameStore.alloc(bytes)) return false;
+    f.nodeCap = count;
+  }
+#endif
+  Node top;
+  top.dir = true;
+  if (!addName(f, "", top.name)) return false;
+  setNode(f, 0, top);
+  f.nnodes = 1;
+  scanDir(f, 0, 0);
+  const int nn = (int)f.nnodes;
+
+  // the root directory has room for 511 entries next to the label
+  uint32_t rootUsed = 1;
+  top = nodeAt(f, 0);
+  for (int k = top.kid0; k < top.kid0 + top.nkids; k++) {
+    Node n = nodeAt(f, k);
+    if (rootUsed + 1 + n.lfn > f.rootEnt) { n.skipped = true; setNode(f, k, n); }
+    else rootUsed += 1 + n.lfn;
+  }
+  for (int i = 1; i < nn; i++) {
+    Node n = nodeAt(f, i);
+    if (!n.skipped && nodeAt(f, n.parent).skipped) { n.skipped = true; setNode(f, i, n); }
+  }
+
+  // the smallest size with room to spare (a floppy has one size)
+  for (uint32_t mb : kSizesMB) {
+    if (floppy) break;
+    geometry(f, mb);
+    uint64_t need = 0;
+    for (int i = 1; i < nn; i++) {
+      const Node n = nodeAt(f, i);
+      if (!n.skipped) need += clustersNeeded(f, n);
+    }
+    if ((f.maxClus - 2 - need) * (uint64_t)f.cb >= kMinFree && need < f.maxClus - 2) break;
+  }
+
+  // Clusters go out in node order, so ownerOf can search the nodes themselves. A node with none
+  // (skipped, or empty) still gets first = next, which keeps first rising with the index.
+  if (!f.fat.alloc((size_t)f.fatSz * 512)) return false;
+  fatSet(f, 0, 0xFF00 | f.media);
+  fatSet(f, 1, 0xFFFF);
+  uint32_t next = 2;
+  bool left = false;
+  for (int i = 1; i < nn; i++) {
+    Node n = nodeAt(f, i);
+    if (!n.skipped && nodeAt(f, n.parent).skipped) n.skipped = true;
+    const uint32_t c = n.skipped ? 0 : clustersNeeded(f, n);
+    if (next + c > f.maxClus) {
+      n.skipped = true;
+      hal_log("folder: no room for %s", hostOf(f, i).c_str());
+    }
+    n.first = next;
+    n.nclus = n.skipped ? 0 : c;
+    for (uint32_t j = 0; j < n.nclus; j++) fatSet(f, next + j, j + 1 < n.nclus ? next + j + 1 : 0xFFFF);
+    next += n.nclus;
+    left |= n.skipped;
+    setNode(f, i, n);
+  }
+  fatSync(f);
+
+  // a floppy with something left out would be a game with files missing: refuse it
+  if (floppy && left) {
+    hal_log("folder: %s does not fit on a floppy", f.root.c_str());
+    return false;
+  }
+
+  // the directories, now that every first cluster is known
+  if (!f.rootDir.alloc((size_t)f.rootEnt * 32)) return false;
+  uint8_t e[64];
+  uint8_t sfnLabel[11];
+  memcpy(sfnLabel, f.label.data(), 11);
+  putEntry(e, sfnLabel, 0x08, 0, 0, nn > 1 ? nodeAt(f, 1).date : 0x21, 0);
+  f.rootDir.write(0, e, 32);
+  fillDir(f, nodeAt(f, 0), f.rootDir, 32, f.rootEnt - 1);
+  size_t dirBytes = 0;
+  for (int i = 1; i < nn; i++) {
+    Node n = nodeAt(f, i);
+    if (!n.dir || n.skipped) continue;
+    n.dirOff = (uint32_t)dirBytes;
+    dirBytes += (size_t)n.nclus * f.cb;
+    setNode(f, i, n);
+  }
+  if (!f.dirs.alloc(dirBytes)) return false;
+  size_t files = 0;
+  uint64_t bytes = 0;
+  for (int i = 1; i < nn; i++) {
+    const Node n = nodeAt(f, i);
+    if (n.skipped) continue;
+    if (!n.dir) { files++; bytes += n.size; continue; }
+    static const uint8_t kDot[11] = { '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+    static const uint8_t kDotDot[11] = { '.', '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+    putEntry(e, kDot, 0x10, n.first, 0, n.date, n.time);
+    putEntry(e + 32, kDotDot, 0x10, n.parent ? nodeAt(f, n.parent).first : 0, 0, n.date, n.time);
+    f.dirs.write(n.dirOff, e, 64);
+    fillDir(f, n, f.dirs, n.dirOff + 64, n.nclus * f.cb / 32 - 2);
+  }
+
+  hal_log("folder: %s as a %u KB %s, %u files (%u KB), %u-byte clusters, tables %u KB",
+          f.root.c_str(), (unsigned)(f.total / 2), floppy ? "floppy" : "disk", (unsigned)files,
+          (unsigned)(bytes >> 10), (unsigned)f.cb,
+          (unsigned)((f.fat.size() + f.rootDir.size() + f.dirs.size() + f.nnodes * sizeof(Node) +
+                      f.namesLen) >> 10));
+  return true;
+}
+
+PicoFolder *openFolder(const char *dir, bool floppy) {
   PicoFolder *f = new (std::nothrow) PicoFolder;
   if (!f) return nullptr;
   f->root = dir;
@@ -738,105 +1314,42 @@ static PicoFolder *openFolder(const char *dir, bool floppy) {
     for (PicoFolder *o : s_open) used |= o->spillPath == p;
     if (!used) f->spillPath = p;
   }
-  if (floppy) floppyGeometry(*f);
-  f->serial = hal_micros() ^ 0x50433836;
-
-  // the volume label: the folder's name
-  const std::string base = f->root.substr(f->root.find_last_of('/') + 1);
-  f->label = "           ";
-  for (size_t i = 0, j = 0; i < base.size() && j < 11; i++) {
-    const char u = (char)toupper((unsigned char)base[i]);
-    if (sfnChar((unsigned char)u) || u == ' ') f->label[j++] = u;
+  // On the RP2350 a big folder can still run the heap out: refuse the disk rather than abort().
+  bool ok = false;
+  s_lendOk = true;
+  try {
+    ok = build(*f, floppy);
+  } catch (const std::bad_alloc &) {
+    hal_log("folder: no memory for %s", f->root.c_str());
   }
-  if (f->label == "           ") f->label = "SD FOLDER  ";
-
-  Node top;
-  top.host = f->root;
-  top.dir = true;
-  f->nodes.push_back(top);
-  scanDir(*f, 0, 0);
-
-  // the root directory has room for 511 entries next to the label
-  uint32_t rootUsed = 1;
-  for (int k : f->nodes[0].kids) {
-    Node &n = f->nodes[k];
-    if (rootUsed + 1 + n.lfn > f->rootEnt) n.skipped = true;
-    else rootUsed += 1 + n.lfn;
+  s_lendOk = false;
+  if (!ok) {
+    f->spillPath.clear();                            // not made yet, and maybe another's name later
+    freeFolder(f);
+    return nullptr;
   }
-  for (size_t i = 1; i < f->nodes.size(); i++)
-    if (f->nodes[f->nodes[i].parent].skipped) f->nodes[i].skipped = true;
-
-  // the smallest size with room to spare (a floppy has one size)
-  for (uint32_t mb : kSizesMB) {
-    if (floppy) break;
-    geometry(*f, mb);
-    uint64_t need = 0;
-    for (size_t i = 1; i < f->nodes.size(); i++)
-      if (!f->nodes[i].skipped) need += clustersNeeded(*f, f->nodes[i]);
-    if ((f->maxClus - 2 - need) * (uint64_t)f->cb >= kMinFree && need < f->maxClus - 2) break;
-  }
-
-  f->fat.assign((size_t)f->fatSz * 512, 0);
-  fatSet(*f, 0, 0xFF00 | f->media);
-  fatSet(*f, 1, 0xFFFF);
-  uint32_t next = 2;
-  for (size_t i = 1; i < f->nodes.size(); i++) {
-    Node &n = f->nodes[i];
-    if (f->nodes[n.parent].skipped) n.skipped = true;
-    if (n.skipped) continue;
-    const uint32_t c = clustersNeeded(*f, n);
-    if (next + c > f->maxClus) {
-      n.skipped = true;
-      hal_log("folder: no room for %s", n.host.c_str());
-      continue;
-    }
-    n.first = c ? next : 0;
-    n.nclus = c;
-    for (uint32_t j = 0; j < c; j++) fatSet(*f, next + j, j + 1 < c ? next + j + 1 : 0xFFFF);
-    if (c) f->byFirst.push_back({ next, (int)i });
-    next += c;
-  }
-
-  // the directories, now that every first cluster is known
-  // a floppy with something left out would be a game with files missing: refuse it
-  if (floppy) {
-    for (size_t i = 1; i < f->nodes.size(); i++) {
-      if (!f->nodes[i].skipped) continue;
-      hal_log("folder: %s does not fit on a floppy", f->root.c_str());
-      delete f;
-      return nullptr;
-    }
-  }
-
-  f->rootDir.assign(f->rootEnt * 32, 0);
-  uint8_t sfnLabel[11];
-  memcpy(sfnLabel, f->label.data(), 11);
-  putEntry(f->rootDir.data(), sfnLabel, 0x08, 0, 0, f->nodes.size() > 1 ? f->nodes[1].date : 0x21, 0);
-  fillDir(*f, f->nodes[0], f->rootDir.data() + 32, f->rootEnt - 1);
-  for (size_t i = 1; i < f->nodes.size(); i++) {
-    Node &n = f->nodes[i];
-    if (!n.dir || n.skipped) continue;
-    n.dirBuf.assign((size_t)n.nclus * f->cb, 0);
-    static const uint8_t kDot[11] = { '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
-    static const uint8_t kDotDot[11] = { '.', '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
-    putEntry(n.dirBuf.data(), kDot, 0x10, n.first, 0, n.date, n.time);
-    putEntry(n.dirBuf.data() + 32, kDotDot, 0x10, f->nodes[n.parent].first, 0, n.date, n.time);
-    fillDir(*f, n, n.dirBuf.data() + 64, (uint32_t)(n.dirBuf.size() / 32 - 2));
-  }
-
-  size_t files = 0;
-  uint64_t bytes = 0;
-  for (const Node &n : f->nodes)
-    if (!n.dir && !n.skipped) { files++; bytes += n.size; }
   // the desktop build quits through exit() (window closed, test scripts): save on the way out
   static bool hooked = false;
   if (!hooked) { atexit(pfolder_close_all); hooked = true; }
-  hal_log("folder: %s as a %u KB %s, %u files (%u KB), %u-byte clusters",
-          f->root.c_str(), (unsigned)(f->total / 2), floppy ? "floppy" : "disk", (unsigned)files,
-          (unsigned)(bytes >> 10), (unsigned)f->cb);
   s_open.push_back(f);
   return f;
 }
+
+// Writes a folder back, with the SRAM the pager lends for the tree it reads.
+void closeOne(PicoFolder *f) {
+  if (f->dirty) {
+    s_lendOk = true;
+    try {
+      commit(*f);
+    } catch (const std::bad_alloc &) {
+      hal_log("folder: no memory to write %s back; its changes are lost", f->root.c_str());
+    }
+    s_lendOk = false;
+  }
+  freeFolder(f);
+}
+
+} // namespace
 
 extern "C" PicoFolder *pfolder_open(const char *dir) { return openFolder(dir, false); }
 
@@ -876,16 +1389,12 @@ extern "C" void pfolder_close(PicoFolder *f) {
   for (size_t i = 0; i < s_open.size(); i++) {
     if (s_open[i] != f) continue;
     s_open.erase(s_open.begin() + i);
-    if (f->dirty) commit(*f);
-    freeFolder(f);
+    closeOne(f);
     return;
   }
 }
 
 extern "C" void pfolder_close_all(void) {
-  for (PicoFolder *f : s_open) {
-    if (f->dirty) commit(*f);
-    freeFolder(f);
-  }
+  for (PicoFolder *f : s_open) closeOne(f);
   s_open.clear();
 }

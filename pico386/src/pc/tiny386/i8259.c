@@ -53,6 +53,8 @@ struct PicState2 {
 	void *obj;
 };
 
+uint32_t pic_irq0_merged;  /* pico-386: IRQ0 edges that found IRQ0 still pending (t386_timer_info) */
+
 /* set irq level. If an edge is detected, then the IRR is set to 1 */
 static inline void pic_set_irq1(PicState *s, int irq, int level)
 {
@@ -129,8 +131,16 @@ static void pic_update_irq(PicState2 *s)
 
 void i8259_set_irq(PicState2 *s, int irq, int level)
 {
+	if (irq == 0 && level && (s->pics[0].irr & 1))
+		pic_irq0_merged++;
 	pic_set_irq1(&s->pics[irq >> 3], irq & 7, level);
 	pic_update_irq(s);
+}
+
+/* pico-386: is 'irq' raised and not yet taken by the CPU? (i8254_update_irq) */
+int i8259_irq_pending(PicState2 *s, int irq)
+{
+	return (s->pics[irq >> 3].irr >> (irq & 7)) & 1;
 }
 
 /* acknowledge interrupt 'irq' */

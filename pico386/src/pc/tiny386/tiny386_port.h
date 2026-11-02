@@ -20,6 +20,9 @@
 // Instructions per pc_step(): between two steps the PIT, PIC, CMOS, keyboard and DMA catch up.
 // Upstream uses 10240 on PCs and 512 on its ESP32 boards; 2048 keeps IRQ latency well under a
 // millisecond at the P4's guest speed without the per-step overhead showing.
+#ifndef PC_TIMER_STEP
+#define PC_TIMER_STEP 256   /* pc_step checks the PIT this often */
+#endif
 #ifndef PC_STEP_COUNT
 #define PC_STEP_COUNT 2048
 #endif
@@ -28,6 +31,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// The RP2350 (and the desktop with -DEMU_LOWMEM=ON) keeps guest RAM in PSRAM, paged through SRAM:
+// phys_mem is NULL and every RAM access goes through pc_pagemem.h.
+#include "../../../board.h"
+// The mixer's rate: the board's output rate, so nothing is made just to be resampled away. On the
+// RP2350 that halves the Adlib's cost (2026-11-02: OPL at 44.1 kHz took 57% of the PC's core).
+#define T386_AUDIO_RATE AUDIO_OUT_RATE
+
+#if defined(PICO386_LOWMEM)
+#define T386_PAGED 1
+#include "../pc_pagemem.h"
+#endif
+
+// newlib on arm-none-eabi has no CLOCK_MONOTONIC and no clock_gettime at all; posix_rp2350.cpp
+// supplies one that counts from boot, for RDTSC and the RTC.
+#if defined(BOARD_PICOCALC_RP2350)
+#include <time.h>
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC CLOCK_REALTIME
+#endif
+#endif
 
 #ifdef __cplusplus
 extern "C" {

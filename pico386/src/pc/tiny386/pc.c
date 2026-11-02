@@ -354,6 +354,8 @@ static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int coun
 	return 0;
 }
 
+uint32_t pico_spk_writes, pico_adlib_writes;   /* pico-386: the RP2350 heartbeat's sound line */
+
 static void pc_io_write(void *o, int addr, u8 val)
 {
 	PC *pc = o;
@@ -421,11 +423,13 @@ static void pc_io_write(void *o, int addr, u8 val)
 		kbd_write_command(pc->i8042, addr, val);
 		return;
 	case 0x61:
+		pico_spk_writes++;
 		pcspk_ioport_write(pc->pcspk, val);
 		return;
 	case 0x220: case 0x221: case 0x222: case 0x223:
 	case 0x228: case 0x229:
 	case 0x388: case 0x389: case 0x38a: case 0x38b:
+		pico_adlib_writes++;
 		adlib_write(pc->adlib, addr, val);
 		return;
 	case 0x8900:
@@ -599,7 +603,6 @@ void pc_step(PC *pc)
 		load_bios_and_reset(pc);
 	}
 
-	i8254_update_irq(pc->pit);
 	cmos_update_irq(pc->cmos);
 	if (pc->enable_serial)
 		u8250_update(pc->serial);
@@ -607,7 +610,13 @@ void pc_step(PC *pc)
 	ne2000_step(pc->ne2000);
 	i8257_dma_run(pc->isa_dma);
 	i8257_dma_run(pc->isa_hdma);
-	cpu_step(pc->cpu, PC_STEP_COUNT);
+	/* pico-386: the timer is checked every PC_TIMER_STEP instructions, not once a step. On the
+	   RP2350 a step can take 10 ms when guest RAM pages in, and a game's 240 Hz music timer
+	   then got only a share of its ticks. */
+	for (int n = 0; n < PC_STEP_COUNT; n += PC_TIMER_STEP) {
+		i8254_update_irq(pc->pit);
+		cpu_step(pc->cpu, PC_TIMER_STEP);
+	}
 }
 
 static int read_irq(void *o)
@@ -620,6 +629,11 @@ static void set_irq(void *o, int irq, int level)
 {
 	PicState2 *s = o;
 	return i8259_set_irq(s, irq, level);
+}
+
+static int irq_pending(void *o, int irq)
+{
+	return i8259_irq_pending(o, irq);
 }
 
 static void set_pci_vga_bar(void *opaque, int bar_num, uint32_t addr, bool enabled)
@@ -748,9 +762,15 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
 	PC *pc = malloc(sizeof(PC));
+#ifdef T386_PAGED
+	/* TINY386_PICO: RAM is paged (pc_pagemem.h), set up by t386_start; it reads as zero */
+	char *mem = NULL;
+	CPU_CB *cb = NULL;
+#else
 	char *mem = bigmalloc(conf->mem_size);
 	CPU_CB *cb = NULL;
 	memset(mem, 0, conf->mem_size);
+#endif
 	pcmalloc_init(mem + 0xa0000, 0xc0000 - 0xa0000);
 	pc->cpu = cpu_new(conf->cpu_gen, mem, conf->mem_size, &cb);
 	if (conf->fpu)
@@ -786,6 +806,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void *redraw_data,
 	cb->pic_read_irq = read_irq;
 
 	pc->pit = i8254_init(0, pc->pic, set_irq);
+	i8254_set_irq_pending(pc->pit, irq_pending);
 	pc->serial = u8250_init(4, pc->pic, set_irq);
 	pc->cmos = cmos_init(conf->mem_size, 8, pc->pic, set_irq);
 	pc->ide = ide_allocate(14, pc->pic, set_irq);
@@ -839,7 +860,12 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void *redraw_data,
 	pc->boot_start_time = 0;
 
 	pc->vga_mem_size = conf->vga_mem_size;
+#ifdef T386_PAGED
+	/* TINY386_PICO: VRAM is the start of the SRAM arena */
+	pc->vga_mem = (char *) pm_vram;
+#else
 	pc->vga_mem = bigmalloc(pc->vga_mem_size);
+#endif
 	memset(pc->vga_mem, 0, pc->vga_mem_size);
 	pc->vga = vga_init(pc->vga_mem, pc->vga_mem_size,
 			   fb, conf->width, conf->height);
@@ -936,10 +962,17 @@ void load_bios_and_reset(PC *pc)
 		int initrd_size = 0;
 		if (pc->initrd && pc->initrd[0])
 			initrd_size = load_rom(pc->phys_mem, pc->initrd, 0x00400000, 0);
+#ifdef T386_PAGED
+		if (pc->cmdline && pc->cmdline[0])
+			pm_write(cmdline_addr, pc->cmdline, strlen(pc->cmdline) + 1);
+		else
+			pm_write8(cmdline_addr, 0);
+#else
 		if (pc->cmdline && pc->cmdline[0])
 			strcpy(pc->phys_mem + cmdline_addr, pc->cmdline);
 		else
 			strcpy(pc->phys_mem + cmdline_addr, "");
+#endif
 
 		load_rom(pc->phys_mem, pc->linuxstart, start_addr, 0);
 		cpu_reset_pm(pc->cpu, 0x10000);

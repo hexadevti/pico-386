@@ -41,8 +41,9 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     `s` (mixes the SB16 had no DMA data for, `sb16_starved`) and the longest gap between sound
     writes (over 70 ms = a gap). Prince of Persia on the device read `g836 s0 17ms`, so the
     output ran dry with no long gaps: sound was made at exactly the rate it was played, so the
-    queue never built a cushion. `pc_audio` now steers the queue's low point to 25 ms
-    (`hal_audio_queued_us`, which counts `on_sent` on the P4), and `g` counts per second.
+    queue never built a cushion. `pc_audio` now steers the queue (`hal_audio_queued_us`,
+    which counts `on_sent` on the P4; see the RP2350's Prince notes for today's rule), and `g`
+    counts per second.
     **Fixed on the device (2026-10-19): `g0 s0 17ms`, no ticks.** The desktop was always clean. Test: `pop.ini` (C: =
     DOSHDD.img, `C:\PRINCE\PRINCE.EXE`).
   - VBE modes and Windows
@@ -68,6 +69,137 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       - -O2 (118 KB): 8.5x, 1.9 MIPS.
       - -Os (91 KB): 6.5x, 1.4 MIPS.
       Smaller code is slower, so the L1 instruction cache is not the limit any more.
+
+- **RP2350 (a plain Pico 2 in the PicoCalc, 2026-10-27):** the user chose the Pico 2 without
+  PSRAM. It builds (546 KB of flash, 436 KB of static RAM; 10.3 KB of heap free with a PC
+  running).
+  - **Speed (CheckIt on the device, 2026-10-28):** 1.73x PC-XT with the interpreter in flash;
+    3.15x with i386.c in SRAM at -Os; **5.07x** at -O2 -fno-inline-functions and 300 MHz
+    (1.1M guest instructions a second, no page faults while it runs). See THIRD_PARTY.md.
+    - From flash, `cpu_exec1` ran through the 16 KB XIP cache, which core 1 shares.
+    - SRAM is full. The 90 KB interpreter fits only because VRAM went from 256 KB to 160 KB
+      (mode 12h needs 150 KB; EGA/VGA games that keep pages above that lose them) and `pm_map`
+      went from pointers to 2-byte frame numbers.
+    - Ideas not tried yet: hot non-i386 code in SRAM (`pc_step`, the PIC/PIT, port I/O).
+  - `PICO386_LOWMEM` (board.h): guest RAM lives in the mainboard's 8 MB PSRAM, which hangs off
+    a PIO and is not memory-mapped. It is paged through 1 KB SRAM frames (`pc_pagemem.c`).
+    - `hal_arena` holds VRAM (160 KB), then 64 KB of frames. The menu canvas (200 KB) borrows the
+      start of it, so `app.cpp` parks that much (`PARK_BYTES`, the first frames too) in PSRAM
+      around the menus.
+    - Pages were 4 KB at first (16 frames), and DOS crawled: about 40k guest instructions a
+      second, nearly all of the time spent faulting (about 1.8 ms each). 1 KB pages (2026-10-28)
+      cut desktop FreeDOS-boot faults from 313k to 49k (2 KB: 276k, 512 B: 41k), and the
+      device went to 0.25-1.4M instructions a second, with no faults at the DOS prompt. The page
+      map costs 2 bytes a page, so guest RAM is capped at 4 MB (`PM_MAX_RAM`). i386.c's string
+      paths stop at `STR_PAGE`.
+    - The device's log is UART0 on COM6. `diag_rp2350.cpp` halts and prints on a crash, and
+      prints a heartbeat every 2 s (instructions, CS:EIP, faults, write-backs, stack, heap), and
+      a `diag: timer` line: the PIT rate, IRQ0s raised and lost, and how many periods behind,
+      and a `diag: audio` line: mix time, buffers that ran dry, the queue's low point, the longest
+      gap between writes, and speaker/Adlib port writes.
+    - **Prince's music (2026-11-02):** it wavered in speed and clicked. Fixed on the device: the
+      timer (THIRD_PARTY.md), and the sound path:
+      - The mixer runs at `AUDIO_OUT_RATE` (`T386_AUDIO_RATE`: 22050 Hz here, 44100 on the P4 and
+        the desktop), which halves the OPL cost.
+      - `t386_run_until` calls `audioHook` after each `pc_step`, so sound is made during the frame
+        (1 ms after an Adlib/speaker write, or every 8 ms), not only at its end.
+      - It is mixed and queued 128 samples at a time (`kMixMax`).
+      - `hal_audio_queued_us` on the RP2350 leaves out the buffer being filled and what the DMA
+        has already played; it read up to 11.6 ms high. The ring must still hold two buffers at
+        each write, since the DMA picks the next buffer a whole buffer early.
+      - `pc_audio` steers the queue after each write to 30 ms plus the longest recent gap (fading
+        over 2 s), at most 62 ms.
+      Result: 1 dry buffer in 80 s of Prince's intro and first level (it was 5-6 every 2 s).
+    - **Driving the device yourself (2026-11-02, the user asked for it).** The PicoCalc stays on COM6,
+      with PicoMultiLoader on Wi-Fi at 192.168.0.70. Nothing here needs the user's hands:
+      - `python -I tools/deploy-rp2350.py` sends `@uf2menu`, uploads `build-rp2350/pico386.ino.uf2`
+        through the loader's web API to `/pc-386/pico386.ino.uf2` (the old one becomes
+        `pico386.prev.uf2`) and flashes it. Boot takes about 20 s.
+      - `python -I tools/remote.py keys "enter,w800,shot"` types a PC_KEYS script (`keyscript.cpp`,
+        shared with the desktop's `PC_KEYS`); each `shot` saves `sdcard/rshotN.png` (`--out`).
+        `remote.py shot x.png` takes one shot, and `remote.py log 10` prints the log.
+      - The firmware side is `rp2350CheckSerialCmd` (`@keys`, `@shot`, `@shotraw y`,
+        `@shottest kHz`). The script lives on the heap only while it runs.
+      - A shot reads the panel back (RAMRD, 4 MHz on MISO): a dummy byte, then RGB565 as written.
+        Reads are exact up to 16 MHz, and at 25 MHz each 1 bit smears into the next. CS has to go
+        high after a read, or the panel keeps sending and garbles the next commands. The panel
+        and log locks are held for the whole shot, so the PC pauses for it (2-30 s, depending on
+        how well the rows compress).
+      - Only one program can have COM6 open, so close any serial monitor before using these.
+    - There is no 800x600 framebuffer: `vga.c` hands finished lines to `pc_video`, which pushes
+      bands straight to the panel (`hal_panel_push`).
+    - tiny386 itself takes 43 KB of heap. 26 frames left too little heap, and on the
+      device (2026-10-28) 18 ran out at the PC's first frame, when FreeRTOS (whose heap is malloc's,
+      `heap_3a`) made the draw task. The draw task is now static and made at boot. That is
+      why the frames stay at 64 KB.
+    - A zip chosen for A: in-game hung the device (2026-11-01). With a PC running, only about
+      10 KB of heap is free, and the unzip wanted 64 KB for the zip's tail plus a 32 KB window.
+      The folder floppy then needed 12 KB for its FAT and root directory. Now:
+      - `pc_zip` scans the tail in 1 KB steps and reads the central directory entry by entry.
+      - The inflater keeps 2 KB in SRAM and a 32 KB ring in PSRAM (`pcmem_scratch`, just below
+        the park area).
+      - A folder floppy's FAT and root directory use frames the pager lends (`pm_lend`, through
+        `pcmem_lend`). Lent frames come only from above the menu canvas, because the floppy is
+        built while the menu is drawn. The pager keeps at least 16 frames.
+      Tested on the desktop with `build-lowmem` (Crossfire to Mine Shaft in-game). Not yet tested
+      on the device.
+    - The device still hit `abort()` (a HardFault in `__breakpoint`, lr in `_exit`) as soon as
+      "Choose a zip file" opened. The file browser's vectors of strings and Items (about 150
+      bytes a file) ran out of heap. `browser.cpp` now packs each folder's names into the PSRAM
+      that nothing uses (`pcmem_spare`, 4 MB up to the scratch area; the heap on other builds),
+      and keeps only a 4-byte offset per file in SRAM, sized by a first counting pass and lent
+      by the pager when it can. `ui::list` takes rows from `Screen::itemAt` when `items` is null.
+      Tested on the desktop with `build-lowmem` (527 zips in `games`). Not yet tested on the device.
+    - The device's PSRAM moves whole words by DMA. Until 2026-11-01 `hal_psram_read`/`write`
+      dropped any address, length or buffer not a multiple of 4 ("psram: bad read" in the log),
+      and the desktop's simulated PSRAM never did, so the browser's names and the zip ring
+      worked only on the desktop. Unaligned calls now go through a 64-byte bounce buffer
+      (a read-modify-write for writes).
+    - Mounting some zips on A: still hit `abort()` (2026-11-01): about 200 bytes of heap a file
+      (the folder disk's nodes with a path, a name and a vector of children each, plus the
+      unzip's list of entries), so roughly 40 files used up the 10 KB. Now:
+      - `pc_folder`'s `Node` is 56 bytes, with no path (`hostOf` rebuilds it), names in one pool
+        and children as an index range.
+      - For a floppy, `countTree` sizes the nodes and names up front, and they are lent.
+      - `pc_zip` walks the central directory twice (`eachEntry`) and keeps no list, and
+        `removeTree` deletes one entry at a time.
+    - Freezes on every drive (2026-11-01; a peer session also saw `abort()` in `pc_new` on a D:
+      restart with 9.5 KB free). A D: folder's FAT, root and directories were on the heap too.
+      Now **nothing of a folder disk lives in SRAM on the RP2350**:
+      - Its tables are `Store`s in the PSRAM (`pcmem_folders`: the PSRAM after the browser's
+        512 KB spare, up to the scratch area, carved by `psAlloc`). These are the FAT (read through
+        a 512-byte cache, `fatSync`), the root, the directories, the nodes (`nodeAt`/`setNode`),
+        the names (`nameOf`/`addName`, sized by `countTree`) and the spill map (2 bytes a cluster).
+        Desktop builds keep them in vectors.
+      - Clusters are handed out in node order, and a node with none gets the next one's `first`,
+        so `ownerOf` binary-searches the nodes themselves (no index). Its entry writes 0
+        (`entryFirst`).
+      - `scanDir` writes children straight to the node store. SRAM holds 13 bytes a child while
+        they are sorted (an order, the nodes moved along its cycles) and given short names.
+      - Sectors written outside the FAT (`extra`) are capped at 4. The commit's folder list is a
+        lent vector, not a `vector<bool>` of every cluster.
+      - The build and the commit catch `bad_alloc`. The disk is refused (logged) or its changes
+        are lost, instead of `abort()`. The desktop's `PC_HEAP` budget now returns NULL too.
+      - `t386_start` frees the floppy probe's EMULINK, which sat in the middle of the heap.
+        `t386_release_all` closes the folders last.
+      Tested on the desktop with `build-lowmem` and `PC_HEAP=55`. The heap peaked at 46-50 KB
+      (43-45 KB is the PC itself) for all of these: a 436-file zip on D:, 1802 entries on D:
+      (1502 in one folder), 1000 files on a floppy, zips on A:+B:+D: together, a 429-file
+      zip swapped onto B: in-game (54.6 KB before), D: zip changed twice in-game (restarts), and
+      writes on D: written back. Not yet tested on the device.
+  - Test it on the desktop with the `build-lowmem` CMake dir (`-DEMU_LOWMEM=ON`), which simulates
+    the PSRAM. Prince of Persia and MS-DOS 6 run there.
+  - `psram_rp2350.cpp` drives the PSRAM as plain SPI from pio1 (CS 20, SCK 21, SIO0 2, SIO1 3).
+    It calibrates itself at boot over clock dividers and read-delay clocks, and logs
+    `psram: ... KB, SCK ... kHz, N wait clocks, N-byte bursts`. Ask for that line first.
+  - Cores: arduino-pico's FreeRTOS SMP runs setup/loop on core 0 with a 4 KB stack. So
+    `pico386.ino` starts an "app" task (24 KB static stack) on core 0, and the draw job and
+    keyboard poll run on core 1. The panel has a mutex, because both cores push to it.
+  - The POSIX gaps are filled in `posix_rp2350.cpp` and `include/dirent.h`: mkdir, rmdir,
+    rename, readdir over SDFS, clock_gettime and usleep. `VFS.map("/sd", SDFS)` covers the
+    rest. stat has no mtime there, so the zip marker always sees mtime 0.
+  - `hal_reboot_to_loader` (Ctrl+PgUp, home menu Exit) writes PicoMultiLoader's watchdog request
+    (scratch 0 = 0xe98cc638, scratch 1 = 1), as emu8 does. Without a loader it is a plain reboot.
 
 ## How it fits together
 
@@ -196,6 +328,18 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     Crossfire to Mine Shaft in-game, and `echo > a:\t.txt` was committed on the swap. Never
     tested on the device. Live swap of D: was tried and dropped: DOS has no media change for
     fixed disks.
+  - Zips of floppy images (2026-11-01; the Sierra sets: `(Disk N) [!].ima`). A zip chosen for A:/B:
+    is unpacked, and if it holds .ima/.img/.vfd files up to 2.88 MB (`pczip_images`, sorted by the
+    "Disk N" in the name), the drive gets the image itself: the only one, or the one picked. The ini
+    then names the image under `.unzipped`. A drive holding one disk of a set gets a "Change disk"
+    row first, with the next disk selected. A zip named in the ini by hand mounts its first disk
+    (`pczip_floppy` in `floppy_source`). Zips without images are still folder floppies.
+    Names over 64 bytes (zip folders and entries) are shortened on unpacking to their first 20
+    bytes, `~hash~` and their last 36 (`shortName`), which keeps "(Disk 2) [!].ima". The full
+    paths went past Windows' 260 characters and the 256-byte ini lines. Old unpacked folders with
+    longer names are orphaned. Tested on the desktop and `build-lowmem` with `zimg.ini` (B: = Police
+    Quest, 5 disks), Jones in the Fast Lane (1.2 MB) and Space Quest II (360 KB). Never tested on
+    the device.
   - The CD goes through `ide_change_cd`. Every machine has an empty secondary-master CD.
   - C: and D: rewrite the ini and restart the machine (`stopMachine` shows "Saving D:").
     A live D: swap was tried on 2026-10-19 and dropped, because it failed on the device. DOS has no
@@ -224,11 +368,32 @@ arduino-cli compile --fqbn esp32:esp32:esp32p4:PSRAM=enabled,FlashSize=16M,ChipV
   must be renamed `.h`.
 - `compiler.cpp.extra_flags` doesn't reach the C files; `tiny386_port.h` must not depend on it.
 
+**RP2350.** Use the VS Code task **RP2350: Build** / **RP2350: Build & Upload** (COM7). They use
+arduino-pico 6.1.1 from the default arduino-cli data dir, with `arch=arm,os=freertos,freq=300`, and
+write `build-rp2350/pico386.ino.uf2`. The board flag and the `include/` path must reach both the C
+and the C++ flags.
+
+**PicoMultiLoader app** (2026-10-27). `tools/pml-app/` holds `app.ini`, `icon.bmp` and
+`make_icon.py`, which draws the icon (32x32, 4-bit, pixel values are the loader's palette roles;
+edit its grid and rerun it). The task **PicoMultiLoader: Package**, or
+`tools/pml-app/package.ps1 -Version x.y.z`, builds both firmwares and writes
+`build-pml/pico-386/` and a zip. The version goes into app.ini and the RP2350's binary_info
+(`binfo_rp2350.c`, `-DPICO386_VERSION`, emu8's block). The P4 .bin's descriptor version comes
+from the precompiled core and can't be set.
+The header lands at 0x10003124, behind arduino-pico's 12 KB OTA stub, and PicoMultiLoader's
+`read_binary_info` (rp2xxx/src/uf2_image.c) scans only 0x500 bytes from the image start, so its
+details screen doesn't see it yet. emu8 has the same problem. The fix belongs in PicoMultiLoader:
+also scan from +0x3000. The SD folder is `pico-386`, never `pc-386`, which is
+the data folder (FAT ignores case). `app.ini` must stay under 512 bytes, ASCII with no BOM.
+
 **Desktop.** MSYS2 MinGW32. The login shell starts in `$HOME`, so `cd` inside the `-lc`:
 
 ```sh
 MSYSTEM=MINGW32 /c/msys64/usr/bin/bash.exe -lc "cd /c/Users/lucia/repos/pico-386 && make -C build -j8"
 ```
+
+`make -C build-lowmem` is the same with `-DEMU_LOWMEM=ON`, the RP2350's memory model. Run it from
+the repo root, because `PC_INI` paths are relative to the cwd.
 
 **Test hooks** (desktop):
 - `PC_INI=sdcard/pc-386/x.ini` boots that machine directly, skipping the home menu.

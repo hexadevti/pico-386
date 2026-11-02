@@ -1,5 +1,12 @@
 #include "tiny386_port.h"   /* pico-386 */
+#if defined(BOARD_PICOCALC_RP2350)
+/* pico-386: -O2 without inlining whole functions, so the interpreter fits in SRAM (90 KB; 79 KB
+   at -Os, 137 KB at -O3). From flash it was fetched through the 16 KB XIP cache, shared with
+   core 1. */
+#pragma GCC optimize("O2", "no-inline-functions")
+#else
 #pragma GCC optimize("O3")  /* pico-386: upstream builds this file at -O3 */
+#endif
 #include "i386.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +22,12 @@
    guest RAM (PSRAM) and is fetched again and again. */
 #include "esp_attr.h"
 #define IRAM_ATTR_CPU_EXEC1 IRAM_ATTR
+#define noinline __attribute__((noinline))
+#elif defined(BOARD_PICOCALC_RP2350)
+/* pico-386: likewise in SRAM on the RP2350 (arduino-pico copies .time_critical* to RAM). */
+#define IRAM_ATTR __attribute__((section(".time_critical.i386")))
+#define IRAM_ATTR_CPU_EXEC1 IRAM_ATTR
+#define DRAM_ATTR
 #define noinline __attribute__((noinline))
 #else
 #define IRAM_ATTR
@@ -95,7 +108,11 @@ struct CPUI386 {
 			uword lpgno;
 			uword xaddr;
 			int (*pte_lookup)[2];
+#ifdef T386_PAGED
+			uword ppte; /* physical address of the PTE; -1 for none */
+#else
 			u8 *ppte;
+#endif
 		} *tab;
 	} tlb;
 
@@ -235,6 +252,20 @@ static uword sext32(u32 a)
 	return (sword) (s32) a;
 }
 
+#ifdef T386_PAGED
+/* TINY386_PICO: guest RAM is paged through SRAM (pc_pagemem.h) */
+static inline u8 pload8(CPUI386 *cpu, uword addr) { return pm_read8(addr); }
+static inline void pstore8(CPUI386 *cpu, uword addr, u8 val) { pm_write8(addr, val); }
+static inline u16 pload16(CPUI386 *cpu, uword addr) { return pm_read16(addr); }
+static inline u32 pload32(CPUI386 *cpu, uword addr) { return pm_read32(addr); }
+static inline void pstore16(CPUI386 *cpu, uword addr, u16 val) { pm_write16(addr, val); }
+static inline void pstore32(CPUI386 *cpu, uword addr, u32 val) { pm_write32(addr, val); }
+#define PHYS_PTR(cpu, addr, write) pm_ptr(addr, write)
+/* TINY386_PICO: a PHYS_PTR pointer is good to the end of its frame, so string runs stop there */
+#define STR_PAGE PM_PAGE_SIZE
+#else
+#define PHYS_PTR(cpu, addr, write) ((cpu)->phys_mem + (addr))
+#define STR_PAGE 4096
 static inline u8 pload8(CPUI386 *cpu, uword addr)
 {
 	return cpu->phys_mem[addr];
@@ -324,6 +355,7 @@ static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
 	cpu->phys_mem[addr + 3] = val >> 24;
 }
 #endif
+#endif /* T386_PAGED */
 
 /* lazy flags */
 enum {
@@ -537,7 +569,7 @@ static inline int get_IOPL(CPUI386 *cpu)
 /* MMU */
 #define CR0_PG (1<<31)
 #define CR0_WP (0x10000)
-#ifdef BUILD_ESP32
+#if defined(BUILD_ESP32) || defined(T386_PAGED)
 #define tlb_size 256
 #else
 #define tlb_size 512
@@ -582,7 +614,12 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 		ent->lpgno = lpgno;
 		ent->xaddr = 0;
 		ent->pte_lookup = pte_lookup[1][3];
+#ifdef T386_PAGED
+		(void) _;
+		ent->ppte = (uword) -1;
+#else
 		ent->ppte = _;
+#endif
 		return true;
 	}
 
@@ -590,25 +627,35 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	uword i = lpgno >> 10;
 	uword j = lpgno & 1023;
 
+#ifdef T386_PAGED
+#define PTE_OR(a, bit) pstore8(cpu, (a), pload8(cpu, (a)) | (bit))
+#else
 	u8 *mem = (u8 *) cpu->phys_mem;
+#define PTE_OR(a, bit) (mem[(a)] |= (bit))
+#endif
 	uword pde = pload32(cpu, base_addr + i * 4);
 	if (!(pde & 1))
 		return false;
-	mem[base_addr + i * 4] |= 1 << 5; // accessed
+	PTE_OR(base_addr + i * 4, 1 << 5); // accessed
 
 	uword base_addr2 = pde & ~0xfff;
 	uword pte = pload32(cpu, base_addr2 + j * 4);
 	if (!(pte & 1))
 		return false;
 
-	mem[base_addr2 + j * 4] |= 1 << 5; // accessed
+	PTE_OR(base_addr2 + j * 4, 1 << 5); // accessed
 //	mem[base_addr2 + j * 4] |= 1 << 6; // dirty
 
 	ent->lpgno = lpgno;
 	ent->xaddr = (pte & ~0xfff) ^ (lpgno << 12);
 	pte = pte & ((pde & 7) | 0xfffffff8);
 	ent->pte_lookup = pte_lookup[!!(cpu->cr0 & CR0_WP)][(pte >> 1) & 3];
+#ifdef T386_PAGED
+	ent->ppte = base_addr2 + j * 4;
+#else
 	ent->ppte = &(mem[base_addr2 + j * 4]);
+#endif
+#undef PTE_OR
 	return true;
 }
 
@@ -640,7 +687,12 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 	}
 	*paddr = ent->xaddr ^ laddr;
 	if (rwm & 2) {
+#ifdef T386_PAGED
+		if (ent->ppte != (uword) -1)
+			pstore8(cpu, ent->ppte, pload8(cpu, ent->ppte) | (1 << 6)); // dirty
+#else
 		*(ent->ppte) |= 1 << 6; // dirty
+#endif
 //		pstore8(cpu, ent->ppte,
 //			pload8(cpu, ent->ppte) | (1 << 6)); // dirty
 	}
@@ -2672,8 +2724,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		} \
 		uword count = cx; \
 		int countd; \
-		if (dir > 0) countd = (4096 - (memld.addr1 & 4095)) / (BIT / 8); \
-		else countd = 1 + (memld.addr1 & 4095) / (BIT / 8); \
+		if (dir > 0) countd = (STR_PAGE - (memld.addr1 & (STR_PAGE - 1))) / (BIT / 8); \
+		else countd = 1 + (memld.addr1 & (STR_PAGE - 1)) / (BIT / 8); \
 		if (countd < count) \
 			count = countd; \
 		for (uword i = 0; i <= count - 1; i++) { \
@@ -2775,11 +2827,11 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		uword count = cx; \
 		int counts, countd; \
 		if (dir > 0) { \
-			counts = (4096 - (memls.addr1 & 4095)) / (BIT / 8); \
-			countd = (4096 - (memld.addr1 & 4095)) / (BIT / 8); \
+			counts = (STR_PAGE - (memls.addr1 & (STR_PAGE - 1))) / (BIT / 8); \
+			countd = (STR_PAGE - (memld.addr1 & (STR_PAGE - 1))) / (BIT / 8); \
 		} else { \
-			counts = 1 + (memls.addr1 & 4095) / (BIT / 8); \
-			countd = 1 + (memld.addr1 & 4095) / (BIT / 8); \
+			counts = 1 + (memls.addr1 & (STR_PAGE - 1)) / (BIT / 8); \
+			countd = 1 + (memld.addr1 & (STR_PAGE - 1)) / (BIT / 8); \
 		} \
 		if (counts < count) \
 			count = counts; \
@@ -2787,11 +2839,11 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			count = countd; \
 		if (cpu->cb.iomem_write_string && in_iomem(memld.addr1) && \
 		    dir > 0  && in_iomem(memld.addr1 + count - 1) && \
-		    (memls.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
+		    (memls.addr1 | (STR_PAGE - 1)) < cpu->phys_mem_size && \
+		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | (STR_PAGE - 1))) { \
 			if (cpu->cb.iomem_write_string( \
 				    cpu->cb.iomem, memld.addr1, \
-				    cpu->phys_mem + memls.addr1, count * dir)) { \
+				    PHYS_PTR(cpu, memls.addr1, 0), count * dir)) { \
 				sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \
 				sreg ## ABIT(7, lreg ## ABIT(7) + count * dir); \
 				sreg ## ABIT(1, cx - count); \
@@ -2891,16 +2943,16 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		} \
 		uword count = cx; \
 		int countd; \
-		if (dir > 0) countd = (4096 - (memld.addr1 & 4095)) / (BIT / 8); \
-		else countd = 1 + (memld.addr1 & 4095) / (BIT / 8); \
+		if (dir > 0) countd = (STR_PAGE - (memld.addr1 & (STR_PAGE - 1))) / (BIT / 8); \
+		else countd = 1 + (memld.addr1 & (STR_PAGE - 1)) / (BIT / 8); \
 		if (countd < count) \
 			count = countd; \
 		if (cpu->cb.io_read_string && dir > 0 && \
-		    (memld.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | 4095)) { \
+		    (memld.addr1 | (STR_PAGE - 1)) < cpu->phys_mem_size && \
+		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | (STR_PAGE - 1))) { \
 			int count1 = cpu->cb.io_read_string( \
 				cpu->cb.io, lreg16(2), \
-				cpu->phys_mem + memld.addr1, dir, count); \
+				PHYS_PTR(cpu, memld.addr1, 1), dir, count); \
 			if (count1 > 0) { \
 				count = count1; \
 				sreg ## ABIT(7, lreg ## ABIT(7) + count * dir); \
@@ -2954,16 +3006,16 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		} \
 		uword count = cx; \
 		int counts; \
-		if (dir > 0) counts = (4096 - (memls.addr1 & 4095)) / (BIT / 8); \
-		else counts = 1 + (memls.addr1 & 4095) / (BIT / 8); \
+		if (dir > 0) counts = (STR_PAGE - (memls.addr1 & (STR_PAGE - 1))) / (BIT / 8); \
+		else counts = 1 + (memls.addr1 & (STR_PAGE - 1)) / (BIT / 8); \
 		if (counts < count) \
 			count = counts; \
 		if (cpu->cb.io_write_string && dir > 0 && \
-		    (memls.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
+		    (memls.addr1 | (STR_PAGE - 1)) < cpu->phys_mem_size && \
+		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | (STR_PAGE - 1))) { \
 			int count1 = cpu->cb.io_write_string( \
 				cpu->cb.io, lreg16(2), \
-				cpu->phys_mem + memls.addr1, dir, count); \
+				PHYS_PTR(cpu, memls.addr1, 0), dir, count); \
 			if (count1 > 0) { \
 				count = count1; \
 				sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \
@@ -5325,6 +5377,13 @@ void cpui386_delete(CPUI386 *cpu)
 	free(cpu->tlb.tab);
 #endif
 	free(cpu);
+}
+
+// pico-386: CS and EIP only, read-only, for a diagnostics task on the other core.
+void cpui386_get_pc(CPUI386 *cpu, u32 *cs, u32 *ip)
+{
+	*cs = cpu->seg[SEG_CS].sel;
+	*ip = cpu->ip;
 }
 
 void cpui386_get_state(CPUI386 *cpu, CPUI386_State *state)

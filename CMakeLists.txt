@@ -37,6 +37,7 @@ endif()
 # Every source under src/ except the P4 HAL (those files are #if-guarded too).
 file(GLOB_RECURSE EMU_SRC CONFIGURE_DEPENDS ${SKETCH}/src/*.c ${SKETCH}/src/*.cpp)
 list(FILTER EMU_SRC EXCLUDE REGEX "/src/hal/picocalc/")
+list(FILTER EMU_SRC EXCLUDE REGEX "/src/hal/picocalc_rp2350/")
 
 configure_file(${SKETCH}/pico386.ino ${CMAKE_BINARY_DIR}/pico386_ino.cpp COPYONLY)
 
@@ -45,6 +46,12 @@ find_package(SDL2 REQUIRED)
 add_executable(pico386 ${CMAKE_BINARY_DIR}/pico386_ino.cpp ${EMU_SRC})
 target_include_directories(pico386 PRIVATE ${SKETCH})
 target_compile_definitions(pico386 PRIVATE BOARD_DESKTOP SDL_MAIN_HANDLED)
+# The RP2350's memory model (guest RAM paged from a simulated 8 MB PSRAM, no framebuffer), for
+# debugging that build here: cmake -B build-lowmem -DEMU_LOWMEM=ON
+option(EMU_LOWMEM "Simulate the RP2350's memory (PICO386_LOWMEM)" OFF)
+if(EMU_LOWMEM)
+  target_compile_definitions(pico386 PRIVATE PICO386_LOWMEM=1)
+endif()
 option(EMU_PORTABLE "Use sdcard/ next to the executable instead of the repo's sdcard/" OFF)
 if(NOT EMU_PORTABLE)
   target_compile_definitions(pico386 PRIVATE EMU_DEFAULT_SD_DIR="${REPO}/sdcard")

@@ -16,6 +16,7 @@
 #include "settings.h"
 #include "../hal/hal.h"
 #include "../pc/pc_internal.h"
+#include "../pc/pc_glue.h"
 #include "../../core.h"
 
 extern const EmuCore kPC386;
@@ -172,6 +173,8 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
   hal_audio_silence();
   hal_video_wait();
   ui::setBackdrop(hal_video_front());
+  pcmem_park();                         // LOWMEM: the menu's canvas is where VRAM lives
+  ui::setStrip(false);
   const std::string title = *pcprof_title() ? pcprof_title() : baseNoExt(rom);
   ui::Screen scr;
   scr.title = title.c_str();
@@ -230,7 +233,11 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
   }
   settingsSave();
   ui::clearBackdrop();
-  if (result == MenuResult::Resume) hal_panel_fill(0, 0, PANEL_W, PANEL_H, 0);
+  if (result == MenuResult::Resume) {
+    pcmem_unpark();                     // a no-op when a drive change restarted the machine
+    ui::setStrip(true);
+    hal_panel_fill(0, 0, PANEL_W, PANEL_H, 0);
+  }
   return result;
 }
 
@@ -257,6 +264,7 @@ static void runGame(const EmuCore &core, const std::string &rom) {
   }
   hal_audio_volume(g_settings.volume);
   hal_panel_fill(0, 0, PANEL_W, PANEL_H, 0);
+  ui::setStrip(true);
 
   uint32_t pad = 0;
   bool ctrl = false;
@@ -332,6 +340,8 @@ static void runGame(const EmuCore &core, const std::string &rom) {
     }
   }
   hal_audio_silence();
+  hal_job_wait();
+  ui::setStrip(false);                  // the machine stops here: "Saving" may need the full canvas
   core.shutdown();
 }
 

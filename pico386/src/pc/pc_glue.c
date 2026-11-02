@@ -10,6 +10,11 @@
 #include "pc_zip.h"
 
 static PC *s_pc;
+#if defined(PICO386_LOWMEM)
+static int s_parked;                    // the arena's start is in PSRAM while the menu uses it
+// The menu canvas covers VRAM and, as VRAM is smaller, the first page frames too (pcmem_park).
+#define PARK_BYTES (PANEL_W * PANEL_H * 2 > PM_VRAM_BYTES ? PANEL_W * PANEL_H * 2 : PM_VRAM_BYTES)
+#endif
 static char s_err_file[160];
 // What A: and B: hold, as emulink got it (a zip as the folder it unpacked to), so a swap can tell
 // a folder in the other drive or in D: from the one it replaces.
@@ -59,12 +64,12 @@ static const char *join(const char *dir, const char *name) {
   return full;
 }
 
-// A floppy as emulink takes it: an image or a folder as it is, a zip as the folder it unpacks to.
-// T386_FD_* on failure.
+// A floppy as emulink takes it: an image or a folder as it is, a zip as the folder it unpacks to,
+// or as its first disk when it holds floppy images. T386_FD_* on failure.
 static int floppy_source(const char *path, char *out, size_t n) {
   if (pczip_is_zip(path)) {
     if (!file_exists(path)) return T386_FD_MISSING;
-    if (pczip_folder(path, out, n) != 0) return T386_FD_UNPACK;
+    if (pczip_floppy(path, out, n) < 0) return T386_FD_UNPACK;
     return 0;
   }
   if (!file_exists(path) && !pfolder_is_dir(path)) return T386_FD_MISSING;
@@ -183,8 +188,33 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
       }
       emulink_attach_floppy(probe, i, NULL);
     }
+    free(probe);                        // else it sits in the middle of the RP2350's heap
   }
 
+#if defined(PICO386_LOWMEM)
+  // Guest RAM lives in PSRAM and is paged through the SRAM arena's frames; VRAM is the arena's
+  // first PM_VRAM_BYTES. The PSRAM's end is where the menu parks the arena (pcmem_park), and
+  // the zip inflater's window is below that (pcmem_scratch).
+  {
+    size_t arena_n = 0;
+    uint8_t *arena = hal_arena(&arena_n);
+    const long room = pcmem_scratch() & ~0xfffffL;
+    const int nframes = arena && arena_n > PM_VRAM_BYTES ? (int)((arena_n - PM_VRAM_BYTES) >> PM_PAGE_SHIFT) : 0;
+    conf.vga_mem_size = PM_VRAM_BYTES;
+    if (conf.mem_size > room) conf.mem_size = room;
+    if (conf.mem_size > (long)PM_MAX_RAM) conf.mem_size = PM_MAX_RAM;
+    if (conf.mem_size < 1L << 20 || nframes < 8) {
+      t386_log("tiny386: no PSRAM (%u KB) or SRAM arena (%u frames)", (unsigned)(hal_psram_size() >> 10),
+               (unsigned)nframes);
+      t386_release_all();
+      return T386_ERR_MEMORY;
+    }
+    s_parked = 0;
+    pm_vram = arena;
+    pm_init(arena + PM_VRAM_BYTES, nframes, (uint32_t)conf.mem_size);
+    t386_log("tiny386: paging guest RAM through %d frames of SRAM", nframes);
+  }
+#else
   // Guest RAM and VRAM are the big allocations; tiny386 does not check them.
   // pc.ini asks for T386_MEM_MAX_MB, which may be more than PSRAM has: step down 4 MB at a
   // time to what fits, keeping 2 MB for the framebuffer, D:'s tables and the rest.
@@ -200,6 +230,7 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
     return T386_ERR_MEMORY;
   }
   free(probe);
+#endif
 
   t386_log("tiny386: %ld KB RAM, %ld KB VRAM, gen %d, fpu %d", conf.mem_size >> 10,
            conf.vga_mem_size >> 10, conf.cpu_gen, conf.fpu);
@@ -216,13 +247,86 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
   return T386_OK;
 }
 
+void t386_set_line_sink(T386LineFunc *f, void *opaque) {
+#if defined(PICO386_LOWMEM)
+  if (s_pc) vga_set_line_sink(s_pc->vga, f, opaque);
+#else
+  (void)f; (void)opaque;
+#endif
+}
+
 void t386_stop() {
   t386_release_all();                   // closes the images (flushing writes), frees everything
   s_pc = NULL;
+#if defined(PICO386_LOWMEM)
+  pm_shutdown();
+  s_parked = 0;
+#endif
+}
+
+#if defined(PICO386_LOWMEM)
+// The menu draws its canvas over the arena's start, VRAM and the first page frames (the frames
+// are restored byte for byte, so the page map stays right), so that goes to the end of the PSRAM
+// while the menu is up. A machine restarted from the menu (C:/D: change) starts with s_parked
+// clear: its BIOS sets the mode and clears VRAM anyway.
+void pcmem_park() {
+  if (!s_pc || s_parked) return;
+  hal_psram_write((uint32_t)(hal_psram_size() - PARK_BYTES), pm_vram, PARK_BYTES);
+  s_parked = 1;
+}
+
+void pcmem_unpark() {
+  if (!s_pc || !s_parked) return;
+  hal_psram_read((uint32_t)(hal_psram_size() - PARK_BYTES), pm_vram, PARK_BYTES);
+  s_parked = 0;
+}
+
+// Frames past the canvas only: the folder floppy builds its FAT while the menu is drawn.
+void *pcmem_lend(size_t n) { return pm_vram ? pm_lend(n, pm_vram + PARK_BYTES) : NULL; }
+int pcmem_free(void *p) { return pm_unlend(p); }
+
+long pcmem_scratch() { return (long)hal_psram_size() - (long)PARK_BYTES - PCMEM_SCRATCH_BYTES; }
+
+long pcmem_spare(long *bytes) {
+  *bytes = PCMEM_SPARE_BYTES;
+  return pcmem_scratch() - (long)PM_MAX_RAM >= PCMEM_SPARE_BYTES ? (long)PM_MAX_RAM : -1;
+}
+
+long pcmem_folders(long *bytes) {
+  const long at = (long)PM_MAX_RAM + PCMEM_SPARE_BYTES;
+  *bytes = pcmem_scratch() - at;
+  return *bytes > 0 ? at : -1;
+}
+#else
+void pcmem_park() {}
+void pcmem_unpark() {}
+void *pcmem_lend(size_t n) { (void)n; return NULL; }
+int pcmem_free(void *p) { (void)p; return 0; }
+long pcmem_scratch() { return -1; }
+long pcmem_spare(long *bytes) { *bytes = 0; return -1; }
+long pcmem_folders(long *bytes) { *bytes = 0; return -1; }
+#endif
+
+// Where the guest is (CS, EIP), for the RP2350's bring-up heartbeat. Read from the other core
+// while it runs, so only roughly right.
+void t386_where(uint32_t *cs, uint32_t *eip) {
+  *cs = *eip = 0;
+  if (s_pc) cpui386_get_pc(s_pc->cpu, cs, eip);
 }
 
 uint32_t t386_instructions() {
   return s_pc ? (uint32_t)cpui386_get_cycle(s_pc->cpu) : 0;
+}
+
+// The timer's health, for the heartbeat: channel 0's reload value, how many periods its IRQs are
+// behind the clock, IRQ0s raised, and IRQ0s that found the last one still pending (lost).
+extern uint32_t pit_irq0_fired, pic_irq0_merged;
+void i8254_info(PITState *pit, uint32_t *count, uint32_t *behind);
+void t386_timer_info(uint32_t *count, uint32_t *behind, uint32_t *fired, uint32_t *lost) {
+  *count = *behind = 0;
+  if (s_pc) i8254_info(s_pc->pit, count, behind);
+  *fired = pit_irq0_fired;
+  *lost = pic_irq0_merged;
 }
 
 void t386_reset() {
@@ -231,13 +335,27 @@ void t386_reset() {
 
 // ---- running ---------------------------------------------------------------------------------
 
+static void (*s_audio_hook)(int);
+
+void t386_set_audio_hook(void (*hook)(int sound_written)) { s_audio_hook = hook; }
+
+extern uint32_t pico_spk_writes, pico_adlib_writes;
+
 void t386_run_until(uint32_t deadline_us) {
   if (!s_pc) return;
   // vga_step() keeps the retrace bit (3DA) moving, which DOS programs poll to pace themselves,
   // so it runs after every pc_step(). Drawing is left to the frontend (t386_refresh).
+  // The audio hook may make sound now: music written in the middle of a long frame then plays
+  // near when it was written, not all at the frame's end.
+  static uint32_t sound;
   do {
     pc_step(s_pc);
     vga_step(s_pc->vga);
+    if (s_audio_hook) {
+      const uint32_t now = pico_adlib_writes + pico_spk_writes;
+      s_audio_hook(now != sound);
+      sound = now;
+    }
   } while ((int32_t)(deadline_us - get_uticks()) > 0);
 }
 

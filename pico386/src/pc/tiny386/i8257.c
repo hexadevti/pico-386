@@ -402,6 +402,15 @@ static bool i8257_is_verify_transfer(I8257Regs *r)
     return (r->mode & 0x0c) == 0;
 }
 
+/* TINY386_PICO: guest RAM may be paged (pc_pagemem.h) */
+#ifdef T386_PAGED
+#define DMA_LOAD(d, a) pm_read8(a)
+#define DMA_STORE(d, a, v) pm_write8((a), (v))
+#else
+#define DMA_LOAD(d, a) ((d)->phys_mem[a])
+#define DMA_STORE(d, a, v) ((d)->phys_mem[a] = (v))
+#endif
+
 int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
                           int len)
 {
@@ -418,7 +427,7 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
         for (hwaddr i = 0;
              addr - pos - len + i < d->phys_mem_size && i < len;
              i++) {
-            p[i] = d->phys_mem[addr - pos - len + i];
+            p[i] = DMA_LOAD(d, addr - pos - len + i);
         }
         //cpu_physical_memory_read (d->phys_mem + addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -430,7 +439,7 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
         for (hwaddr i = 0;
              addr + pos + i < d->phys_mem_size && i < len;
              i++) {
-            p[i] = d->phys_mem[addr + pos + i];
+            p[i] = DMA_LOAD(d, addr + pos + i);
         }
         //cpu_physical_memory_read (addr + pos, buf, len);
     }
@@ -454,7 +463,7 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
         for (hwaddr i = 0;
              addr - pos - len + i < s->phys_mem_size && i < len;
              i++) {
-            s->phys_mem[addr - pos - len + i] = p[i];
+            DMA_STORE(s, addr - pos - len + i, p[i]);
         }
         //cpu_physical_memory_write (addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -466,7 +475,7 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
         for (hwaddr i = 0;
              addr + pos + i < s->phys_mem_size && i < len;
              i++) {
-            s->phys_mem[addr + pos + i] = p[i];
+            DMA_STORE(s, addr + pos + i, p[i]);
         }
         //cpu_physical_memory_write (addr + pos, buf, len);
     }

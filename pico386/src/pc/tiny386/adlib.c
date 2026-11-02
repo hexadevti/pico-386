@@ -162,7 +162,7 @@ AdlibState *adlib_new()
 {
     AdlibState *s = malloc(sizeof(AdlibState));
     memset(s, 0, sizeof(AdlibState));
-    s->freq = 44100;
+    s->freq = T386_AUDIO_RATE;   /* pico-386 */
     s->opl = OPLCreate (3579545, s->freq);
     if (!s->opl) {
         free(s);

@@ -60,6 +60,7 @@ typedef struct {
 } CPUI386_State;
 
 void cpui386_get_state(CPUI386 *cpu, CPUI386_State *state);
+void cpui386_get_pc(CPUI386 *cpu, u32 *cs, u32 *ip);   // pico-386
 int cpui386_get_excno(CPUI386 *cpu);
 
 CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb);

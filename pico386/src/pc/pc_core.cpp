@@ -30,16 +30,22 @@ extern const EmuCore kPC386;
 
 namespace {
 
-constexpr uint32_t kRate = 44100;
+constexpr uint32_t kRate = AUDIO_OUT_RATE;   // the mixer's rate too (T386_AUDIO_RATE)
 constexpr uint32_t kFrameUs = 16667;
-constexpr int kMixMax = 1024;
+// Sound is mixed and queued 128 samples at a time (the RP2350's DMA buffer). In 1024-sample
+// pieces a 30 ms gap was one piece that took 9 ms of OPL synthesis before any of it was queued,
+// and the queue ran dry meanwhile.
+constexpr int kMixMax = 128;
 
 uint16_t *s_fb;
 bool s_running;
 char s_error[200];
 uint32_t s_nextUs, s_lastAudioUs, s_lastAudioWait;
+void audioHook(int written);
 uint32_t s_speedT0, s_speedI0;     // the guest-speed meter's last sample
+uint32_t s_mixUs, s_lowQueueUs = ~0u, s_heartGapUs;   // the RP2350 heartbeat's (pc_audioStats)
 uint32_t s_maxGapUs;               // the longest time between two audio writes since the last meter
+uint32_t s_gapPeakUs;              // the recent longest gap, fading over about 2 s (pc_audio)
 uint32_t s_underrunsShown;         // the output underrun count at the last meter
 char s_speed[48];
 uint64_t s_audioFrac;              // sample-microseconds not yet turned into samples
@@ -57,8 +63,17 @@ const char *baseName(const std::string &p) {
 
 bool pc_loadRom(const char *ini);
 
+#if defined(PICO386_LOWMEM)
+// No framebuffer: tiny386 draws one line at a time into this and hands it to pc_video.
+uint16_t s_fbLine[T386_FB_W];
+#endif
+
 bool pc_init() {
+#if defined(PICO386_LOWMEM)
+  s_fb = s_fbLine;
+#else
   if (!s_fb) s_fb = (uint16_t *)hal_alloc_big(T386_FB_W * T386_FB_H * 2);
+#endif
   return s_fb != nullptr;
 }
 
@@ -91,10 +106,12 @@ bool pc_loadRom(const char *ini) {
   s_noteUntil = 0;
   pcvid_reset();
   hal_audio_start(kRate);
+  t386_set_audio_hook(audioHook);
   s_nextUs = get_uticks();
   s_lastAudioUs = hal_micros();
   s_lastAudioWait = hal_audio_wait_us();
   s_audioFrac = 0;
+  s_gapPeakUs = 0;
   s_speedT0 = hal_micros();
   s_speedI0 = 0;
   hal_log("tiny386: %s started, %u KB of heap", ini, (unsigned)(t386_heap_bytes() >> 10));
@@ -118,29 +135,58 @@ void pc_audio() {
   s_lastAudioUs = now;
   s_lastAudioWait = wait;
   if (elapsed > s_maxGapUs) s_maxGapUs = elapsed;
+  if (elapsed > s_heartGapUs) s_heartGapUs = elapsed;
   if (elapsed > 100000) elapsed = 100000;      // after a pause: no burst of stale sound
   // Keep a cushion queued. Making exactly as much sound as the real time that passed keeps the
   // queue at whatever it started with, which is empty: then any frame a little late ran it dry,
-  // and the speaker played a moment of silence (a tick). The queue's low point, here just before
-  // the write, is steered to 25 ms by making a little more or less sound; at the start or after
-  // a dry spell that is a few ms extra per frame, and almost nothing once it is there.
-  const int32_t cushion = 25000 - (int32_t)hal_audio_queued_us();
-  int32_t us = (int32_t)elapsed + cushion / 8;
+  // and the speaker played a moment of silence (a tick). So a little more or less sound is made,
+  // steering the queue after this write to 30 ms plus the longest recent gap between writes: the
+  // queue must last until the next write, and on the RP2350 it must still hold two buffers then
+  // (11.6 ms), since the DMA picks the buffer after the one it starts; the rest covers a gap
+  // longer than the recent ones. A fixed 25 ms before the write was not enough on the
+  // RP2350, where writes come 25-30 ms apart while guest RAM pages in, and the queue ran dry
+  // there a few times a second. At the start or after a dry spell that is a few ms extra per
+  // write, and almost nothing once it is there.
+  // The peak fades over about 2 s of real time; this runs up to 300 times a second when a game
+  // writes the Adlib often, so fading per call forgot a 25 ms gap in a quarter of a second.
+  if (elapsed > s_gapPeakUs) s_gapPeakUs = elapsed;
+  else s_gapPeakUs -= (uint32_t)((uint64_t)s_gapPeakUs * elapsed / 2000000);
+  uint32_t target = 30000 + s_gapPeakUs;
+  if (target > 62000) target = 62000;        // the RP2350's ring holds 70 ms
+  const uint32_t queued = hal_audio_queued_us();
+  if (queued < s_lowQueueUs) s_lowQueueUs = queued;
+  const int32_t cushion = (int32_t)target - (int32_t)(queued + elapsed);
+  int32_t us = (int32_t)elapsed + cushion / 4;
   if (us < 0) us = 0;
   s_audioFrac += (uint64_t)us * kRate;
   int n = (int)(s_audioFrac / 1000000);
   s_audioFrac -= (uint64_t)n * 1000000;
   while (n > 0) {
     const int k = n > kMixMax ? kMixMax : n;
+    const uint32_t t0 = hal_micros();
     t386_mix(s_stereo, k);
+    s_mixUs += hal_micros() - t0;
     for (int i = 0; i < k; i++) s_mono[i] = (int16_t)((s_stereo[2 * i] + s_stereo[2 * i + 1]) >> 1);
     hal_audio_write(s_mono, k);
     n -= k;
   }
 }
 
+// From inside t386_run_until: makes the sound so far once the guest has written the Adlib or the
+// speaker (and 1 ms has passed), or every 8 ms. Mixed only at the frame's end, every note written
+// during a frame started at its end; frames run 17-35 ms on the RP2350, so a 240 Hz music driver
+// came out uneven, and a long frame let the output queue run dry (a click).
+void audioHook(int written) {
+  const uint32_t since = hal_micros() - s_lastAudioUs;
+  if (since >= (written ? 1000u : 8000u)) pc_audio();
+}
+
 // The drawing job (core 0 on the P4).
 void drawJob(void *) {
+#if defined(PICO386_LOWMEM)
+  pcvid_render(nullptr, s_fb, hal_millis());   // pushes to the panel itself, in bands
+  return;
+#endif
   if (!hal_video_ready()) return;
   uint16_t *back = hal_video_back();
   // The bottom 10 rows are left alone: the picture never reaches them (25 text rows end at 310),
@@ -184,16 +230,29 @@ void pc_runFrame(bool draw) {
     s_noteUntil = 0;
     if (!g_settings.showFps) showNote(nullptr);              // the FPS meter repaints its own
   }
+  // TEMP (RP2350 bring-up): the board resets during the first frames, so trace them.
+  static int s_trace = 4;
+  if (s_trace) hal_log("frame: run until %lu", (unsigned long)s_nextUs);
   t386_run_until(s_nextUs);
+  if (s_trace) hal_log("frame: ran, %lu instr; audio", (unsigned long)t386_instructions());
   pc_audio();
+  if (s_trace) hal_log("frame: draw");
 
   if (draw && hal_video_ready()) hal_job_start(drawJob, nullptr);   // false: still drawing the last one
+  if (s_trace) { hal_log("frame: done"); s_trace--; }
 }
 
 // Millions of guest instructions per second since the last call (it reads low while the guest
 // idles in HLT, so measure with something busy running), then the sound diagnostics: "g" output
 // buffers that ran dry since the last meter, "s" mixes the Sound Blaster had no data for (since
 // power-on), and the longest time between two sound writes since the last meter (over 70 ms = a gap).
+// For the RP2350 heartbeat: time spent making sound, the audio queue's low point and the longest
+// time between two sound writes, since the last call.
+void audioStats(uint32_t *mixUs, uint32_t *lowQueueUs, uint32_t *gapUs) {
+  *mixUs = s_mixUs; *lowQueueUs = s_lowQueueUs == ~0u ? 0 : s_lowQueueUs; *gapUs = s_heartGapUs;
+  s_mixUs = 0; s_lowQueueUs = ~0u; s_heartGapUs = 0;
+}
+
 const char *pc_fpsText() {
   const uint32_t now = hal_micros(), ins = t386_instructions();
   const uint32_t us = now - s_speedT0;
@@ -228,7 +287,9 @@ void pc_shutdown() {
     stopMachine();                             // closes the disk images: guest writes reach the card
     s_running = false;
   }
+#if !defined(PICO386_LOWMEM)
   hal_free(s_fb);
+#endif
   s_fb = nullptr;
 }
 
@@ -330,3 +391,7 @@ const EmuCore kPC386 = {
   nullptr, nullptr, pc_shutdown,
   pc_keyEvent, pc_menuItems, pc_menuAction, pc_lastError, true, pc_fpsText,
 };
+
+void pc_audioStats(uint32_t *mixUs, uint32_t *lowQueueUs, uint32_t *gapUs) {   // diag_rp2350.cpp
+  audioStats(mixUs, lowQueueUs, gapUs);
+}

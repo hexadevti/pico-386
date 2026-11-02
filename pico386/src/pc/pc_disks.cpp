@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include "pc_internal.h"
+#include "pc_zip.h"
 #include "../frontend/ui.h"
 #include "../frontend/browser.h"
 #include "../frontend/settings.h"
@@ -70,6 +71,43 @@ bool acceptDisk(const std::string &path, std::string &tag) {
   if (k == DISK_NONE || (s_wanted != DISK_NONE && k != s_wanted)) return false;
   tag = kindTag(k, size);
   return true;
+}
+
+// A name shortened by pc_zip.cpp ("start~1a2b3c~end") as "start..end".
+std::string shownName(std::string n) {
+  const size_t t = n.find('~');
+  if (t != std::string::npos && t + 8 < n.size() && n[t + 7] == '~') n.replace(t, 8, "..");
+  return n;
+}
+
+// The disks of a set (the floppy images a zip held) to pick from. The one after current is
+// selected, so Enter puts the next disk in. false: Esc.
+bool chooseSetDisk(const std::vector<std::string> &images, const std::string &current,
+                   const std::string &letter, std::string &out) {
+  std::vector<std::string> labels(images.size()), names(images.size());
+  std::vector<ui::Item> items(images.size());
+  int sel = 0;
+  for (size_t i = 0; i < images.size(); i++) {
+    labels[i] = pczip_disk_label(images[i]);
+    names[i] = shownName(baseName(images[i]));
+    const bool now = images[i] == current;
+    items[i] = { labels[i].c_str(), now ? "In the drive" : nullptr, ui::ICON_LOAD, names[i].c_str() };
+    if (now) sel = (int)((i + 1) % images.size());
+  }
+  const std::string title = "Disk for " + letter;
+  const std::string sub = shownName(baseName(pczip_set_dir(images[0])));
+  ui::Screen scr;
+  scr.title = title.c_str();
+  scr.subtitle = sub.c_str();
+  scr.hints = "Enter|Select;Esc|Back";
+  for (;;) {
+    const uint8_t k = ui::list(scr, items.data(), (int)items.size(), &sel);
+    if (k == KEY_ESC || k == KEY_BACKSPACE) return false;
+    if (k == KEY_ENTER) {
+      out = images[sel];
+      return true;
+    }
+  }
 }
 
 // ---- the .ini [pc] keys ------------------------------------------------------------------------
@@ -409,7 +447,9 @@ bool pcdisk_set_drive(const std::string &ini, int drive, const std::string &imag
 std::string pcdisk_drive_label(const std::string &rel) {
   if (rel.empty()) return "Empty";
   if (isDir(pcdisk_abs(rel))) return rel[0] == '/' ? rel : "/" + rel;
-  std::string b = baseName(rel);
+  // one disk of a zip's set: which disk, then the game
+  const std::string set = pczip_set_dir(pcdisk_abs(rel));
+  std::string b = set.empty() ? baseName(rel) : pczip_disk_label(rel) + " - " + shownName(baseName(set));
   if (fileSize(pcdisk_abs(rel)) < 0) b += " (missing)";
   return b;
 }
@@ -426,14 +466,29 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
   // D: is a folder or a zip (a game as it was downloaded), unpacked to a folder when the PC
   // starts. A: and B: take those too, as a 1.44 MB floppy, besides their images.
   const bool floppy = drive == DRIVE_A || drive == DRIVE_B;
-  enum { ROW_IMAGE, ROW_FOLDER, ROW_ZIP, ROW_EJECT };
-  int rows[4], n = 0;
+  // A disk of a zip's set (pc_zip.cpp): the other disks come first, for the game's "insert disk 2"
+  // (a zip named in the .ini by hand has its first disk in: pc_glue.c's floppy_source)
+  std::vector<std::string> set;
+  std::string inDrive = loaded ? pcdisk_abs(current) : std::string();
+  if (floppy && loaded) {
+    std::string dir = pczip_set_dir(inDrive);
+    char unz[256];
+    if (dir.empty() && hasExt(inDrive, ".zip") && pczip_folder(inDrive.c_str(), unz, sizeof unz) == 0) dir = unz;
+    if (!dir.empty()) set = pczip_images(dir);
+    if (set.size() < 2) set.clear();
+    else if (hasExt(inDrive, ".zip")) inDrive = set[0];
+  }
+  const std::string nowDisk = set.empty() ? std::string() : pczip_disk_label(inDrive);
+  enum { ROW_SET, ROW_IMAGE, ROW_FOLDER, ROW_ZIP, ROW_EJECT };
+  int rows[5], n = 0;
+  if (!set.empty()) rows[n++] = ROW_SET;
   if (drive != DRIVE_D) rows[n++] = ROW_IMAGE;
   if (floppy || drive == DRIVE_D) { rows[n++] = ROW_FOLDER; rows[n++] = ROW_ZIP; }
   if (loaded) rows[n++] = ROW_EJECT;
-  ui::Item items[4];
+  ui::Item items[5];
   for (int i = 0; i < n; i++) {
     switch (rows[i]) {
+      case ROW_SET:    items[i] = { "Change disk", nowDisk.c_str(), ui::ICON_LOAD, note }; break;
       case ROW_IMAGE:  items[i] = { pick.c_str(), nullptr, ui::ICON_FOLDER, note }; break;
       case ROW_FOLDER: items[i] = { "Choose a folder", nullptr, ui::ICON_FOLDER, note }; break;
       case ROW_ZIP:    items[i] = { "Choose a zip file", nullptr, ui::ICON_LOAD, note }; break;
@@ -452,13 +507,29 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
     if (k != KEY_ENTER) continue;
     const int row = rows[sel];
     if (row == ROW_EJECT) { out.clear(); return 2; }
+    if (row == ROW_SET) {
+      if (chooseSetDisk(set, inDrive, letter, out)) return 1;
+      continue;
+    }
     // the browsers open beside what the drive holds now, so the next game is a key away
     std::string start = loaded ? pcdisk_abs(current) : std::string();
+    if (!set.empty() && !hasExt(start, ".zip")) start = pczip_source(pczip_set_dir(start));   // beside the zip, not its disks
     if (loaded) start = start.substr(0, start.find_last_of('/'));
     if (row == ROW_ZIP) {
-      if (pcdisk_browse(DISK_ZIP, ("Zip file for " + letter).c_str(), out, isDir(start) ? start.c_str() : nullptr))
-        return 1;
-      continue;
+      if (!pcdisk_browse(DISK_ZIP, ("Zip file for " + letter).c_str(), out, isDir(start) ? start.c_str() : nullptr))
+        continue;
+      // a zip of floppy images goes in as one of them: its only one, or the disk picked
+      if (floppy) {
+        char dir[256];
+        if (pczip_folder(out.c_str(), dir, sizeof dir) != 0) {
+          ui::message(letter.c_str(), "Cannot unpack this zip", 1800);
+          continue;
+        }
+        const std::vector<std::string> images = pczip_images(dir);
+        if (images.size() == 1) out = images[0];
+        else if (images.size() > 1 && !chooseSetDisk(images, "", letter, out)) continue;
+      }
+      return 1;
     }
     if (row == ROW_FOLDER) {
       if (!isDir(start)) start = hal_sd_root();

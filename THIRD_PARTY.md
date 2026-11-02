@@ -50,6 +50,8 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   The `#include` lines in `fmopl.c`, `i386.c` and `fpu.c` follow.
 - **`i386.c`, `pc.c`, `vga.c`:** `#pragma GCC optimize("O3")`, as upstream builds these at -O3.
   `i386.c` no longer `usleep(1)`s on HLT, because the frame loop paces itself.
+- **`i386.c`:** `cpui386_get_pc` (declared in `i386.h`) reads CS and EIP without touching the CPU,
+  for the RP2350's diagnostics task on the other core (`cpui386_get_state` refreshes the flags).
 - **`i386.c`:** when `ESP_PLATFORM` is defined but `BUILD_ESP32` isn't (our P4 build), it includes
   `esp_attr.h` and puts `cpu_exec1` in IRAM (`IRAM_ATTR_CPU_EXEC1`) along with the functions
   already marked `IRAM_ATTR`. The flag getters, `refresh_flags`, `read_desc`, `set_seg`,
@@ -85,3 +87,51 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   8000 Hz played off pitch. The new one keeps its 16.16 position between calls, interpolates
   linearly, and also plays signed 8-bit, which upstream left silent. When the DMA data runs out
   it holds the last value instead of dropping to silence, and counts it in `sb16_starved`.
+- **The timer (2026-11-02).** Prince of Persia's 240 Hz music timer dragged and sped up on the
+  RP2350. Only 140-160 IRQ0s a second got through there, and 15% of those were lost.
+  - **`pc.c`:** `pc_step` calls `i8254_update_irq` every `PC_TIMER_STEP` (256) instructions
+    instead of once per `PC_STEP_COUNT`, since a step can take 10 ms when guest RAM pages in.
+  - **`i8254.c`, `i8259.c`:** an IRQ0 edge that found IRQ0 still pending in the PIC merged with
+    it, and the tick was lost. The PIT now asks first (`i8254_set_irq_pending`,
+    `i8259_irq_pending`) and keeps the tick for later, at most 50 ms (or two periods) of them.
+  - **Counters for the RP2350 heartbeat:** `pit_irq0_fired`, `pic_irq0_merged` and
+    `i8254_info`, read through `t386_timer_info`.
+  - **Result on the device:** 450-495 IRQ0s every 2 s of the 480 due, and none lost.
+- **The sound rate and the run loop (2026-11-02).**
+  - **`adlib.c`, `pcspk.c`, `sb16.c`:** the fixed 44100 Hz output rate became `T386_AUDIO_RATE`
+    (`tiny386_port.h`, the board's `AUDIO_OUT_RATE`). The RP2350 mixes at 22050 Hz, which halves
+    the OPL synthesis. sb16.c's check of the guest's own rate (`freq >= 44100`) is unchanged.
+  - **`pc.c`:** `pico_spk_writes` and `pico_adlib_writes` count guest writes to port 61h and to
+    the Adlib/SB FM ports. `t386_run_until` reads them to mix right after the guest plays a note.
+
+### The low-memory build (2026-10-27, for the RP2350)
+
+`T386_PAGED` is set by `tiny386_port.h` when `board.h` selects `PICO386_LOWMEM` (the Pico 2 build,
+or the desktop with `-DEMU_LOWMEM=ON`). Guest RAM then lives in the mainboard's PSRAM, which is
+not memory-mapped, and is paged through 1 KB SRAM frames (`pc_pagemem.c`, ours). Under the flag:
+
+- **`i386.c`:**
+  - `pload*`/`pstore*` go through `pm_read*`/`pm_write*`.
+  - The string fast paths take `PHYS_PTR` (`pm_ptr`) instead of `phys_mem + addr`.
+  - Those paths cut a run at `STR_PAGE` instead of 4096 (2026-10-28): a `pm_ptr` pointer is good
+    only to the end of its 1 KB frame. Without the flag `STR_PAGE` is 4096, as upstream.
+  - On the RP2350 (2026-10-28) the file is built at -O2 -fno-inline-functions instead of -O3,
+    and `IRAM_ATTR` puts `cpu_exec1` and the helpers in `.time_critical.i386`, which
+    arduino-pico copies to SRAM. `cpu_exec1` is 90 KB that way (79 KB at -Os, 137 KB at -O3).
+    From flash it ran through the 16 KB XIP cache: CheckIt gave 1.73x PC-XT, and 3.15x in SRAM
+    at -Os.
+  - The TLB uses the non-pointer form that upstream keeps for `BUILD_ESP32`.
+  - It keeps the physical address of the PTE (`ppte`) instead of a host pointer, so setting the
+    accessed and dirty bits is a paged store.
+- **`i8257.c`:** DMA reads and writes go through `DMA_LOAD`/`DMA_STORE` (`pm_read8`/`pm_write8`).
+- **`pc.c`:**
+  - `pc_new` allocates no RAM (`t386_start` sets up the pages), and VRAM is the start of the
+    SRAM arena (`pm_vram`).
+  - The kernel command line is written with `pm_write`.
+- **`vga.c`, `vga.h`:**
+  - There is no framebuffer: `fb_data` is one 800-pixel line.
+  - Each finished graphics line goes to a sink, `vga_set_line_sink()` (new).
+  - The text-mode framebuffer pass is skipped, since the frontend draws text from text RAM.
+- **`tiny386_port.h`, RP2350 only:** `CLOCK_MONOTONIC` is defined as `CLOCK_REALTIME`. newlib on
+  arm-none-eabi has neither the constant nor `clock_gettime`; `posix_rp2350.cpp` supplies a
+  `clock_gettime` that counts from boot, and `usleep`.

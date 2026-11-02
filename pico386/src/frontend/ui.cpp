@@ -9,8 +9,19 @@
 namespace ui {
 
 static uint16_t *s_cv = nullptr;       // what present() pushes
+#if defined(PICO386_LOWMEM)
+// The canvas is the start of the SRAM arena, which is the guest's VRAM while a machine runs. So
+// in game only the bottom strip is drawn (strip mode): s_cv then points 310 rows before s_strip,
+// and every writer clips to rows >= s_rowMin. The full canvas comes back while VRAM is parked.
+// There is no room for a cached background either: drawBackground computes it each time.
+static uint16_t  s_strip[PANEL_W * 10];
+static uint16_t *s_full = nullptr;
+static int       s_rowMin = 0;
+#else
 static uint16_t *s_bg = nullptr;       // the background, rebuilt when the backdrop changes
 static bool      s_bgValid = false;
+static constexpr int s_rowMin = 0;
+#endif
 
 // ------------------------------------------------------------------------------------------------
 // colour helpers
@@ -24,20 +35,38 @@ static inline uint16_t mix(uint16_t a, uint16_t b, int t) {      // t: 0 = a .. 
 
 static inline int alpha256(uint8_t a) { return a + (a >> 7); }
 
-static inline bool onPanel(int x, int y) { return (unsigned)x < PANEL_W && (unsigned)y < PANEL_H; }
+static inline bool onPanel(int x, int y) { return (unsigned)x < PANEL_W && y >= s_rowMin && y < PANEL_H; }
 
 // ------------------------------------------------------------------------------------------------
+#if defined(PICO386_LOWMEM)
+bool begin() {
+  size_t n = 0;
+  uint8_t *a = hal_arena(&n);
+  if (!a || n < PANEL_W * PANEL_H * 2) return false;
+  s_cv = s_full = (uint16_t *)a;
+  return true;
+}
+
+void setStrip(bool on) {
+  s_rowMin = on ? PANEL_H - 10 : 0;
+  // only rows >= s_rowMin are ever addressed through it
+  s_cv = on ? (uint16_t *)((uintptr_t)s_strip - (uintptr_t)(PANEL_H - 10) * PANEL_W * 2) : s_full;
+}
+#else
 bool begin() {
   if (!s_cv) s_cv = (uint16_t *)hal_alloc_big(PANEL_W * PANEL_H * 2);
   if (!s_bg) s_bg = (uint16_t *)hal_alloc_big(PANEL_W * PANEL_H * 2);
   return s_cv && s_bg;
 }
 
+void setStrip(bool) {}
+#endif
+
 uint16_t *canvas() { return s_cv; }
 
 void fill(int x, int y, int w, int h, uint16_t c) {
   if (x < 0) { w += x; x = 0; }
-  if (y < 0) { h += y; y = 0; }
+  if (y < s_rowMin) { h -= s_rowMin - y; y = s_rowMin; }
   if (x + w > PANEL_W) w = PANEL_W - x;
   if (y + h > PANEL_H) h = PANEL_H - y;
   for (int r = 0; r < h; r++) {
@@ -48,7 +77,7 @@ void fill(int x, int y, int w, int h, uint16_t c) {
 
 void blend(int x, int y, int w, int h, uint16_t c, uint8_t alpha) {
   if (x < 0) { w += x; x = 0; }
-  if (y < 0) { h += y; y = 0; }
+  if (y < s_rowMin) { h -= s_rowMin - y; y = s_rowMin; }
   if (x + w > PANEL_W) w = PANEL_W - x;
   if (y + h > PANEL_H) h = PANEL_H - y;
   const int t = alpha256(alpha);
@@ -66,7 +95,7 @@ static void roundShape(int x, int y, int w, int h, int r, Col col) {
   if (r * 2 > w) r = w / 2;
   for (int j = 0; j < h; j++) {
     const int py = y + j;
-    if ((unsigned)py >= PANEL_H) continue;
+    if (py < s_rowMin || py >= PANEL_H) continue;
     float inset = 0;
     const int d = j < r ? j : (j >= h - r ? h - 1 - j : -1);
     if (d >= 0) {
@@ -203,11 +232,8 @@ void icon(int x, int y, uint8_t id, uint16_t c) {
 // ------------------------------------------------------------------------------------------------
 // background
 // ------------------------------------------------------------------------------------------------
-static const uint16_t *s_backdrop = nullptr;   // non-null while a game frame is the backdrop
-static uint16_t *s_frameCopy = nullptr;
-
-static void buildBackground() {
-  // vertical gradient with two soft glows: violet top right, teal bottom left
+// vertical gradient with two soft glows: violet top right, teal bottom left
+static void gradient(uint16_t *dst) {
   for (int y = 0; y < PANEL_H; y++) {
     const uint16_t base = mix(kBgTop, kBgBot, y * 256 / PANEL_H);
     for (int x = 0; x < PANEL_W; x++) {
@@ -216,9 +242,22 @@ static void buildBackground() {
       const float d2 = hypotf((float)(x - 30), (float)(y - 310)) / 180.0f;
       if (d1 < 1) c = mix(c, RGB565(78, 34, 130), (int)((1 - d1) * (1 - d1) * 150));
       if (d2 < 1) c = mix(c, RGB565(10, 74, 104), (int)((1 - d2) * (1 - d2) * 150));
-      s_bg[y * PANEL_W + x] = c;
+      dst[y * PANEL_W + x] = c;
     }
   }
+}
+
+#if defined(PICO386_LOWMEM)
+// No game frame to show behind the menu (there is no framebuffer), so it is always the gradient.
+void setBackdrop(const uint16_t *) {}
+void clearBackdrop() {}
+void drawBackground() { gradient(s_cv); }
+#else
+static const uint16_t *s_backdrop = nullptr;   // non-null while a game frame is the backdrop
+static uint16_t *s_frameCopy = nullptr;
+
+static void buildBackground() {
+  gradient(s_bg);
   if (s_backdrop) {                     // the paused game, dimmed into the gradient
     for (int y = 0; y < SCREEN_H; y++)
       for (int x = 0; x < SCREEN_W; x++) {
@@ -230,7 +269,7 @@ static void buildBackground() {
 }
 
 void setBackdrop(const uint16_t *frame) {
-  if (!s_frameCopy) s_frameCopy = (uint16_t *)hal_alloc_big(SCREEN_W * SCREEN_H * 2);
+  if (frame && !s_frameCopy) s_frameCopy = (uint16_t *)hal_alloc_big(SCREEN_W * SCREEN_H * 2);
   if (s_frameCopy && frame) {
     memcpy(s_frameCopy, frame, SCREEN_W * SCREEN_H * 2);
     s_backdrop = s_frameCopy;
@@ -247,6 +286,7 @@ void drawBackground() {
   if (!s_bgValid) buildBackground();
   memcpy(s_cv, s_bg, PANEL_W * PANEL_H * 2);
 }
+#endif
 
 void present() { hal_panel_push(0, 0, PANEL_W, PANEL_H, s_cv, PANEL_W); }
 
@@ -429,7 +469,11 @@ uint8_t waitKey(uint32_t timeoutMs) {
 // The row typing k jumps to, or sel when none matches. One letter (or the same one again) goes to
 // the next row after sel starting with it, so pressing it repeatedly cycles through them; several
 // different letters typed in a row find the first row from sel on that starts with them.
-static int typeAhead(const Item *items, int n, int sel, uint8_t k) {
+static Item rowOf(const Screen &screen, const Item *items, int i) {
+  return items ? items[i] : screen.itemAt(screen.ctx, i);
+}
+
+static int typeAhead(const Screen &screen, const Item *items, int n, int sel, uint8_t k) {
   static char typed[16];
   static size_t len;
   static uint32_t at;
@@ -445,7 +489,7 @@ static int typeAhead(const Item *items, int n, int sel, uint8_t k) {
   const int start = same ? sel + 1 : sel;
   for (int i = 0; i < n; i++) {
     const int j = (start + i) % n;
-    const char *l = items[j].label;
+    const char *l = rowOf(screen, items, j).label;
     if (!l) continue;
     size_t m = 0;
     while (m < wantLen && l[m] && ((l[m] >= 'A' && l[m] <= 'Z') ? l[m] + 32 : l[m]) == want[m]) m++;
@@ -456,7 +500,7 @@ static int typeAhead(const Item *items, int n, int sel, uint8_t k) {
 
 uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
   bool tall = false;
-  for (int i = 0; i < n; i++) tall |= items[i].sub != nullptr;
+  for (int i = 0; i < n; i++) tall |= rowOf(screen, items, i).sub != nullptr;
   const int rowH = tall ? 40 : 24;
   const int cardX = 6, cardY = kHeadH + 8, cardW = PANEL_W - 12;
   const int rows = (kFootY - 6 - cardY - 8) / rowH;
@@ -478,7 +522,7 @@ uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
     const bool scroll = n > rows;
     const int rowX = cardX + 4, rowW = cardW - 8 - (scroll ? 8 : 0);
     for (int i = 0; i < rows && first + i < n; i++) {
-      const Item &it = items[first + i];
+      const Item it = rowOf(screen, items, first + i);
       const int y = top + i * rowH, cy = y + rowH / 2;
       const bool on = first + i == *sel;
       if (on) {
@@ -546,7 +590,7 @@ uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
       default:
         if (n > 0 && ((k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z') || (k >= '0' && k <= '9')))
         {
-          const int found = typeAhead(items, n, *sel, k);
+          const int found = typeAhead(screen, items, n, *sel, k);
           // a row found off screen comes in at the top, with the rows after it below
           if (found != *sel && (found < first || found >= first + rows)) first = found < n - rows ? found : n - rows;
           *sel = found;

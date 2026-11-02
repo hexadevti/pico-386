@@ -16,6 +16,7 @@
 #include <string>
 #include <chrono>
 #include "../hal.h"
+#include "../keyscript.h"
 
 #ifndef EMU_WINDOW_SCALE
 #define EMU_WINDOW_SCALE 2
@@ -56,9 +57,71 @@ void hal_log(const char *fmt, ...) {
 
 void hal_reboot()           { hal_log("reboot requested - exiting"); exit(0); }
 void hal_reboot_to_loader() { hal_log("loader requested - exiting"); exit(0); }
+#if defined(PICO386_LOWMEM)
+// The RP2350's heap, simulated: everything our code takes from the heap (operator new, so every
+// std::string and vector, plus hal_alloc_*) is counted, with newlib's 8-byte chunk header, against
+// PC_HEAP KB. Over the budget it logs and fails as the device's malloc does (NULL, so operator new
+// throws, and an uncaught bad_alloc aborts as on the device), so the paths that ran the device out
+// of its last 10 KB fail here too (run under gdb for the stack). Off without PC_HEAP.
+#include <malloc.h>
+#include <new>
+static size_t s_heapUsed = 0, s_heapPeak = 0, s_heapBudget = (size_t)-1;
+static bool   s_heapInit = false;
+static size_t heapCost(size_t n) { return (n + 8 + 7) & ~(size_t)7; }
+static void *heapAlloc(size_t n, bool zero) {
+  if (!s_heapInit) {
+    s_heapInit = true;
+    if (const char *e = getenv("PC_HEAP")) s_heapBudget = (size_t)atol(e) * 1024;
+  }
+  if (s_heapUsed + heapCost(n) > s_heapBudget) {
+    printf("heap: out of memory, %u bytes wanted, %u of %u in use\n", (unsigned)n,
+           (unsigned)s_heapUsed, (unsigned)s_heapBudget);
+    fflush(stdout);
+    return nullptr;
+  }
+  void *p = zero ? calloc(1, n ? n : 1) : malloc(n ? n : 1);
+  if (!p) return nullptr;
+  s_heapUsed += heapCost(_msize(p));
+  if (s_heapUsed > s_heapPeak) s_heapPeak = s_heapUsed;
+  return p;
+}
+static void heapFree(void *p) {
+  if (!p) return;
+  s_heapUsed -= heapCost(_msize(p));
+  free(p);
+}
+void *operator new(size_t n)   { void *p = heapAlloc(n, false); if (!p) throw std::bad_alloc(); return p; }
+void *operator new[](size_t n) { void *p = heapAlloc(n, false); if (!p) throw std::bad_alloc(); return p; }
+void *operator new(size_t n, const std::nothrow_t &) noexcept   { return heapAlloc(n, false); }
+void *operator new[](size_t n, const std::nothrow_t &) noexcept { return heapAlloc(n, false); }
+void operator delete(void *p) noexcept           { heapFree(p); }
+void operator delete[](void *p) noexcept         { heapFree(p); }
+void operator delete(void *p, size_t) noexcept   { heapFree(p); }
+void operator delete[](void *p, size_t) noexcept { heapFree(p); }
+void *hal_alloc_big(size_t n)  { return heapAlloc(n, true); }
+void *hal_alloc_fast(size_t n) { return heapAlloc(n, true); }
+void  hal_free(void *p)        { heapFree(p); }
+#else
 void *hal_alloc_big(size_t n)  { return calloc(1, n); }
 void *hal_alloc_fast(size_t n) { return calloc(1, n); }
 void  hal_free(void *p)        { free(p); }
+#endif
+#if defined(PICO386_LOWMEM)
+// The RP2350's memory, simulated: the PSRAM is a plain buffer reached only through these calls,
+// and the arena a fixed block the size of the RP2350's, so the desktop pages exactly as it does.
+static uint8_t *s_psram;
+static uint8_t  s_arenaBuf[LOWMEM_ARENA_BYTES] __attribute__((aligned(8)));
+extern "C" size_t hal_psram_size(void) { return PSRAM_BYTES; }
+extern "C" void hal_psram_read(uint32_t a, void *dst, size_t n) {
+  if (!s_psram) s_psram = (uint8_t *)calloc(1, PSRAM_BYTES);
+  if (a < PSRAM_BYTES && n <= PSRAM_BYTES - a) memcpy(dst, s_psram + a, n);
+}
+extern "C" void hal_psram_write(uint32_t a, const void *src, size_t n) {
+  if (!s_psram) s_psram = (uint8_t *)calloc(1, PSRAM_BYTES);
+  if (a < PSRAM_BYTES && n <= PSRAM_BYTES - a) memcpy(s_psram + a, src, n);
+}
+extern "C" uint8_t *hal_arena(size_t *size) { *size = sizeof s_arenaBuf; return s_arenaBuf; }
+#endif
 bool  hal_job_start(void (*job)(void *), void *arg) { job(arg); return true; }
 void  hal_job_wait()           {}
 int   hal_battery_percent()    { return -1; }
@@ -134,6 +197,16 @@ static uint8_t mapKey(const SDL_Keysym &k) {
 }
 
 void hal_yield() {
+#if defined(PICO386_LOWMEM)
+  // PC_HEAP's heartbeat, like the device's diag line: in use now, and the peak since the last line.
+  static uint32_t lastHeap = 0;
+  if (s_heapBudget != (size_t)-1 && hal_millis() - lastHeap >= 2000) {
+    lastHeap = hal_millis();
+    printf("heap: %u B in use, peak %u, budget %u\n", (unsigned)s_heapUsed, (unsigned)s_heapPeak,
+           (unsigned)s_heapBudget);
+    s_heapPeak = s_heapUsed;
+  }
+#endif
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     switch (e.type) {
@@ -154,56 +227,17 @@ void hal_yield() {
   }
 }
 
-// Test hook: PC_KEYS is a comma-separated script run once the queue is empty. Tokens: a key
-// name (up down left right enter esc bs del caps f1..f10 home end pgup pgdn space ctrl alt shift)
-// or a single character is pressed and released; "ctrl+esc" holds the first keys while tapping the
-// last ("ctrl+alt+del" holds two);
-// wNNN waits NNN ms; "shot" saves <sd>/shotN.bmp; "quit" exits.
+// Test hook: PC_KEYS is a KeyScript (keyscript.h) run once the queue is empty. Besides keys and
+// waits: "shot" saves <sd>/shotN.bmp; "quit" exits.
 static void scriptStep() {
-  static const char *s = getenv("PC_KEYS");
-  static uint32_t waitUntil = 0;
+  static KeyScript ks;
+  static bool started = false;
   static int shots = 0;
-  static uint8_t held = 0, mods[2], nmods = 0;
-  if (held && hal_millis() >= waitUntil) {
-    qPush(held, KEYSTATE_RELEASED);
-    while (nmods) qPush(mods[--nmods], KEYSTATE_RELEASED);
-    held = 0;
-    waitUntil = hal_millis() + 60;
-  }
-  if (!s || !*s || held || s_qHead != s_qTail || hal_millis() < waitUntil) return;
-  const char *end = strchr(s, ',');
-  const std::string t(s, end ? (size_t)(end - s) : strlen(s));
-  s = end ? end + 1 : s + strlen(s);
-  static const struct { const char *n; uint8_t c; } kNames[] = {
-    { "up", KEY_UP }, { "down", KEY_DOWN }, { "left", KEY_LEFT }, { "right", KEY_RIGHT },
-    { "enter", KEY_ENTER }, { "esc", KEY_ESC }, { "bs", KEY_BACKSPACE }, { "tab", KEY_TAB }, { "home", KEY_HOME },
-    { "end", KEY_END }, { "pgup", KEY_PGUP }, { "pgdn", KEY_PGDN }, { "space", KEY_SPACE },
-    { "ctrl", KEY_CTRL }, { "alt", KEY_ALT }, { "shift", KEY_SHIFT_L }, { "rshift", KEY_SHIFT_R }, { "del", KEY_DEL }, { "caps", KEY_CAPS },
-    { "f1", KEY_F1 }, { "f2", KEY_F2 }, { "f3", KEY_F3 }, { "f4", KEY_F4 }, { "f5", KEY_F5 },
-    { "f6", KEY_F6 }, { "f7", KEY_F7 }, { "f8", KEY_F8 }, { "f9", KEY_F9 }, { "f10", KEY_F10 },
-  };
-  if (t == "quit") exit(0);
-  if (t == "shot") { char n[32]; snprintf(n, sizeof(n), "shot%d.bmp", ++shots); saveShot(n); return; }
-  if (t.size() > 1 && t[0] == 'w' && isdigit((unsigned char)t[1])) { waitUntil = hal_millis() + atoi(t.c_str() + 1); return; }
-  auto code = [&](const std::string &n) -> uint8_t {
-    for (const auto &k : kNames) if (n == k.n) return k.c;
-    return n.size() == 1 ? (uint8_t)n[0] : 0;
-  };
-  // the tokens before the last '+' are held (a lone "+" is the character)
-  std::string rest = t;
-  uint8_t m[2];
-  int nm = 0;
-  for (size_t plus; rest.size() > 1 && (plus = rest.find('+')) != std::string::npos && nm < 2;) {
-    if (const uint8_t mc = code(rest.substr(0, plus))) m[nm++] = mc;
-    rest = rest.substr(plus + 1);
-  }
-  const uint8_t c = code(rest);
-  if (c) {
-    for (int i = 0; i < nm; i++) { qPush(m[i], KEYSTATE_PRESSED); mods[nmods++] = m[i]; }
-    qPush(c, KEYSTATE_PRESSED);
-    held = c;
-  }
-  waitUntil = hal_millis() + 80;
+  if (!started) { started = true; ks.start(getenv("PC_KEYS")); }
+  char t[32];
+  if (!ks.step(hal_millis(), s_qHead == s_qTail, qPush, t, sizeof(t))) return;
+  if (!strcmp(t, "quit")) exit(0);
+  if (!strcmp(t, "shot")) { char n[32]; snprintf(n, sizeof(n), "shot%d.bmp", ++shots); saveShot(n); }
 }
 
 bool hal_key_poll(KeyEvent *ev) {

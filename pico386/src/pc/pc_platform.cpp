@@ -13,6 +13,9 @@
 #include "../hal/hal.h"
 #include "pc_glue.h"
 #include "pc_folder.h"
+#if defined(PICO386_LOWMEM)
+#include "pc_pagemem.h"
+#endif
 
 // Blocks up to this size go to internal RAM when it has room (CPU state, TLB, device structs);
 // anything larger (guest RAM, VRAM, the framebuffer) to PSRAM.
@@ -113,11 +116,13 @@ void t386_log(const char *fmt, ...) {
 }
 
 void t386_release_all() {
-  pfolder_close_all();          // writes folder disks back while their tree is still readable
   for (int i = 0; i < kMaxFiles; i++)
     if (s_files[i]) { fclose(s_files[i]); s_files[i] = nullptr; }
   if (s_count) hal_log("tiny386: releasing %u blocks, %u KB", (unsigned)s_count, (unsigned)(s_bytes >> 10));
   while (s_blocks.next != &s_blocks) untrack(s_blocks.next + 1);
+  // Folder disks are written back last: their tables are pc_folder's own, and on the RP2350 the
+  // write-back needs the heap the machine's blocks held (about 10 KB is free while it runs).
+  pfolder_close_all();
 }
 
 void t386_flush_files() {
@@ -147,8 +152,18 @@ int load_rom(void *phys_mem, const char *file, uint32_t addr, int backward) {
   fseek(fp, 0, SEEK_END);
   const long len = ftell(fp);
   rewind(fp);
+#if defined(PICO386_LOWMEM)
+  // Guest RAM is paged: read in chunks and write them through the pager.
+  (void)phys_mem;
+  uint32_t at = backward ? addr - (uint32_t)len : addr;
+  size_t got = 0;
+  uint8_t buf[512];
+  for (size_t k; (k = fread(buf, 1, sizeof(buf), fp)) > 0; at += (uint32_t)k, got += k)
+    pm_write(at, buf, k);
+#else
   uint8_t *dst = (uint8_t *)phys_mem + (backward ? addr - len : addr);
   const size_t got = fread(dst, 1, (size_t)len, fp);
+#endif
   fclose(fp);
   hal_log("load_rom: %s, %ld bytes at 0x%05lx", file, len, (unsigned long)(backward ? addr - len : addr));
   return (int)got;

@@ -43,7 +43,7 @@ void     hal_delay(uint32_t ms);
 void     hal_yield();                      // let other tasks / the SDL event loop run
 void     hal_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void     hal_reboot();
-void     hal_reboot_to_loader();           // esp32loader menu on the P4; quit on the desktop
+void     hal_reboot_to_loader();           // PicoMultiLoader / esp32loader menu; quit on the desktop
 void    *hal_alloc_big(size_t n);          // PSRAM on the P4 (zeroed)
 void    *hal_alloc_fast(size_t n);         // internal RAM if it fits, else PSRAM (zeroed)
 void     hal_free(void *p);
@@ -95,3 +95,17 @@ uint32_t hal_audio_queued_us();            // sound written but not yet played
 // ---------------------------------------------------------------------------------------------
 bool        hal_sd_mounted();
 const char *hal_sd_root();                 // "/sd" on the P4, the sdcard folder on the desktop
+
+#if defined(PICO386_LOWMEM)
+// ---------------------------------------------------------------------------------------------
+// PICO386_LOWMEM (the RP2350): the PSRAM that holds the guest's RAM, which is not on the bus,
+// and the SRAM arena shared by VRAM, the page frames and the menu canvas (pc_pagemem.h).
+// No game framebuffer: hal_video_back()/front() return null and the PC pushes bands itself.
+// ---------------------------------------------------------------------------------------------
+extern "C" {
+size_t   hal_psram_size(void);
+void     hal_psram_read(uint32_t addr, void *dst, size_t n);
+void     hal_psram_write(uint32_t addr, const void *src, size_t n);
+uint8_t *hal_arena(size_t *size);
+}
+#endif

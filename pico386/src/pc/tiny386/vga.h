@@ -63,6 +63,10 @@ typedef struct VGAPicoInfo {
     uint16_t palette[16];     /* RGB565 */
 } VGAPicoInfo;
 void vga_pico_info(VGAState *s, VGAPicoInfo *p);
+/* pico-386 low-memory build (T386_PAGED): there is no framebuffer. fb_data is one 800-pixel line
+   and each finished line of a graphics picture goes to the sink: line y of h, w pixels. */
+typedef void VGAPicoLineFunc(void *opaque, int y, const uint16_t *line, int w, int h);
+void vga_set_line_sink(VGAState *s, VGAPicoLineFunc *f, void *opaque);
 #endif
 
 #endif /* VGA_H */

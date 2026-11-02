@@ -58,6 +58,7 @@ struct PITState {
 	PITChannelState channels[3];
 	void *pic;
 	void (*set_irq)(void *pic, int irq, int level);
+	int (*irq_pending)(void *pic, int irq);   /* pico-386: see i8254_update_irq */
 };
 
 uint32_t get_uticks();
@@ -266,6 +267,17 @@ static void pit_reset(void *opaque)
 	}
 }
 
+uint32_t pit_irq0_fired;   /* pico-386: diagnostics (t386_timer_info) */
+
+/* pico-386: channel 0's reload value, and how many periods the IRQs are behind the clock */
+void i8254_info(PITState *pit, uint32_t *count, uint32_t *behind)
+{
+	PITChannelState *s = pit->channels;
+	uint32_t d = ((uint64_t) (get_uticks() - s->count_load_time)) * PIT_FREQ / 1000000;
+	*count = s->count;
+	*behind = s->count && (int32_t)(d - s->last_irq_count) > 0 ? (d - s->last_irq_count) / s->count : 0;
+}
+
 void i8254_update_irq(PITState *pit)
 {
 	uint32_t uticks = get_uticks();
@@ -276,9 +288,19 @@ void i8254_update_irq(PITState *pit)
 	case 3:
 		if (s->last_irq_count + s->count - d >= 0x80000000) {
 			if (s->irq != -1) {
+				/* pico-386: while the last IRQ0 is still pending, a new edge would merge with it
+				   and the tick would be lost; a slow guest then loses a share of a fast timer and
+				   music driven by it drags and speeds up with the load. Keep the tick for later
+				   instead, at most 50 ms (or two periods) of them. */
+				uint32_t cap = s->count * 2 > PIT_FREQ / 20 ? s->count * 2 : PIT_FREQ / 20;
+				if (d - s->last_irq_count - s->count > cap)
+					s->last_irq_count = d - s->count - cap;
+				if (pit->irq_pending && pit->irq_pending(pit->pic, s->irq))
+					break;
 				pit->set_irq(pit->pic, s->irq, 1);
 				pit->set_irq(pit->pic, s->irq, 0);
 				s->last_irq_count += s->count;
+				pit_irq0_fired++;
 				// avoid wraparound
 				if (uticks - s->count_load_time > (1u << 31)) {
 					pit_load_count(pit, s, s->count);
@@ -289,6 +311,12 @@ void i8254_update_irq(PITState *pit)
 	default:
 		abort();
 	}
+}
+
+/* pico-386: lets the PIT ask the PIC whether its IRQ is still waiting */
+void i8254_set_irq_pending(PITState *pit, int (*irq_pending)(void *pic, int irq))
+{
+	pit->irq_pending = irq_pending;
 }
 
 PITState *i8254_init(int irq, void *pic, void (*set_irq)(void *pic, int irq, int level))
