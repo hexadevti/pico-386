@@ -6,7 +6,17 @@ build-*/
 *.exe
 *.dll
 
-# the desktop build's SD card: ROMs are copyrighted, never commit them
-sdcard/
+# the desktop build's SD card. Only what may be shared is committed: the BIOS (LGPL), free and
+# empty disk images, and the tests. Never commit MS-DOS, Windows or games.
+sdcard/*
+!sdcard/README.md
+!sdcard/roms/
+!sdcard/pc-386/
+sdcard/pc-386/*
+!sdcard/pc-386/disks/
+!sdcard/pc-386/m12.ini
+!sdcard/pc-386/m13.ini
+!sdcard/pc-386/beep.ini
+!sdcard/pc-386/cdboot.ini
 
 .claude/

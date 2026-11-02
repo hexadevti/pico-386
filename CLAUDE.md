@@ -278,9 +278,9 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     `[pico] boot = cd` becomes SeaBIOS's CMOS boot order in `t386_start` (3Dh/38h); without
     it SeaBIOS tries C: before the CD. `pc_core` writes `[pico] mouse` (0/1/2) and the
     button keys when they change. `pcini_get_in`/`pcini_set_in` edit any section.
-  - Test: `sdcard/pc-386/m13.iso` is an El Torito CD (m13.img, floppy emulation); `cdt.ini` boots
+  - Test: `sdcard/pc-386/disks/tests/m13.iso` is an El Torito CD (m13.img, floppy emulation); `cdt.ini` boots
     it ahead of `dos.img`.
-  - The CD in DOS needs a guest driver. `sdcard/pc-386/cdrv.img` is a floppy holding FreeDOS's
+  - The CD in DOS needs a guest driver. `sdcard/pc-386/cdrv.img` (`disks/cdrom-driver.img` in git) is a floppy holding FreeDOS's
     `UDVD2.SYS`. Add `DEVICE=C:\DOS\UDVD2.SYS /D:CDROM1 /UX` to CONFIG.SYS, and
     `C:\DOS\MSCDEX.EXE /D:CDROM1 /L:E` to AUTOEXEC.BAT ahead of SMARTDRV. This works on
     DOSHDD (MS-DOS 6 + Win 3.11) on the desktop and on the device (2026-10-19).
@@ -407,12 +407,16 @@ the repo root, because `PC_INI` paths are relative to the cwd.
 - `PC_WAV=file` dumps the mono s16 44.1 kHz audio stream.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
 
-Local test data in the gitignored `sdcard/`:
+Test data in `sdcard/`. It is gitignored except what may be shared (2026-11-02, the user asked):
+`roms/`, `pc-386/disks/` (FreeDOS floppies, `dos.img` zipped as `freedos-hdd-128mb.zip`, empty
+images from `tools/make_disk.py`, the tests) and the test .ini files. Never commit MS-DOS,
+Windows or games (DOSHDD, Win31Disk, games/). GitHub refuses files over 100 MB.
+
 - `sdcard/roms/pc/`: `bios.bin` and `vgabios.bin`. That folder is the default, and the user can change it in
   Settings > BIOS folder (`biosdir` in pico386.cfg). `t386_start` takes it and ignores the ini's bios keys.
 - everything else in `sdcard/pc-386/`: the .ini files and the disk images (one folder for the emulator, the user's choice)
-- `fdboot.img`, the FreeDOS 1.3 boot floppy
-- boot-sector tests, each with a matching `.ini` in `sdcard/pc-386/`:
+- `fdboot.img`, the FreeDOS 1.3 boot floppy (`disks/freedos/x86BOOT.img` in git)
+- boot-sector tests in `disks/tests/`, each with a matching `.ini` in `sdcard/pc-386/`:
   - `m13.img`: a mode 13h palette grid
   - `m12.img`: 640x480 diagonal bars
   - `beep.img`: a 1 kHz tone

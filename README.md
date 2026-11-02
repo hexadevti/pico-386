@@ -74,13 +74,18 @@ Download the files from the [releases page](https://github.com/hexadevti/pico-38
 
 ## The SD card
 
-The card must be FAT32. pico-386 makes the folders it needs. You add:
+The card must be FAT32. The repo's [`sdcard/`](sdcard/) folder is a ready card: copy its `roms/`
+and `pc-386/` folders to the card's root. They hold:
 
 ```
 /roms/pc/bios.bin        SeaBIOS        } from the tiny386 release tarball
-/roms/pc/vgabios.bin     SeaVGABIOS     } (tiny386-*.tar.gz on its GitHub releases page)
-/pc-386/                 your disk images, zips and folders
+/roms/pc/vgabios.bin     SeaVGABIOS     } (LGPL-3.0)
+/pc-386/disks/           FreeDOS 1.3 install floppies, a FreeDOS hard disk (zipped),
+                         empty hard-disk and floppy images, a CD driver floppy, tests
+/pc-386/                 your own disk images, zips and folders go here
 ```
+
+[`sdcard/README.md`](sdcard/README.md) says what each image is and how to start.
 
 pico-386 writes these itself:
 
@@ -98,9 +103,9 @@ The two BIOS files can live in another folder. **Settings > BIOS folder** opens 
 pick `bios.bin` there (the row says `OK` when `vgabios.bin` is next to it). Every startup uses
 that folder.
 
-No operating system or game is included. FreeDOS is free; get it from
-[freedos.org](https://www.freedos.org/) (the 1.44 MB "FloppyEdition" installs from the
-PicoCalc).
+MS-DOS, Windows and games are not included; use your own copies. FreeDOS is: unzip
+`sdcard/pc-386/disks/freedos-hdd-128mb.zip` and use it as `c.img`, or install it from the
+floppies in `disks/freedos/`.
 
 ## Using it
 
@@ -220,8 +225,8 @@ relative to the card root. Our keys are under `[pico]`:
 A FreeDOS hard disk, all on the PicoCalc:
 
 1. **Create a hard disk**: 128 MB, `c.img`.
-2. **PC**: set A: to `x86BOOT.img`, from the FreeDOS 1.3 "FloppyEdition" (1.44 MB set). Then
-   Start.
+2. **PC**: set A: to `disks/freedos/x86BOOT.img` (FreeDOS 1.3 FloppyEdition, in the repo's
+   `sdcard/`). Then Start.
 3. Answer the installer. When it asks for the next diskette, press Ctrl-Esc, set A: to
    `x86DSK01.img` (then 02, 03…), and press a key. Wait for each prompt: a disk takes a minute or
    more to read.
@@ -270,6 +275,7 @@ pico386/src/pc/           the PC: glue, keyboard, screen, startups, folder and z
 pico386/src/pc/tiny386/   the vendored emulator (see THIRD_PARTY.md)
 tools/                    font generator, PicoMultiLoader packaging, device remote control
 docs/screenshots/         the pictures above
+sdcard/                   a ready SD card: the BIOS, FreeDOS, empty disks and tests
 ```
 
 ## Third-party code
@@ -280,7 +286,8 @@ docs/screenshots/         the pictures above
 | The OPL2 emulator (Adlib) | MAME's fmopl by Tatsuyuki Satoh, via DOSBox, QEMU and tiny386 | LGPL-2.1-or-later |
 | The .ini parser | [inih](https://github.com/benhoyt/inih) by Ben Hoyt | BSD-3-Clause |
 | The UI fonts | X11 misc-fixed, via FabGL and emu8 | public domain |
-| SeaBIOS and SeaVGABIOS (on the SD card, not in the firmware) | the tiny386 release | LGPL-3.0 |
+| SeaBIOS and SeaVGABIOS (`sdcard/roms/pc/`, not in the firmware) | the tiny386 release | LGPL-3.0 |
+| FreeDOS 1.3 and UDVD2.SYS (`sdcard/pc-386/disks/`) | [freedos.org](https://www.freedos.org/) | GPL and other free licenses |
 
 `THIRD_PARTY.md` has the details, and lists every change made to tiny386.
 
