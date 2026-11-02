@@ -1,10 +1,11 @@
 # The SD card
 
-Copy `roms/` and `pc-386/` to the root of the PicoCalc's SD card (FAT32). The desktop build uses
+Copy `pc-386/` to the root of the PicoCalc's SD card (FAT32), then add your own `games/` and
+`share/` folders next to `disks/` (see "The SD card" in the main README). The desktop build uses
 this folder as its SD card.
 
 ```
-roms/pc/bios.bin, vgabios.bin    SeaBIOS and SeaVGABIOS (LGPL-3.0, see roms/pc/README.txt)
+pc-386/roms/bios.bin, vgabios.bin  SeaBIOS and SeaVGABIOS (LGPL-3.0, see roms/README.txt)
 pc-386/disks/
   freedos/x86BOOT.img            FreeDOS 1.3 FloppyEdition (1.44 MB): the boot floppy...
   freedos/x86DSK01..05.img       ...and the five install disks
@@ -18,8 +19,8 @@ pc-386/disks/
 
 ## Getting started
 
-- **Ready to go:** unzip `freedos-hdd-128mb.zip` on your computer, copy the `.img` into `pc-386/`
-  and rename it `c.img`. The PC startup boots it to `C:\>`. The install is basic: there is no
+- **Ready to go:** unzip `freedos-hdd-128mb.zip` on your computer, rename the image `c.img` and
+  put it in `/pc-386/`. The PC startup boots it to `C:\>`. The install is basic: there is no
   mouse driver, package manager or CD driver on it yet.
 - **Install FreeDOS yourself:** make a hard disk in the home menu (**Create a hard disk**), put
   `freedos/x86BOOT.img` in A: and press Start. When the installer asks for the next disk, press

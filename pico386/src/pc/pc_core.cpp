@@ -77,9 +77,20 @@ bool pc_init() {
   return s_fb != nullptr;
 }
 
+// The BIOS folder to use: the one in Settings, else the two defaults. v0.1.0 kept the BIOS in
+// /roms/pc and saved that in pico386.cfg; the repo's sdcard/ now has it in /pc-386/roms.
+static const char *biosDir() {
+  const char *const dirs[] = { g_settings.biosDir.c_str(), "pc-386/roms", "roms/pc" };
+  for (const char *d : dirs) {
+    const std::string p = std::string(hal_sd_root()) + "/" + d + "/bios.bin";
+    if (FILE *f = fopen(p.c_str(), "rb")) { fclose(f); return d; }
+  }
+  return dirs[0];
+}
+
 bool pc_loadRom(const char *ini) {
   s_error[0] = 0;
-  const int r = t386_start(ini, hal_sd_root(), g_settings.biosDir.c_str(), s_fb);
+  const int r = t386_start(ini, hal_sd_root(), biosDir(), s_fb);
   if (r != T386_OK) {
     const char *f = t386_error_file();
     const char *root = hal_sd_root();

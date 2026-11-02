@@ -408,11 +408,12 @@ the repo root, because `PC_INI` paths are relative to the cwd.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
 
 Test data in `sdcard/`. It is gitignored except what may be shared (2026-11-02, the user asked):
-`roms/`, `pc-386/disks/` (FreeDOS floppies, `dos.img` zipped as `freedos-hdd-128mb.zip`, empty
+`pc-386/roms/`, `pc-386/disks/` (FreeDOS floppies, `dos.img` zipped as `freedos-hdd-128mb.zip`, empty
 images from `tools/make_disk.py`, the tests) and the test .ini files. Never commit MS-DOS,
 Windows or games (DOSHDD, Win31Disk, games/). GitHub refuses files over 100 MB.
 
-- `sdcard/roms/pc/`: `bios.bin` and `vgabios.bin`. That folder is the default, and the user can change it in
+- `sdcard/pc-386/roms/`: `bios.bin` and `vgabios.bin` (2026-11-02; it was `/roms/pc`). That folder is the
+  default; `pc_core`'s `biosDir()` falls back to it and to `/roms/pc`, which v0.1.0 saved in the cfg. The user can change it in
   Settings > BIOS folder (`biosdir` in pico386.cfg). `t386_start` takes it and ignores the ini's bios keys.
 - everything else in `sdcard/pc-386/`: the .ini files and the disk images (one folder for the emulator, the user's choice)
 - `fdboot.img`, the FreeDOS 1.3 boot floppy (`disks/freedos/x86BOOT.img` in git)

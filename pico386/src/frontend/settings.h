@@ -11,7 +11,7 @@ struct Settings {
   int fontSize = 0;          // 80x25 text: 0 = 4x12 cells (fills the panel), 1 = 4x8
   std::string lastDir;       // where the ROM browser was last
   std::string startup;       // the .ini of the startup last chosen ("pc.ini"), for the home menu's cursor
-  std::string biosDir = "roms/pc";   // bios.bin + vgabios.bin, relative to the card root
+  std::string biosDir = "pc-386/roms"; // bios.bin + vgabios.bin, relative to the card root
 };
 
 extern Settings g_settings;

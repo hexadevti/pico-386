@@ -10,13 +10,14 @@ build-*/
 # empty disk images, and the tests. Never commit MS-DOS, Windows or games.
 sdcard/*
 !sdcard/README.md
-!sdcard/roms/
 !sdcard/pc-386/
 sdcard/pc-386/*
 !sdcard/pc-386/disks/
+!sdcard/pc-386/roms/
 !sdcard/pc-386/m12.ini
 !sdcard/pc-386/m13.ini
 !sdcard/pc-386/beep.ini
 !sdcard/pc-386/cdboot.ini
 
 .claude/
+sdcard/pc-386/disks/freedos-hdd-128mb/

@@ -74,27 +74,48 @@ Download the files from the [releases page](https://github.com/hexadevti/pico-38
 
 ## The SD card
 
-The card must be FAT32. The repo's [`sdcard/`](sdcard/) folder is a ready card: copy its `roms/`
-and `pc-386/` folders to the card's root. They hold:
+The card must be FAT32. Everything pico-386 uses lives in one folder, `/pc-386`. We recommend
+this layout, so the BIOS is found without any setting, the PC startup finds its hard disk, and
+the file browser opens where your files are:
 
 ```
-/roms/pc/bios.bin        SeaBIOS        } from the tiny386 release tarball
-/roms/pc/vgabios.bin     SeaVGABIOS     } (LGPL-3.0)
-/pc-386/disks/           FreeDOS 1.3 install floppies, a FreeDOS hard disk (zipped),
-                         empty hard-disk and floppy images, a CD driver floppy, tests
-/pc-386/                 your own disk images, zips and folders go here
+/pc-386/
+├── roms/
+│   ├── bios.bin          SeaBIOS     } required: the PC does not start without them
+│   └── vgabios.bin       SeaVGABIOS  }
+├── c.img                 the hard disk the PC startup boots (C:)
+├── disks/                floppy, hard-disk and CD images (.img, .ima, .vhd, .iso)
+├── games/                game .zip files and folders, to use as D: or as a floppy
+└── share/                a folder to swap files with your computer, used as D:
 ```
 
-[`sdcard/README.md`](sdcard/README.md) says what each image is and how to start.
+The easy way to get there: copy the repo's [`sdcard/pc-386/`](sdcard/) folder to the card's
+root. It already has `roms/`, and `disks/` with the FreeDOS 1.3 install floppies, a FreeDOS hard
+disk, empty hard-disk and floppy images, a CD driver floppy and some tests.
+[`sdcard/README.md`](sdcard/README.md) says what each one is. Then unzip
+`disks/freedos-hdd-128mb.zip`, rename the image `c.img` and put it in `/pc-386/`, and the PC
+startup boots FreeDOS. `games/` and `share/` are yours to make.
 
-pico-386 writes these itself:
+A few rules keep things working:
+
+- **Keep the BIOS in `/pc-386/roms/`.** Firmware v0.1.0 looked in `/roms/pc/`; it is still
+  checked, so either works. **Settings > BIOS folder** can point anywhere else.
+- **Name your hard disk `c.img`**, or pick another image as C: on the startup's drives screen.
+- **Keep file and folder names short.** The card is FAT32 and zips are unpacked under
+  `/pc-386/.unzipped/`. Very long names are shortened, but short ones are easier to find in
+  the browser.
+- **Don't touch the files pico-386 writes:**
 
 ```
 /pc-386/pc.ini           the PC startup, written with defaults the first time
 /pc-386/startN.ini       the startups made with "Create new startup"
 /pc-386/pico386.cfg      the frontend settings (volume, FPS meter, font size, last startup)
-/pc-386/.unzipped/       zips unpacked for use as drives
+/pc-386/.unzipped/       zips unpacked for use as drives, and what the PC saved in them
+/pc-386/.pico386-dN.tmp  a D: folder's pending writes while the PC runs
 ```
+
+If you use PicoMultiLoader, the app itself is in `/pico-386/` (with a dash). It is a separate
+folder from `/pc-386/`, which holds the data: keep both.
 
 Disk images are raw. A hard disk is a flat sector dump (a `.vhd` must be a *fixed* VHD), and a
 floppy is 160 KB to 2.88 MB. Guest writes go straight to the image on the card.
@@ -103,9 +124,7 @@ The two BIOS files can live in another folder. **Settings > BIOS folder** opens 
 pick `bios.bin` there (the row says `OK` when `vgabios.bin` is next to it). Every startup uses
 that folder.
 
-MS-DOS, Windows and games are not included; use your own copies. FreeDOS is: unzip
-`sdcard/pc-386/disks/freedos-hdd-128mb.zip` and use it as `c.img`, or install it from the
-floppies in `disks/freedos/`.
+MS-DOS, Windows and games are not included; use your own copies.
 
 ## Using it
 
@@ -286,7 +305,7 @@ sdcard/                   a ready SD card: the BIOS, FreeDOS, empty disks and te
 | The OPL2 emulator (Adlib) | MAME's fmopl by Tatsuyuki Satoh, via DOSBox, QEMU and tiny386 | LGPL-2.1-or-later |
 | The .ini parser | [inih](https://github.com/benhoyt/inih) by Ben Hoyt | BSD-3-Clause |
 | The UI fonts | X11 misc-fixed, via FabGL and emu8 | public domain |
-| SeaBIOS and SeaVGABIOS (`sdcard/roms/pc/`, not in the firmware) | the tiny386 release | LGPL-3.0 |
+| SeaBIOS and SeaVGABIOS (`sdcard/pc-386/roms/`, not in the firmware) | the tiny386 release | LGPL-3.0 |
 | FreeDOS 1.3 and UDVD2.SYS (`sdcard/pc-386/disks/`) | [freedos.org](https://www.freedos.org/) | GPL and other free licenses |
 
 `THIRD_PARTY.md` has the details, and lists every change made to tiny386.
