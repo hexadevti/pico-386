@@ -8,8 +8,7 @@ the PC speaker, on the PicoCalc's own screen and keyboard. It runs on two module
 
 The same code also builds for the desktop (SDL2), for debugging. The emulator is
 [tiny386](https://github.com/hchunhui/tiny386). The menus and the hardware layer come from the
-author's [pico-amiga](https://github.com/hexadevti/pico-amiga) and
-[emu8](https://github.com/hexadevti/emu8).
+author's pico-amiga and [emu8](https://github.com/hexadevti/emu8).
 
 <p>
 <img src="docs/screenshots/home.png" width="320" alt="The home menu">
