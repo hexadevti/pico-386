@@ -52,8 +52,8 @@ std::string defaultHardDisk() {
   return "";
 }
 
-// The one machine: a 486 with an FPU and as much RAM as tiny386 takes (t386_start lowers it to
-// what PSRAM has room for). 1 MB of VGA memory covers every mode the 800x600 framebuffer shows.
+// The one machine: a 386 with an FPU (gen = 4 only changes what CPUID reports) and as much RAM
+// as tiny386 takes (t386_start lowers it to what PSRAM has room for). 1 MB of VGA memory covers every mode the 800x600 framebuffer shows.
 std::string machineIni(const std::string &drives, const char *header) {
   return std::string(header) +
       "[pc]\n"

@@ -1,6 +1,6 @@
 # pico-386
 
-A 386/486 PC for the **ClockworkPi PicoCalc**: DOS, Windows 3.x, VGA, Sound Blaster 16, Adlib and
+A 386 PC for the **ClockworkPi PicoCalc**: DOS, Windows 3.x, VGA, Sound Blaster 16, Adlib and
 the PC speaker, on the PicoCalc's own screen and keyboard. It runs on two modules:
 
 - a **Waveshare ESP32-P4-WIFI6**, the faster one, with up to 32 MB of guest RAM
@@ -26,7 +26,7 @@ PicoCalc.
 
 ## What it does
 
-- **The PC:** a 486 with an FPU, SeaBIOS, a VGA card (with VBE modes on the P4), IDE hard
+- **The PC:** a 386 with an FPU, SeaBIOS, a VGA card (with VBE modes on the P4), IDE hard
   disks, a CD-ROM drive, two floppy drives, a PS/2 keyboard and mouse, a
   Sound Blaster 16, an Adlib and the PC speaker.
 - **Disks from the SD card:** raw hard-disk and floppy images, `.iso` CDs, and also a plain folder
@@ -44,7 +44,7 @@ down further when a program uses more memory than its 64 KB of fast RAM holds.
 
 | | ESP32-P4 | Pico 2 (RP2350) |
 |---|---|---|
-| CPU | 486 + FPU | 486 + FPU |
+| CPU | 386 + FPU | 386 + FPU |
 | Guest RAM | as much as fits, up to 32 MB | 4 MB, paged from the mainboard's 8 MB PSRAM |
 | Video RAM | 1 MB (SVGA/VBE) | 160 KB (VGA up to 640x480x16) |
 | Speed (CheckIt) | about 9x PC-XT | about 5x PC-XT |

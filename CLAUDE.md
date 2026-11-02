@@ -1,6 +1,6 @@
 # pico-386: notes for Claude
 
-A 386/486 PC emulator (tiny386) for the **ClockworkPi PicoCalc** fitted with a **Waveshare
+A 386 PC emulator (tiny386) for the **ClockworkPi PicoCalc** fitted with a **Waveshare
 ESP32-P4-WIFI6**, plus an SDL2 desktop build of the same code for debugging. The user (GitHub:
 hexadevti) also owns **pico-amiga** (`C:\Users\lucia\repos\pico-amiga`), which this project was
 started from on 2026-10-18, and **emu16** and **emu8**.
@@ -10,7 +10,8 @@ started from on 2026-10-18, and **emu16** and **emu8**.
   - Record every change to tiny386 in `THIRD_PARTY.md`.
 - The plan the user approved is in `~/.claude/plans/create-a-pc-386-serene-panda.md`. The user
   chose an Arduino-cli build like pico-amiga's. The DOS and Windows profiles were merged into
-  one PC on 2026-10-19 at the user's request: 486 + FPU, and the most RAM that fits.
+  one PC on 2026-10-19 at the user's request: a 386 with an FPU, and the most RAM that fits. Describe it only as a 386 (the user,
+  2026-11-02): tiny386 emulates a 386; the ini's `gen = 4` only changes what CPUID reports.
 
 ## State right now (2026-10-18)
 

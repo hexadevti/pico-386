@@ -30,7 +30,7 @@ ROLES = {   # character -> role index
 GRAPHITE = [0x000000, 0x172030, 0x212c40, 0x33415c, 0x7a88a3, 0xd5ddeb, 0xffffff, 0x4cc3ff,
             0x1d5f86, 0x5fd98a, 0xffb347, 0xff6b6b, 0xb48cff, 0x4cc3ff, 0xb48cff, 0x5fd98a]
 
-# A 486 at the C:\> prompt: the monitor, the tower (drive bays, floppy slot, LEDs), the keyboard.
+# A 386 at the C:\> prompt: the monitor, the tower (drive bays, floppy slot, LEDs), the keyboard.
 ICON = """
 ................................
 ................................
