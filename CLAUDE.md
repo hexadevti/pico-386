@@ -82,6 +82,17 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       - -O2 (118 KB): 8.5x, 1.9 MIPS.
       - -Os (91 KB): 6.5x, 1.4 MIPS.
       Smaller code is slower, so the L1 instruction cache is not the limit any more.
+    - **Fast paths (2026-11-03):** `translate`, the loads and stores and `fetch8` are inline in
+      i386.c, with upstream's code as the slow path (THIRD_PARTY.md). CheckIt: 10.95x PC-XT
+      (3767 Dhrystones) under MS-DOS 6.22, 8.68x under FreeDOS with JEMMEX. What is left is flat:
+      instruction fetch and decode (`fetch8pf`, about 10%), lazy flags (about 6%), the dispatch's
+      indirect jump, and PSRAM latency on guest RAM. Each is worth 2-3% at most.
+    - **Profiler:** `python -I tools/remote.py --p4 prof 8` samples core 1 at 2 kHz (`prof_p4.cpp`,
+      `@prof`/`@profdump`) and prints hot functions and lines through addr2line on the build's .elf.
+      Names are the innermost inlined function, so `pload8` or `fetch8pf` usually means code inside
+      `cpu_exec1`.
+    - **FreeDOS's boot menu on the device:** typed digits are lost. It shows about 6.5 s after a
+      Ctrl+Alt+Del; `w6300,shot` freezes it (a shot pauses the guest's clock), then `down,enter`.
     - **Slow boot (2026-11-03):** DOS took over a minute to boot, at 0.0-0.3 MIPS. The audio writes
       blocked for 1-1.9 s of every 2 s. `hal_audio_queued_us` counted frames written against
       buffers sent, and sent buffers of silence counted as played data. So it read 0-22 ms with
@@ -478,7 +489,7 @@ Windows or games (DOSHDD, Win31Disk, games/). GitHub refuses files over 100 MB.
 ## Hardware facts
 
 These come from pico-amiga and emu16; its CLAUDE.md has more detail.
-- **CPU:** dual-core RISC-V, 360 MHz, no JIT, 32 MB PSRAM.
+- **CPU:** dual-core RISC-V, 400 MHz on the P4 here (`ChipVariant=postv3`), no JIT, 32 MB PSRAM.
   - The emulator runs on core 1 with a 32 KB stack.
   - The keyboard and video tasks run on core 0.
 - **Panel:** 320x320 SPI. `hal_video_*` is double-buffered.

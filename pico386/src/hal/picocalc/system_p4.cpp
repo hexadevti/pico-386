@@ -64,13 +64,18 @@ void hal_reboot_to_loader() {
 //   @uf2menu         back to esp32loader (tools/deploy-p4.py, emu8's deploy tools)
 //   @keys <script>   type a PC_KEYS script (keyscript.h); "@keys done" when it has run
 //   @shot            the screen, as "@S" rows (p4Shot)
+//   @prof, @profdump the sampling profiler (prof_p4.cpp)
 void p4RemoteKeys(const char *script);   // input_p4.cpp
 void p4Shot();                           // display_p4.cpp
+void p4ProfStart(const char *args);      // prof_p4.cpp
+void p4ProfDump();
 
 static void serialCommand(char *line) {
   if (!strcmp(line, "@uf2menu")) hal_reboot_to_loader();
   else if (!strncmp(line, "@keys ", 6)) p4RemoteKeys(line + 6);
   else if (!strcmp(line, "@shot")) p4Shot();
+  else if (!strncmp(line, "@prof ", 6)) p4ProfStart(line + 6);
+  else if (!strcmp(line, "@profdump")) p4ProfDump();
 }
 
 void p4CheckSerialCmd() {

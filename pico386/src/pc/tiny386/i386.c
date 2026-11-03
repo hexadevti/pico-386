@@ -745,7 +745,20 @@ static bool IRAM_ATTR segcheck(CPUI386 *cpu, int rwm, int seg, uword addr, int s
 	return true;
 }
 
-static bool IRAM_ATTR translate(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr, int size, int cpl)
+/* pico-386: translate, the loads and stores and fetch8 get an inline fast path for the common
+   case (real mode; a plain RAM access within one page; the next byte of the fetch run), with
+   upstream's code behind it as the slow path. The P4 spent over a third of its time in the calls
+   (sampled with prof_p4.cpp). Not on the RP2350, whose SRAM has no room for the larger code. */
+#if !defined(BOARD_PICOCALC_RP2350)
+#define I386_FASTPATH 1
+#define SLOW(name) name ## _slow
+#define SLOW_ATTR noinline
+#else
+#define SLOW(name) name
+#define SLOW_ATTR
+#endif
+
+static bool IRAM_ATTR SLOW_ATTR SLOW(translate)(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr, int size, int cpl)
 {
 	assert(seg != -1);
 	uword laddr = cpu->seg[seg].base + addr;
@@ -754,6 +767,41 @@ static bool IRAM_ATTR translate(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uw
 
 	return translate_laddr(cpu, res, rwm, laddr, size, cpl);
 }
+
+#ifdef I386_FASTPATH
+static inline bool translate(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr, int size, int cpl)
+{
+	uword laddr = cpu->seg[seg].base + addr;
+	/* real mode: no paging, no checks (PG needs PE) */
+	if (likely(!(cpu->cr0 & 1))) {
+		res->res = ADDR_OK1;
+		res->addr1 = laddr;
+		return true;
+	}
+	/* protected and V86 mode: segcheck's null selector, then paging off or a TLB hit within
+	   one page that the access is allowed (translate_lpgno's checks) */
+	if (likely(cpu->seg[seg].limit != 0 || (cpu->seg[seg].sel & ~0x3) != 0)) {
+		if (!(cpu->cr0 & CR0_PG)) {
+			res->res = ADDR_OK1;
+			res->addr1 = laddr;
+			return true;
+		}
+#ifndef T386_PAGED
+		uword lpgno = laddr >> 12;
+		struct tlb_entry *ent = &(cpu->tlb.tab[lpgno % tlb_size]);
+		if (likely(ent->lpgno == lpgno && !ent->pte_lookup[cpl > 0][rwm > 1] &&
+			   (laddr & 0xfff) <= 0x1000 - size)) {
+			if (rwm & 2)
+				*(ent->ppte) |= 1 << 6; // dirty
+			res->res = ADDR_OK1;
+			res->addr1 = ent->xaddr ^ laddr;
+			return true;
+		}
+#endif
+	}
+	return translate_slow(cpu, res, rwm, seg, addr, size, cpl);
+}
+#endif
 
 static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword addr)
 {
@@ -814,7 +862,7 @@ static inline bool in_iomem(uword addr)
 	return (addr >= 0xa0000 && addr < 0xc0000) || addr >= 0xe0000000;
 }
 
-static u8 IRAM_ATTR load8(CPUI386 *cpu, OptAddr *res)
+static u8 IRAM_ATTR SLOW_ATTR SLOW(load8)(CPUI386 *cpu, OptAddr *res)
 {
 	uword addr = res->addr1;
 	if (in_iomem(addr) && cpu->cb.iomem_read8)
@@ -825,7 +873,7 @@ static u8 IRAM_ATTR load8(CPUI386 *cpu, OptAddr *res)
 	return pload8(cpu, addr);
 }
 
-static u16 IRAM_ATTR load16(CPUI386 *cpu, OptAddr *res)
+static u16 IRAM_ATTR SLOW_ATTR SLOW(load16)(CPUI386 *cpu, OptAddr *res)
 {
 	if (in_iomem(res->addr1) && cpu->cb.iomem_read16)
 		return cpu->cb.iomem_read16(cpu->cb.iomem, res->addr1);
@@ -838,7 +886,7 @@ static u16 IRAM_ATTR load16(CPUI386 *cpu, OptAddr *res)
 		return pload8(cpu, res->addr1) | (pload8(cpu, res->addr2) << 8);
 }
 
-static u32 IRAM_ATTR load32(CPUI386 *cpu, OptAddr *res)
+static u32 IRAM_ATTR SLOW_ATTR SLOW(load32)(CPUI386 *cpu, OptAddr *res)
 {
 	if (in_iomem(res->addr1) && cpu->cb.iomem_read32)
 		return cpu->cb.iomem_read32(cpu->cb.iomem, res->addr1);
@@ -862,7 +910,7 @@ static u32 IRAM_ATTR load32(CPUI386 *cpu, OptAddr *res)
 	assert(false);
 }
 
-static void IRAM_ATTR store8(CPUI386 *cpu, OptAddr *res, u8 val)
+static void IRAM_ATTR SLOW_ATTR SLOW(store8)(CPUI386 *cpu, OptAddr *res, u8 val)
 {
 	uword addr = res->addr1;
 	if (in_iomem(addr) && cpu->cb.iomem_write8) {
@@ -875,7 +923,7 @@ static void IRAM_ATTR store8(CPUI386 *cpu, OptAddr *res, u8 val)
 	pstore8(cpu, addr, val);
 }
 
-static void IRAM_ATTR store16(CPUI386 *cpu, OptAddr *res, u16 val)
+static void IRAM_ATTR SLOW_ATTR SLOW(store16)(CPUI386 *cpu, OptAddr *res, u16 val)
 {
 	if (in_iomem(res->addr1) && cpu->cb.iomem_write16) {
 		cpu->cb.iomem_write16(cpu->cb.iomem, res->addr1, val);
@@ -892,7 +940,7 @@ static void IRAM_ATTR store16(CPUI386 *cpu, OptAddr *res, u16 val)
 	}
 }
 
-static void IRAM_ATTR store32(CPUI386 *cpu, OptAddr *res, u32 val)
+static void IRAM_ATTR SLOW_ATTR SLOW(store32)(CPUI386 *cpu, OptAddr *res, u32 val)
 {
 	if (in_iomem(res->addr1) && cpu->cb.iomem_write32) {
 		cpu->cb.iomem_write32(cpu->cb.iomem, res->addr1, val);
@@ -922,6 +970,42 @@ static void IRAM_ATTR store32(CPUI386 *cpu, OptAddr *res, u32 val)
 		}
 	}
 }
+
+#ifdef I386_FASTPATH
+/* RAM outside the VGA window (0xa0000-0xbffff); iomem at 0xe0000000 is above any RAM size */
+#define PLAIN_RAM(cpu, res) (likely((res)->res == ADDR_OK1 && (res)->addr1 < (cpu)->phys_mem_size && \
+				    (res)->addr1 - 0xa0000 >= 0x20000))
+static inline u8 load8(CPUI386 *cpu, OptAddr *res)
+{
+	if (PLAIN_RAM(cpu, res)) return pload8(cpu, res->addr1);
+	return load8_slow(cpu, res);
+}
+static inline u16 load16(CPUI386 *cpu, OptAddr *res)
+{
+	if (PLAIN_RAM(cpu, res)) return pload16(cpu, res->addr1);
+	return load16_slow(cpu, res);
+}
+static inline u32 load32(CPUI386 *cpu, OptAddr *res)
+{
+	if (PLAIN_RAM(cpu, res)) return pload32(cpu, res->addr1);
+	return load32_slow(cpu, res);
+}
+static inline void store8(CPUI386 *cpu, OptAddr *res, u8 val)
+{
+	if (PLAIN_RAM(cpu, res)) pstore8(cpu, res->addr1, val);
+	else store8_slow(cpu, res, val);
+}
+static inline void store16(CPUI386 *cpu, OptAddr *res, u16 val)
+{
+	if (PLAIN_RAM(cpu, res)) pstore16(cpu, res->addr1, val);
+	else store16_slow(cpu, res, val);
+}
+static inline void store32(CPUI386 *cpu, OptAddr *res, u32 val)
+{
+	if (PLAIN_RAM(cpu, res)) pstore32(cpu, res->addr1, val);
+	else store32_slow(cpu, res, val);
+}
+#endif
 
 #define LOADSTORE(BIT) \
 bool cpu_load ## BIT(CPUI386 *cpu, int seg, uword addr, u ## BIT *res) \
@@ -980,6 +1064,25 @@ static bool IRAM_ATTR peek8a(CPUI386 *cpu, u8 *val)
 	return true;
 }
 
+#ifdef I386_FASTPATH
+static bool IRAM_ATTR noinline fetch8_slow(CPUI386 *cpu, u8 *val)
+{
+	TRY(peek8(cpu, val));
+	cpu->next_ip++;
+	return true;
+}
+
+static inline bool fetch8(CPUI386 *cpu, u8 *val)
+{
+	if (likely(cpu->ifetch.paddr)) {
+		*val = pload8(cpu, cpu->ifetch.paddr);
+		cpu->ifetch.paddr++;
+		cpu->next_ip++;
+		return true;
+	}
+	return fetch8_slow(cpu, val);
+}
+#else
 static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
 {
 	if (likely(cpu->ifetch.paddr)) {
@@ -992,6 +1095,7 @@ static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
 	cpu->next_ip++;
 	return true;
 }
+#endif
 
 static bool IRAM_ATTR fetch8pf(CPUI386 *cpu, u8 *val)
 {

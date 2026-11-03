@@ -120,6 +120,19 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
 - **The guest's debug port on the P4 (2026-11-03).** `tiny386_port.h` sends `putchar` to
   `t386_putchar` (`pc_platform.cpp`), which writes SeaBIOS's port 402h log a line at a time through
   `hal_log`. Written straight to the UART, it cut into the serial remote's screenshot rows.
+- **`i386.c` fast paths (2026-11-03, not on the RP2350).** The P4 spent over a third of its time
+  calling `translate`, the loads and stores and `fetch8` (sampled with `prof_p4.cpp`). Under
+  `I386_FASTPATH` these became inline wrappers, with upstream's functions behind them as the slow
+  path (`SLOW(name)` = `name_slow`, noinline):
+  - `translate`: in real mode the address is base + offset. In protected and V86 mode, if the selector
+    isn't null, it is the same with paging off, or a TLB hit that stays in its page and that the
+    access is allowed (setting the dirty bit for writes).
+  - `load8`-`32`/`store8`-`32`: a single translated address in RAM outside 0xa0000-0xbffff
+    (`PLAIN_RAM`) goes straight to `pload`/`pstore`.
+  - `fetch8`: the next byte from `ifetch.paddr`.
+  CheckIt on the P4: 9.40x to 10.95x PC-XT under MS-DOS 6.22, and 7.65x to 8.68x under FreeDOS with
+  JEMMEX (V86 mode). `cpu_exec1` grew by 8 KB of IRAM. The RP2350 keeps the original code
+  (`SLOW(name)` = `name`), because its SRAM has no room for it.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 

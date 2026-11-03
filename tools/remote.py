@@ -8,6 +8,8 @@
 #   remote.py shot [name.png]               one screenshot
 #   remote.py raw <y>                       a panel row's raw RAMRD bytes (format check)
 #   remote.py log [seconds]                 just print the log
+#   remote.py --p4 prof [seconds]           sample core 1 (prof_p4.cpp) and print the hot functions
+#                                           and lines (addr2line on --elf)
 #
 # Options: --port COM6, --p4 (COM9 unless --port), --out <prefix> (shots go to <prefix>N.png, default sdcard/rshot).
 # Everything else the device prints is passed through, so the log stays visible.
@@ -127,11 +129,13 @@ class Remote:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('cmd', choices=['keys', 'shot', 'raw', 'log'])
+    ap.add_argument('cmd', choices=['keys', 'shot', 'raw', 'log', 'prof'])
     ap.add_argument('arg', nargs='?')
     ap.add_argument('--port')
     ap.add_argument('--p4', action='store_true')
     ap.add_argument('--out', default='sdcard/rshot')
+    ap.add_argument('--hz', type=int, default=2000)
+    ap.add_argument('--elf', default=os.path.expanduser('~/.pico386-p4-build/pico386.ino.elf'))
     a = ap.parse_args()
     port = a.port or ('COM9' if a.p4 else 'COM6')
     r = Remote(port, a.arg if a.cmd == 'shot' and a.arg else a.out, a.p4)
@@ -144,9 +148,50 @@ def main():
     elif a.cmd == 'raw':
         r.send(f'@shotraw {int(a.arg or 0)}')
         r.wait('@raw ', 5)
+    elif a.cmd == 'prof':
+        prof(r, a)
     else:
         for ln in r.lines(time.time() + float(a.arg or 10)):
             r.handle(ln)
+
+
+def prof(r, a):
+    secs = float(a.arg or 5)
+    n = min(16384, int(secs * a.hz))
+    r.send(f'@prof {a.hz} {n}')
+    if not r.wait('@prof started', 5):
+        sys.exit('remote: the profiler did not start')
+    time.sleep(secs + 0.5)
+    r.send('@profdump')
+    pcs = []
+    for ln in r.lines(time.time() + 60):
+        if ln.startswith('@P '):
+            pcs += [int(x, 16) for x in ln.split()[1:]]
+        elif ln.startswith('@prof end'):
+            break
+        else:
+            r.handle(ln)
+    if not pcs:
+        sys.exit('remote: no samples')
+    import collections, glob, subprocess
+    tool = glob.glob(os.path.expanduser('~/.emu6502-p4/data/packages/esp32/tools/esp-rv32/*/bin/riscv32-esp-elf-addr2line*'))[0]
+    uniq = sorted(set(pcs))
+    out = subprocess.run([tool, '-f', '-C', '-e', a.elf], input='\n'.join(f'{x:x}' for x in uniq),
+                         capture_output=True, text=True).stdout.splitlines()
+    where = {pc: (out[2 * i], os.path.basename(out[2 * i + 1].split(' ')[0])) for i, pc in enumerate(uniq)}
+    funcs, lines = collections.Counter(), collections.Counter()
+    for pc in pcs:
+        f, l = where[pc]
+        funcs[f] += 1
+        lines[f'{l} ({f})'] += 1
+    total = len(pcs)
+    print(f'{total} samples')
+    print('-- functions')
+    for f, c in funcs.most_common(30):
+        print(f'{100 * c / total:5.1f}%  {f}')
+    print('-- lines')
+    for l, c in lines.most_common(40):
+        print(f'{100 * c / total:5.1f}%  {l}')
 
 
 if __name__ == '__main__':
