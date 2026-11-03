@@ -1,12 +1,12 @@
 # The SD card
 
-Copy `pc-386/` to the root of the PicoCalc's SD card (FAT32), then add your own `games/` and
+Copy `pico-386/` to the root of the PicoCalc's SD card (FAT32), then add your own `games/` and
 `share/` folders next to `disks/` (see "The SD card" in the main README). The desktop build uses
 this folder as its SD card.
 
 ```
-pc-386/roms/bios.bin, vgabios.bin  SeaBIOS and SeaVGABIOS (LGPL-3.0, see roms/README.txt)
-pc-386/disks/
+pico-386/roms/bios.bin, vgabios.bin  SeaBIOS and SeaVGABIOS (LGPL-3.0, see roms/README.txt)
+pico-386/disks/
   freedos/x86BOOT.img            FreeDOS 1.3 FloppyEdition (1.44 MB): the boot floppy...
   freedos/x86DSK01..05.img       ...and the five install disks
   freedos-hdd-32mb.img           a 32 MB hard disk with FreeDOS 1.3 installed (18 MB free)
@@ -14,12 +14,12 @@ pc-386/disks/
   empty-floppy-1440k.img         an empty, formatted 1.44 MB floppy (FAT12)
   empty-floppy-720k.img          an empty, formatted 720 KB floppy (FAT12)
   cdrom-driver.img               a floppy with UDVD2.SYS, a DOS CD-ROM driver
-  tests/                         small test programs, booted by the .ini files in pc-386/
+  tests/                         small test programs, booted by the .ini files in pico-386/
 ```
 
 ## Getting started
 
-- **Ready to go:** copy `freedos-hdd-32mb.img` to `/pc-386/c.img`. The PC startup boots it to
+- **Ready to go:** copy `freedos-hdd-32mb.img` to `/pico-386/c.img`. The PC startup boots it to
   `C:\>`, with HIMEMX, a disk cache (LBACACHE), CTMOUSE, the CD driver and every package from the
   install floppies. Its boot menu also offers JEMMEX (upper memory) and JEMM386 (EMS) for programs
   that need them; both are slower here, because they run DOS in virtual 8086 mode.
@@ -32,7 +32,7 @@ pc-386/disks/
 
 ## Tests
 
-On the desktop, `PC_INI=sdcard/pc-386/<name>.ini build/pico386.exe` boots one directly:
+On the desktop, `PC_INI=sdcard/pico-386/<name>.ini build/pico386.exe` boots one directly:
 
 | .ini | What it shows |
 |---|---|
@@ -47,7 +47,7 @@ On the desktop, `PC_INI=sdcard/pc-386/<name>.ini build/pico386.exe` boots one di
 ## Not included
 
 MS-DOS, Windows and games are not free to share, so they are not here. Use your own copies:
-disk images go in `pc-386/`, and a game's folder or `.zip` can be used as D: directly.
+disk images go in `pico-386/`, and a game's folder or `.zip` can be used as D: directly.
 
 ## Licenses
 
