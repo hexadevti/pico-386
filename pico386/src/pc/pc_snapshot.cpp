@@ -1,12 +1,12 @@
 // pc_snapshot.cpp -- snapshots of a running PC, per startup, to start from later where it stopped.
 //
-// A snapshot is /pc-386/snapshots/<startup>/sN.snp: a header with its name, the startup's .ini
+// A snapshot is /pico-386/snapshots/<startup>/sN.snp: a header with its name, the startup's .ini
 // as it was (so the same drives come back) and the generation of each disk it had open, then the
 // machine itself (t386_save_state: the devices, guest RAM, VRAM). Restoring writes that .ini back
 // over the startup's (keeping the startup's name), starts the machine and loads the state into it.
 //
 // DOS keeps parts of its disks in RAM (the FAT, buffers, SMARTDRV), so a snapshot only fits the
-// disks as they were when it was taken. Each disk's generation, in /pc-386/snapshots/disks.gen,
+// disks as they were when it was taken. Each disk's generation, in /pico-386/snapshots/disks.gen,
 // goes up the first time it is written after a start or a snapshot (t386_fwrite), and when a
 // folder disk is written back or a zip unpacked again; restoring a snapshot whose disks moved on
 // asks first. A folder disk the guest has written to cannot be snapshotted: its changes live in
@@ -32,13 +32,13 @@ constexpr char kMagic[8] = { 'P', '3', '8', '6', 'S', 'N', 'P', '1' };
 constexpr size_t kMaxIni = 16384;
 std::string s_pending;                 // the snapshot pc_loadRom restores next
 
-std::string genFile() { return sdPath("pc-386/snapshots/disks.gen"); }
+std::string genFile() { return sdPath("pico-386/snapshots/disks.gen"); }
 
 std::string snapDir(const std::string &ini) {
   std::string base = ini.substr(ini.find_last_of('/') + 1);
   const size_t dot = base.find_last_of('.');
   if (dot != std::string::npos) base.resize(dot);
-  return sdPath(("pc-386/snapshots/" + base).c_str());
+  return sdPath(("pico-386/snapshots/" + base).c_str());
 }
 
 // The card's paths are written relative to its root, as in the .ini files.
@@ -120,7 +120,7 @@ int numberOf(const char *file) {
 // ---- generations ---------------------------------------------------------------------------------
 
 extern "C" void pcsnap_touch(const char *path) {
-  // Small enough to rewrite whole: one line per disk ever written ("7 pc-386/dos.img").
+  // Small enough to rewrite whole: one line per disk ever written ("7 pico-386/dos.img").
   const std::string rel = relOf(path);
   const std::string all = readAll(genFile());
   std::string out;
@@ -138,7 +138,7 @@ extern "C" void pcsnap_touch(const char *path) {
     else out += line + "\n";
   }
   out += std::to_string(gen + 1) + " " + rel + "\n";
-  makeDirs(sdPath("pc-386/snapshots"));
+  makeDirs(sdPath("pico-386/snapshots"));
   FILE *f = fopen(genFile().c_str(), "wb");
   if (!f) return;
   fputs(out.c_str(), f);

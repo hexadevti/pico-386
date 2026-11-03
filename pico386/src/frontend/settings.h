@@ -1,4 +1,4 @@
-// settings.h -- user settings, kept as "key=value" lines in <sd>/pc-386/pico386.cfg.
+// settings.h -- user settings, kept as "key=value" lines in <sd>/pico-386/pico386.cfg.
 #pragma once
 
 #include <stdint.h>
@@ -14,7 +14,7 @@ struct Settings {
   int fontSize = 0;          // 80x25 text: 0 = 4x12 cells (fills the panel), 1 = 4x8
   std::string lastDir;       // where the ROM browser was last
   std::string startup;       // the .ini of the startup last chosen ("pc.ini"), for the home menu's cursor
-  std::string biosDir = "pc-386/roms"; // bios.bin + vgabios.bin, relative to the card root
+  std::string biosDir = "pico-386/roms"; // bios.bin + vgabios.bin, relative to the card root
   std::string pickDir[PICK_COUNT];     // where each kind of disk was last chosen, relative to the card root ("/" is the root)
 };
 

@@ -66,7 +66,8 @@ Download the files from the [releases page](https://github.com/hexadevti/pico-38
 | `pico-386-p4-merged-vX.Y.Z.bin` | an ESP32-P4: the whole flash image, for esptool |
 
 - **PicoMultiLoader:** unzip the `pml` zip into the root of the SD card. It makes a `pico-386/`
-  folder holding both builds, and the loader picks the one for your module. PC-386 then shows
+  folder holding both builds, the BIOS (`roms/`) and the free disks (`disks/`, see
+  [The SD card](#the-sd-card)), and the loader picks the build for your module. PC-386 then shows
   on the loader's Home screen.
 - **Pico 2 without a loader:** hold **BOOTSEL** while plugging in USB, then copy the `.uf2` onto
   the `RP2350` drive. This replaces any loader you had.
@@ -78,12 +79,12 @@ Download the files from the [releases page](https://github.com/hexadevti/pico-38
 
 ## The SD card
 
-The card must be FAT32. Everything pico-386 uses lives in one folder, `/pc-386`. We recommend
+The card must be FAT32. Everything pico-386 uses lives in one folder, `/pico-386`. We recommend
 this layout, so the BIOS is found without any setting, the PC startup finds its hard disk, and
 the file browser opens where your files are:
 
 ```
-/pc-386/
+/pico-386/
 ├── roms/
 │   ├── bios.bin          SeaBIOS     } required: the PC does not start without them
 │   └── vgabios.bin       SeaVGABIOS  }
@@ -93,33 +94,37 @@ the file browser opens where your files are:
 └── share/                a folder to swap files with your computer, used as D:
 ```
 
-The easy way to get there: copy the repo's [`sdcard/pc-386/`](sdcard/) folder to the card's
+The easy way to get there: copy the repo's [`sdcard/pico-386/`](sdcard/) folder to the card's
 root. It already has `roms/`, and `disks/` with the FreeDOS 1.3 install floppies, a FreeDOS hard
 disk, empty hard-disk and floppy images, a CD driver floppy and some tests.
 [`sdcard/README.md`](sdcard/README.md) says what each one is. Then copy
-`disks/freedos-hdd-32mb.img` to `/pc-386/c.img`, and the PC startup boots FreeDOS. `games/` and `share/` are yours to make.
+`disks/freedos-hdd-32mb.img` to `/pico-386/c.img`, and the PC startup boots FreeDOS. `games/` and `share/` are yours to make.
 
 A few rules keep things working:
 
-- **Keep the BIOS in `/pc-386/roms/`.** Firmware v0.1.0 looked in `/roms/pc/`; it is still
+- **Keep the BIOS in `/pico-386/roms/`.** Firmware v0.1.0 looked in `/roms/pc/`; it is still
   checked, so either works. **Settings > BIOS folder** can point anywhere else.
 - **Name your hard disk `c.img`**, or pick another image as C: on the startup's drives screen.
 - **Keep file and folder names short.** The card is FAT32 and zips are unpacked under
-  `/pc-386/.unzipped/`. Very long names are shortened, but short ones are easier to find in
+  `/pico-386/.unzipped/`. Very long names are shortened, but short ones are easier to find in
   the browser.
 - **Don't touch the files pico-386 writes:**
 
 ```
-/pc-386/pc.ini           the PC startup, written with defaults the first time
-/pc-386/startN.ini       the startups made with "Create new startup"
-/pc-386/pico386.cfg      the frontend settings (volume, FPS meter, font size, last startup)
-/pc-386/.unzipped/       zips unpacked for use as drives, and what the PC saved in them
-/pc-386/.pico386-dN.tmp  a D: folder's pending writes while the PC runs
-/pc-386/snapshots/       snapshots, one folder per startup (sN.snp), and disks.gen
+/pico-386/pc.ini           the PC startup, written with defaults the first time
+/pico-386/startN.ini       the startups made with "Create new startup"
+/pico-386/pico386.cfg      the frontend settings (volume, FPS meter, font size, last startup)
+/pico-386/.unzipped/       zips unpacked for use as drives, and what the PC saved in them
+/pico-386/.pico386-dN.tmp  a D: folder's pending writes while the PC runs
+/pico-386/snapshots/       snapshots, one folder per startup (sN.snp), and disks.gen
 ```
 
-If you use PicoMultiLoader, the app itself is in `/pico-386/` (with a dash). It is a separate
-folder from `/pc-386/`, which holds the data: keep both.
+If you use PicoMultiLoader, the app itself (`app.ini`, `icon.bmp`, `pico386-rp2350.uf2`,
+`pico386-p4.bin`) shares `/pico-386/` with the data. Leave those files in place.
+
+**Coming from v0.1.x?** The data folder was `/pc-386`. Move what is in it into `/pico-386/`,
+and in each `.ini` change `pc-386/` to `pico-386/` in the drive paths (`hda`, `fda`, `cdc`...).
+Snapshots taken before the move point at the old paths.
 
 Disk images are raw. A hard disk is a flat sector dump (a `.vhd` must be a *fixed* VHD), and a
 floppy is 160 KB to 2.88 MB. Guest writes go straight to the image on the card.
@@ -160,14 +165,14 @@ Put programs or games in a folder from your computer, then pick that folder as D
 - What the PC changes on D: (new, edited, renamed or deleted files) is saved into the folder
   **when you turn the PC off** with Quit machine in the in-game menu, or when you change C: or D:.
   "Saving" shows while it writes. If the PicoCalc loses power first, those changes are lost.
-- A zip is unpacked once to `/pc-386/.unzipped/`. The PC then runs from that copy, and its
+- A zip is unpacked once to `/pico-386/.unzipped/`. The PC then runs from that copy, and its
   writes go there, never into the zip.
 - Files DOS creates get DOS names (`NEW.TXT`). Files that were already there keep their names.
 - If no C: is set, the folder is C: instead.
 - Formatting or repartitioning D: is never written back, so it cannot wipe the folder.
 - The disk is sized for the folder plus 32 MB free, up to 2 GB. Above 504 MB, plain MS-DOS
   can't read it; FreeDOS and Windows 95 can.
-- `/pc-386` itself can't be D:, since it holds the PC's own disks.
+- `/pico-386` itself can't be D:, since it holds the PC's own disks.
 
 **A: and B: take a folder or a zip too**, as a 1.44 MB floppy. Unlike D:, it can be swapped
 while DOS runs, so you can go through a folder of game zips without restarting the PC.
@@ -290,7 +295,8 @@ same Arduino-ESP32 3.x install as emu8, emu16 and pico-amiga (`~/.emu6502-p4`).
 arduino-cli folder, with FreeRTOS at 300 MHz, and writes `build-rp2350/pico386.ino.uf2`.
 
 **A release.** `tools/pml-app/package.ps1 -Version X.Y.Z` builds both firmwares and writes
-`build-pml/pico-386/` and the PicoMultiLoader zip.
+`build-pml/pico-386/` and the PicoMultiLoader zip. The zip also carries the SD card's data: every
+file under `sdcard/pico-386/` that git tracks (the BIOS, the FreeDOS and empty disks, the tests).
 
 **Desktop.** You need MSYS2 MinGW32 with SDL2 and CMake. Run the task **desktop: build**, or:
 
@@ -325,8 +331,8 @@ sdcard/                   a ready SD card: the BIOS, FreeDOS, empty disks and te
 | The OPL2 emulator (Adlib) | MAME's fmopl by Tatsuyuki Satoh, via DOSBox, QEMU and tiny386 | LGPL-2.1-or-later |
 | The .ini parser | [inih](https://github.com/benhoyt/inih) by Ben Hoyt | BSD-3-Clause |
 | The UI fonts | X11 misc-fixed, via FabGL and emu8 | public domain |
-| SeaBIOS and SeaVGABIOS (`sdcard/pc-386/roms/`, not in the firmware) | the tiny386 release | LGPL-3.0 |
-| FreeDOS 1.3 and UDVD2.SYS (`sdcard/pc-386/disks/`) | [freedos.org](https://www.freedos.org/) | GPL and other free licenses |
+| SeaBIOS and SeaVGABIOS (`sdcard/pico-386/roms/`, not in the firmware) | the tiny386 release | LGPL-3.0 |
+| FreeDOS 1.3 and UDVD2.SYS (`sdcard/pico-386/disks/`) | [freedos.org](https://www.freedos.org/) | GPL and other free licenses |
 
 `THIRD_PARTY.md` has the details, and lists every change made to tiny386.
 

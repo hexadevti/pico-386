@@ -8,7 +8,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
 - License: GPL-2.0-or-later for our files, the same as pico-amiga.
   - Never copy emu16's `src/md/`, `src/sound/` or `src/cpu/`: they are AGPL or non-commercial.
   - Record every change to tiny386 in `THIRD_PARTY.md`.
-- The plan the user approved is in `~/.claude/plans/create-a-pc-386-serene-panda.md`. The user
+- The plan the user approved is in `~/.claude/plans/create-a-pico-386-serene-panda.md`. The user
   chose an Arduino-cli build like pico-amiga's. The DOS and Windows profiles were merged into
   one PC on 2026-10-19 at the user's request: a 386 with an FPU, and the most RAM that fits. Describe it only as a 386 (the user,
   2026-11-02): tiny386 emulates a 386; the ini's `gen = 4` only changes what CPUID reports.
@@ -156,7 +156,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     - **Driving the device yourself (2026-11-02, the user asked for it).** The PicoCalc stays on COM6,
       with PicoMultiLoader on Wi-Fi at 192.168.0.70. Nothing here needs the user's hands:
       - `python -I tools/deploy-rp2350.py` sends `@uf2menu`, uploads `build-rp2350/pico386.ino.uf2`
-        through the loader's web API to `/pc-386/pico386.ino.uf2` (the old one becomes
+        through the loader's web API to `/pico-386/pico386.ino.uf2` (the old one becomes
         `pico386.prev.uf2`) and flashes it. Boot takes about 20 s.
       - `python -I tools/remote.py keys "enter,w800,shot"` types a PC_KEYS script (`keyscript.cpp`,
         shared with the desktop's `PC_KEYS`); each `shot` saves `sdcard/rshotN.png` (`--out`).
@@ -305,7 +305,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
 - **`pc_profiles.cpp`:**
   - Startups (2026-10-19, replacing "Boot a disk image"): the home menu lists each startup, then
     "Create new startup", "Create a hard disk", Settings and Exit. A startup is a machine .ini in
-    `/pc-386` with `[pico] name`. `pc.ini` comes first and is "PC" when it has no name. Other
+    `/pico-386` with `[pico] name`. `pc.ini` comes first and is "PC" when it has no name. Other
     named .ini files follow, sorted by name. Unnamed test .ini files are not listed.
     - "Create new startup" asks for a name (`ui::editText`) and writes the first free
       `startN.ini`, which mounts only C:.
@@ -313,16 +313,16 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       The screen has Start, the drives, "Boot from" (`[pico] boot = cd`), Rename, and Delete
       (every startup but pc.ini). Delete removes only the .ini.
     - `startup=` in pico386.cfg remembers the last startup's file for the home menu's cursor.
-  - It writes `/pc-386/pc.ini` when it is missing (C: = c.img, else dos.img or win.img). It asks
+  - It writes `/pico-386/pc.ini` when it is missing (C: = c.img, else dos.img or win.img). It asks
     for `T386_MEM_MAX_MB` (32 MB) of RAM; `t386_start` steps down 4 MB at a time until guest
     RAM + VRAM + 2 MB fits in PSRAM.
   - Everything persists in the startup's .ini (the user asked, 2026-10-19).
     `[pico] boot = cd` becomes SeaBIOS's CMOS boot order in `t386_start` (3Dh/38h); without
     it SeaBIOS tries C: before the CD. `pc_core` writes `[pico] mouse` (0/1/2) and the
     button keys when they change. `pcini_get_in`/`pcini_set_in` edit any section.
-  - Test: `sdcard/pc-386/disks/tests/m13.iso` is an El Torito CD (m13.img, floppy emulation); `cdt.ini` boots
+  - Test: `sdcard/pico-386/disks/tests/m13.iso` is an El Torito CD (m13.img, floppy emulation); `cdt.ini` boots
     it ahead of `dos.img`.
-  - The CD in DOS needs a guest driver. `sdcard/pc-386/cdrv.img` (`disks/cdrom-driver.img` in git) is a floppy holding FreeDOS's
+  - The CD in DOS needs a guest driver. `sdcard/pico-386/cdrv.img` (`disks/cdrom-driver.img` in git) is a floppy holding FreeDOS's
     `UDVD2.SYS`. Add `DEVICE=C:\DOS\UDVD2.SYS /D:CDROM1 /UX` to CONFIG.SYS, and
     `C:\DOS\MSCDEX.EXE /D:CDROM1 /L:E` to AUTOEXEC.BAT ahead of SMARTDRV. This works on
     DOSHDD (MS-DOS 6 + Win 3.11) on the desktop and on the device (2026-10-19).
@@ -348,22 +348,22 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     a partition at LBA 63, the FAT and directories (with VFAT long names) in RAM. Files are
     allocated contiguously and read straight from the host files.
   - Guest writes never touch the folder while it runs. FAT and directory writes stay in RAM; data
-    clusters go to `/pc-386/.pico386-dN.tmp`.
+    clusters go to `/pico-386/.pico386-dN.tmp`.
   - `pfolder_close_all()` (from `t386_release_all`, and `atexit` on the desktop) parses the final
     tree and matches nodes by first cluster, then by short name in the same parent. It stages
     new and changed files in `<folder>/.pico386-commit`, then deletes, renames and moves them in.
   - If sector 0 or 63 was rewritten (FDISK/FORMAT), nothing is applied.
   - Tested on the desktop with FreeDOS: dir, type, echo >, copy, ren, md, del, overwrite, reboot.
 - **`pc_zip.cpp`, zips as D: (2026-10-19):**
-  - The ini keeps the zip itself (`hdb = pc-386/games/x.zip`). `t386_start` calls `pczip_folder`,
-    which unpacks the zip once to `/pc-386/.unzipped/<name>/` and hands that folder to the folder disk.
+  - The ini keeps the zip itself (`hdb = pico-386/games/x.zip`). `t386_start` calls `pczip_folder`,
+    which unpacks the zip once to `/pico-386/.unzipped/<name>/` and hands that folder to the folder disk.
     Guest writes go to that folder, not to the zip.
   - A `.pico386-zip` marker in the folder records the zip's path, size and mtime. If they match,
     the folder is reused. If not, it is emptied and unpacked again.
   - The inflater is our own (stored and deflate, CRC checked). It has no zlib dependency.
   - The D: chooser has "Choose a zip file". (The old "Boot a disk image" also booted a zip
     holding a single image; that went with it on 2026-10-19.)
-  - Tested on the desktop: all the example zips in `sdcard/pc-386/games` unpack with matching
+  - Tested on the desktop: all the example zips in `sdcard/pico-386/games` unpack with matching
     CRCs. `zipt.ini` (C: = DOSHDD.img, D: = Alley Cat) runs the game from D:. Never tested on the device.
 - **Drives in-game (`pc_core.cpp`):**
   - A:/B: swap through emulink.
@@ -398,7 +398,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
   - In-game Save/Load snapshot rows, and a Snapshots row on the startup's drives screen
     (`MACHINE_SNAPSHOT`). The save asks for a name with an empty field (the user wanted names
     that say what the snapshot is, not "Snapshot N").
-  - File: `/pc-386/snapshots/<ini base>/sN.snp` = "P386SNP1", the name, the startup's .ini text,
+  - File: `/pico-386/snapshots/<ini base>/sN.snp` = "P386SNP1", the name, the startup's .ini text,
     the disks with their generations, then `t386_save_state` (`snap_run` in pc_glue.c: "T386", RAM
     and VRAM sizes, the guest clock, `pc_snap` (THIRD_PARTY.md), RAM in 1 KB pages, VRAM).
   - Restoring writes the snapshot's ini over the startup's (keeping `[pico] name`), starts the
@@ -448,8 +448,10 @@ from the precompiled core and can't be set.
 The header lands at 0x10003124, behind arduino-pico's 12 KB OTA stub, and PicoMultiLoader's
 `read_binary_info` (rp2xxx/src/uf2_image.c) scans only 0x500 bytes from the image start, so its
 details screen doesn't see it yet. emu8 has the same problem. The fix belongs in PicoMultiLoader:
-also scan from +0x3000. The SD folder is `pico-386`, never `pc-386`, which is
-the data folder (FAT ignores case). `app.ini` must stay under 512 bytes, ASCII with no BOM.
+also scan from +0x3000. The SD folder is `pico-386`, which is also
+the data folder since 2026-11-03 (it was `/pc-386`; the user asked). The zip also carries every
+file git tracks under `sdcard/pico-386/` (BIOS, free disks, tests), copied by `package.ps1`.
+Old cards need their `/pc-386` moved and the .ini drive paths edited (README says how). `app.ini` must stay under 512 bytes, ASCII with no BOM.
 
 **Desktop.** MSYS2 MinGW32. The login shell starts in `$HOME`, so `cd` inside the `-lc`:
 
@@ -461,7 +463,7 @@ MSYSTEM=MINGW32 /c/msys64/usr/bin/bash.exe -lc "cd /c/Users/lucia/repos/pico-386
 the repo root, because `PC_INI` paths are relative to the cwd.
 
 **Test hooks** (desktop):
-- `PC_INI=sdcard/pc-386/x.ini` boots that machine directly, skipping the home menu.
+- `PC_INI=sdcard/pico-386/x.ini` boots that machine directly, skipping the home menu.
 - `PC_KEYS=` runs a comma-separated script:
   - key names (`up`, `enter`, `esc`, `f5`, `pgup`, `ctrl`, `alt`, ...), single characters, and
     chords like `ctrl+esc`
@@ -472,16 +474,16 @@ the repo root, because `PC_INI` paths are relative to the cwd.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
 
 Test data in `sdcard/`. It is gitignored except what may be shared (2026-11-02, the user asked):
-`pc-386/roms/`, `pc-386/disks/` (FreeDOS floppies, `freedos-hdd-32mb.img`, empty
+`pico-386/roms/`, `pico-386/disks/` (FreeDOS floppies, `freedos-hdd-32mb.img`, empty
 images from `tools/make_disk.py`, the tests) and the test .ini files. Never commit MS-DOS,
 Windows or games (DOSHDD, Win31Disk, games/). GitHub refuses files over 100 MB.
 
-- `sdcard/pc-386/roms/`: `bios.bin` and `vgabios.bin` (2026-11-02; it was `/roms/pc`). That folder is the
+- `sdcard/pico-386/roms/`: `bios.bin` and `vgabios.bin` (2026-11-02; it was `/roms/pc`). That folder is the
   default; `pc_core`'s `biosDir()` falls back to it and to `/roms/pc`, which v0.1.0 saved in the cfg. The user can change it in
   Settings > BIOS folder (`biosdir` in pico386.cfg). `t386_start` takes it and ignores the ini's bios keys.
-- everything else in `sdcard/pc-386/`: the .ini files and the disk images (one folder for the emulator, the user's choice)
+- everything else in `sdcard/pico-386/`: the .ini files and the disk images (one folder for the emulator, the user's choice)
 - `fdboot.img`, the FreeDOS 1.3 boot floppy (`disks/freedos/x86BOOT.img` in git)
-- boot-sector tests in `disks/tests/`, each with a matching `.ini` in `sdcard/pc-386/`:
+- boot-sector tests in `disks/tests/`, each with a matching `.ini` in `sdcard/pico-386/`:
   - `m13.img`: a mode 13h palette grid
   - `m12.img`: 640x480 diagonal bars
   - `beep.img`: a 1 kHz tone

@@ -26,7 +26,7 @@ int pczip_floppy(const char *zip, char *out, size_t outSize);
 // The floppy images (.ima/.img/.vfd up to 2.88 MB) under a folder a zip unpacked to, as full paths
 // sorted with the numbers counted ("Disk 2" before "Disk 10").
 std::vector<std::string> pczip_images(const std::string &dir);
-// The folder under /pc-386/.unzipped that path is in, "" when it is not in one.
+// The folder under /pico-386/.unzipped that path is in, "" when it is not in one.
 std::string pczip_set_dir(const std::string &path);
 // The zip that folder was unpacked from (its marker), "" when unknown.
 std::string pczip_source(const std::string &dir);

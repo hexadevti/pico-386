@@ -110,7 +110,7 @@ static void settingsMenu(const EmuCore &core) {
   int sel = 0;
   ui::Screen scr;
   scr.title = "Settings";
-  scr.subtitle = "Saved to /pc-386/pico386.cfg";
+  scr.subtitle = "Saved to /pico-386/pico386.cfg";
   scr.hints = "<>|Change;Esc|Back";
   for (;;) {
     ui::Item items[5];
@@ -142,12 +142,12 @@ static std::string baseNoExt(const std::string &rom) {
 }
 
 static std::string statePath(const std::string &rom) {
-  return sdPath("pc-386/states/") + baseNoExt(rom) + ".st0";
+  return sdPath("pico-386/states/") + baseNoExt(rom) + ".st0";
 }
 
 static bool saveState(const EmuCore &core, const std::string &rom) {
   if (!core.saveState) return false;
-  makeDirs(sdPath("pc-386/states"));
+  makeDirs(sdPath("pico-386/states"));
   const std::string p = statePath(rom);
   FILE *f = fopen(p.c_str(), "wb");
   if (!f) return false;
@@ -358,7 +358,7 @@ void app_setup() {
 void app_loop() {
   if (!hal_sd_mounted()) {
     ui::drawBackground();
-    ui::message("No SD card", "Insert a card with /pc-386 and restart", 0);
+    ui::message("No SD card", "Insert a card with /pico-386 and restart", 0);
     for (;;) ui::waitKey();   // its hotkeys still reach the loader / restart
   }
 #if defined(BOARD_DESKTOP)

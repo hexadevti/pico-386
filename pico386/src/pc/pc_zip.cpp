@@ -1,5 +1,5 @@
 // pc_zip.cpp -- .zip files as disks. A zip (a game, as the DOS game archives come) is unpacked
-// once to /pc-386/.unzipped/<zip name>/, and that folder is what the guest gets, through the
+// once to /pico-386/.unzipped/<zip name>/, and that folder is what the guest gets, through the
 // folder disk (pc_folder.cpp). So a zip mounts as D: like any folder, and what the guest writes
 // there (saved games, settings) is kept in the unpacked folder, not in the zip.
 //
@@ -394,7 +394,7 @@ bool extract(FILE *zf, const Entry &e, const std::string &path) {
   return ok;
 }
 
-// Empties a folder under /pc-386/.unzipped (a stale or half-unpacked one). One entry at a time,
+// Empties a folder under /pico-386/.unzipped (a stale or half-unpacked one). One entry at a time,
 // reopening the folder after each, so no list of names takes heap (and nothing is removed from
 // a folder while it is being read). It stops at the first entry that will not go.
 void removeTree(const std::string &dir) {
@@ -512,7 +512,7 @@ std::vector<std::string> pczip_images(const std::string &dir) {
 }
 
 std::string pczip_set_dir(const std::string &path) {
-  const std::string top = sdPath("pc-386/.unzipped") + "/";
+  const std::string top = sdPath("pico-386/.unzipped") + "/";
   if (path.size() <= top.size() || strncasecmp(path.c_str(), top.c_str(), top.size())) return "";
   const size_t end = path.find('/', top.size());
   return end == std::string::npos ? "" : path.substr(0, end);
@@ -555,7 +555,7 @@ extern "C" int pczip_folder(const char *zip, char *out, size_t outSize) {
   base = shortName(base);
   while (!base.empty() && (base.back() == ' ' || base.back() == '.')) base.pop_back();   // not on FAT
   if (base.empty()) base = "zip";
-  const std::string dir = sdPath(("pc-386/.unzipped/" + base).c_str());
+  const std::string dir = sdPath(("pico-386/.unzipped/" + base).c_str());
   if ((size_t)snprintf(out, outSize, "%s", dir.c_str()) >= outSize) return -1;
 
   char id[512];

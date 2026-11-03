@@ -18,7 +18,7 @@
 #include <task.h>
 #include "include/dirent.h"
 
-// "/sd/pc-386" -> "/pc-386", "/sd" -> "/". Anything else is not on the card.
+// "/sd/pico-386" -> "/pico-386", "/sd" -> "/". Anything else is not on the card.
 static const char *sdPath(const char *p) {
   static const size_t n = sizeof(SD_MOUNT) - 1;
   if (!p || strncmp(p, SD_MOUNT, n) != 0) return nullptr;

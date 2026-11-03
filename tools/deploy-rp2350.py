@@ -4,7 +4,7 @@
 #   1. "@uf2menu" over the serial port, if pico-386 is running, opens the loader.
 #   2. The loader's web API (PicoMultiLoader rp2xxx/src/webserver.c) uploads the .uf2 over the
 #      old one, keeping that as pico386.prev.uf2, and flashes it.
-# Usage: deploy-rp2350.py [--ip 192.168.0.70] [--port COM6] [--path /pc-386/pico386.ino.uf2] [uf2]
+# Usage: deploy-rp2350.py [--ip 192.168.0.70] [--port COM6] [--path /pico-386/pico386.ino.uf2] [uf2]
 import argparse, json, os, sys, time, urllib.parse, urllib.request
 import serial
 
@@ -29,7 +29,7 @@ def main():
     ap.add_argument('uf2', nargs='?', default=os.path.join(os.path.dirname(__file__), '..', 'build-rp2350', 'pico386.ino.uf2'))
     ap.add_argument('--ip', default='192.168.0.70')
     ap.add_argument('--port', default='COM6')
-    ap.add_argument('--path', default='/pc-386/pico386.ino.uf2')
+    ap.add_argument('--path', default='/pico-386/pico386.ino.uf2')
     a = ap.parse_args()
     data = open(a.uf2, 'rb').read()
 

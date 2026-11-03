@@ -7,7 +7,7 @@
 //
 // While the PC runs, nothing it writes reaches the folder:
 // - FAT and directory changes stay in RAM.
-// - Written data clusters go to a scratch file, /pc-386/.pico386-dN.tmp.
+// - Written data clusters go to a scratch file, /pico-386/.pico386-dN.tmp.
 // On the RP2350 the FAT, the directories and the scan's nodes live in the PSRAM (a hard disk's
 // FAT alone is up to 128 KB, and the heap has about 10 KB with a PC running).
 // When the machine powers off, the final FAT16 tree is read back through the same view and
@@ -1309,7 +1309,7 @@ PicoFolder *openFolder(const char *dir, bool floppy) {
   while (f->root.size() > 1 && f->root.back() == '/') f->root.pop_back();
   // a scratch file no open folder uses (floppies come and go while the PC runs)
   for (int i = 0; f->spillPath.empty(); i++) {
-    const std::string p = sdPath(("pc-386/.pico386-d" + std::to_string(i) + ".tmp").c_str());
+    const std::string p = sdPath(("pico-386/.pico386-d" + std::to_string(i) + ".tmp").c_str());
     bool used = false;
     for (PicoFolder *o : s_open) used |= o->spillPath == p;
     if (!used) f->spillPath = p;

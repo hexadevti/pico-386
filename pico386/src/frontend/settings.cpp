@@ -37,7 +37,7 @@ bool makeDirs(const std::string &path) {
   return mkOne(path);
 }
 
-static std::string cfgPath() { return sdPath("pc-386/pico386.cfg"); }
+static std::string cfgPath() { return sdPath("pico-386/pico386.cfg"); }
 
 void settingsLoad() {
   FILE *f = fopen(cfgPath().c_str(), "r");
@@ -68,7 +68,7 @@ void settingsLoad() {
 }
 
 void settingsSave() {
-  makeDirs(sdPath("pc-386"));
+  makeDirs(sdPath("pico-386"));
   FILE *f = fopen(cfgPath().c_str(), "w");
   if (!f) { hal_log("settings: cannot write %s", cfgPath().c_str()); return; }
   fprintf(f, "volume=%d\nframeskip=%d\nshowfps=%d\nfontsize=%d\nlastdir=%s\nstartup=%s\nbiosdir=%s\n",

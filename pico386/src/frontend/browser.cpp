@@ -227,7 +227,7 @@ bool browseRom(const EmuCore &core, std::string &outPath, const BrowseOpts *opts
   const bool pickDir = opts && opts->pickDir;
   std::string dir = ownDir ? opts->startDir : g_settings.lastDir;
   if (dir.empty() || dir.compare(0, root.size(), root) || !isDir(dir)) {
-    dir = sdPath("pc-386");                      // the disk images live with the BIOS
+    dir = sdPath("pico-386");                      // the disk images live with the BIOS
     if (!isDir(dir)) dir = root;
   }
   std::string selectName;

@@ -1,6 +1,6 @@
 // pc_profiles.cpp -- the startups and the home menu that starts them.
 //
-// A startup is the one PC (see machineIni) with a set of drives: a tiny386 .ini in /pc-386 whose
+// A startup is the one PC (see machineIni) with a set of drives: a tiny386 .ini in /pico-386 whose
 // [pico] name the home menu shows. pc.ini is the first, written with the defaults below the first
 // time it is needed ("PC" until renamed); "Create new startup" adds startN.ini files. Any other
 // .ini in the folder (test machines) has no name and is not listed. Choosing a startup opens its
@@ -33,7 +33,7 @@ bool exists(const std::string &p) {
 }
 
 bool writeText(const std::string &path, const char *text) {
-  makeDirs(sdPath("pc-386"));
+  makeDirs(sdPath("pico-386"));
   FILE *f = fopen(path.c_str(), "w");
   if (!f) {
     hal_log("cannot write %s", path.c_str());
@@ -47,7 +47,7 @@ bool writeText(const std::string &path, const char *text) {
 // The C: a new pc.ini starts with: the first of these on the card (the last two are the old DOS
 // and Windows machines' disks), else none.
 std::string defaultHardDisk() {
-  for (const char *n : { "pc-386/c.img", "pc-386/dos.img", "pc-386/win.img" })
+  for (const char *n : { "pico-386/c.img", "pico-386/dos.img", "pico-386/win.img" })
     if (exists(sdPath(n))) return n;
   return "";
 }
@@ -79,13 +79,13 @@ std::string machineIni(const std::string &drives, const char *header) {
 }
 
 std::string pcIni() {
-  const std::string p = sdPath("pc-386/pc.ini");
+  const std::string p = sdPath("pico-386/pc.ini");
   if (!exists(p)) {
     hal_log("writing the default %s", p.c_str());
     const std::string c = defaultHardDisk();
-    const std::string drives = (c.empty() ? std::string(";hda = pc-386/c.img\n") : "hda = " + c + "\n") +
-        ";fda = pc-386/boot.img\n"
-        ";cdc = pc-386/cd.iso\n";
+    const std::string drives = (c.empty() ? std::string(";hda = pico-386/c.img\n") : "hda = " + c + "\n") +
+        ";fda = pico-386/boot.img\n"
+        ";cdc = pico-386/cd.iso\n";
     writeText(p, machineIni(drives, "; pico-386 PC. tiny386's .ini keys; paths are relative to the SD card root.\n").c_str());
   }
   return p;
@@ -103,12 +103,12 @@ struct Startup {
   std::string ini, file, name;           // full path, the file name ("pc.ini"), what is shown
 };
 
-// pc.ini first, then every named .ini in /pc-386 by name.
+// pc.ini first, then every named .ini in /pico-386 by name.
 std::vector<Startup> listStartups() {
   std::vector<Startup> v;
   const std::string pc = pcIni();
   v.push_back({ pc, "pc.ini", startupName(pc) });
-  const std::string dir = sdPath("pc-386");
+  const std::string dir = sdPath("pico-386");
   std::vector<Startup> more;
   if (DIR *d = opendir(dir.c_str())) {
     while (dirent *e = readdir(d)) {
@@ -135,20 +135,20 @@ bool askName(const char *title, std::string &name) {
   return true;
 }
 
-// "Create new startup": asks the name and writes the first free /pc-386/startN.ini, with the
+// "Create new startup": asks the name and writes the first free /pico-386/startN.ini, with the
 // default C: and the rest empty. Returns its path, or "" (Esc, or the card cannot be written).
 std::string createStartup() {
   std::string name = "New startup";
   if (!askName("Create new startup", name)) return "";
   std::string ini;
   for (int i = 1; i < 1000; i++) {
-    ini = sdPath(("pc-386/start" + std::to_string(i) + ".ini").c_str());
+    ini = sdPath(("pico-386/start" + std::to_string(i) + ".ini").c_str());
     if (!exists(ini)) break;
   }
   const std::string c = defaultHardDisk();
-  const std::string drives = (c.empty() ? std::string(";hda = pc-386/c.img\n") : "hda = " + c + "\n") +
-      ";fda = pc-386/boot.img\n"
-      ";cdc = pc-386/cd.iso\n";
+  const std::string drives = (c.empty() ? std::string(";hda = pico-386/c.img\n") : "hda = " + c + "\n") +
+      ";fda = pico-386/boot.img\n"
+      ";cdc = pico-386/cd.iso\n";
   if (!writeText(ini, machineIni(drives, "; a pico-386 startup. tiny386's .ini keys; paths are relative to the SD card root.\n").c_str()) ||
       !pcini_set_in(ini, "pico", "name", name)) {
     ui::message("Error", "Cannot write the startup (card full?)", 2000);

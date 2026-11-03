@@ -5,7 +5,7 @@
 #include "../../core.h"
 
 // Lists folders and the core's ROM files, starting where the browser last was (else
-// /pc-386). true + the full path when a ROM was chosen, false on Esc at the top.
+// /pico-386). true + the full path when a ROM was chosen, false on Esc at the top.
 struct BrowseOpts {
   const char *title = nullptr;          // instead of the core's name
   // Called for each file with a matching extension: false hides it; tag (empty by default) is

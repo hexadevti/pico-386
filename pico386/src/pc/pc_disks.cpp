@@ -567,7 +567,7 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
       o.startDir = start.c_str();
       if (!browseRom(kPC386, out, &o)) continue;
       // C: and the other images are open while the PC runs; that folder must not be shared too
-      if (out == sdPath("pc-386")) {
+      if (out == sdPath("pico-386")) {
         ui::message("Not this folder", "It holds the PC's own disks", 1800);
         continue;
       }
@@ -679,32 +679,32 @@ void pcdisk_create_menu() {
     std::string spare;
     for (int i = 1; i < 100; i++) {
       spare = "disk" + std::to_string(i) + ".img";
-      if (fileSize(sdPath(("pc-386/" + spare).c_str())) < 0) break;
+      if (fileSize(sdPath(("pico-386/" + spare).c_str())) < 0) break;
     }
     const std::string names[2] = { "c.img", spare };
     const char *const subs[2] = { "C: of the PC (when its .ini is new)", "A spare disk, to mount as C: or D:" };
     std::string vals[2], subText[2];
     ui::Item nitems[2];
     for (int i = 0; i < 2; i++) {
-      const bool exists = fileSize(sdPath(("pc-386/" + names[i]).c_str())) >= 0;
+      const bool exists = fileSize(sdPath(("pico-386/" + names[i]).c_str())) >= 0;
       vals[i] = exists ? "replace" : "new";
       subText[i] = subs[i];
       nitems[i] = { names[i].c_str(), vals[i].c_str(), ui::ICON_SAVE, subText[i].c_str() };
     }
     ui::Screen nscr;
     nscr.title = "Create a hard disk";
-    nscr.subtitle = "2. File in /pc-386";
+    nscr.subtitle = "2. File in /pico-386";
     nscr.hints = "Enter|Create;Esc|Back";
-    int nameSel = fileSize(sdPath("pc-386/c.img")) < 0 ? 0 : 1;
+    int nameSel = fileSize(sdPath("pico-386/c.img")) < 0 ? 0 : 1;
     const uint8_t nk = ui::list(nscr, nitems, 2, &nameSel);
     if (nk != KEY_ENTER) continue;
 
-    const std::string path = sdPath(("pc-386/" + names[nameSel]).c_str());
+    const std::string path = sdPath(("pico-386/" + names[nameSel]).c_str());
     if (fileSize(path) >= 0 &&
         !confirm(("Replace " + names[nameSel] + "?").c_str(), "Every file on that disk is lost"))
       continue;
 
-    makeDirs(sdPath("pc-386"));
+    makeDirs(sdPath("pico-386"));
     ui::message("Creating", (names[nameSel] + ", " + kSizes[sizeSel].label + "... please wait").c_str());
     if (!makeHardDisk(path, kSizes[sizeSel].mb)) {
       ui::message("Error", "Cannot write the image (card full?)", 2500);

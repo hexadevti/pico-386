@@ -1,11 +1,12 @@
-# package.ps1 -- build the PicoMultiLoader app folder: pico-386/ with both firmwares, app.ini and
-# the icon, zipped for the root of the SD card (PicoMultiLoader docs/apps.md).
+# package.ps1 -- build the PicoMultiLoader app folder: pico-386/ with both firmwares, app.ini, the
+# icon and the SD card's data, zipped for the root of the SD card (PicoMultiLoader docs/apps.md).
 #
 #   powershell -File tools/pml-app/package.ps1 -Version 0.1.0               # build both, package
 #   powershell -File tools/pml-app/package.ps1 -Version 0.1.0 -SkipBuild    # package what is built
 #
-# Output: build-pml/pico-386/ and build-pml/pico-386-pml-v<ver>.zip. The folder is pico-386, never
-# pc-386: that is the emulator's data folder, and FAT ignores case.
+# Output: build-pml/pico-386/ and build-pml/pico-386-pml-v<ver>.zip. pico-386 is also the
+# emulator's data folder, so the zip carries the files git tracks under sdcard/pico-386/ (the BIOS,
+# the free disks, the tests): never MS-DOS, Windows or games, which are only on this computer.
 #
 # The version goes into app.ini and, on the RP2350, into the UF2's binary_info (binfo_rp2350.c),
 # which the loader's details screen reads. The P4 .bin's app descriptor version comes from the
@@ -64,6 +65,17 @@ Copy-Item (Join-Path $p4Out 'pico386.ino.bin') (Join-Path $pml 'pico386-p4.bin')
 $ini = (Get-Content -Raw (Join-Path $PSScriptRoot 'app.ini')) -replace '(?m)^(version\s*=\s*).*$', "`${1}$Version"
 [IO.File]::WriteAllText((Join-Path $pml 'app.ini'), $ini)   # ASCII, no BOM: the loader reads it raw
 Copy-Item (Join-Path $PSScriptRoot 'icon.bmp') $pml
+
+# The SD card's data: only what git tracks, so local disks and games stay out of the release.
+$data = 'sdcard/pico-386/'
+$tracked = & git -C $repo ls-files -- $data
+if ($LASTEXITCODE -or -not $tracked) { throw "git ls-files found nothing under $data" }
+foreach ($f in $tracked) {
+  $dst = Join-Path $pml ($f.Substring($data.Length))
+  New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+  Copy-Item (Join-Path $repo $f) $dst
+}
+Write-Host "data: $($tracked.Count) files from $data"
 
 $zip = Join-Path $out "pico-386-pml-v$Version.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
