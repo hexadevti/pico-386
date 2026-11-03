@@ -21,3 +21,4 @@ sdcard/pc-386/*
 
 .claude/
 sdcard/pc-386/disks/freedos-hdd-128mb/
+__pycache__/

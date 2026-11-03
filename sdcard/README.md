@@ -9,7 +9,7 @@ pc-386/roms/bios.bin, vgabios.bin  SeaBIOS and SeaVGABIOS (LGPL-3.0, see roms/RE
 pc-386/disks/
   freedos/x86BOOT.img            FreeDOS 1.3 FloppyEdition (1.44 MB): the boot floppy...
   freedos/x86DSK01..05.img       ...and the five install disks
-  freedos-hdd-128mb.zip          a 128 MB hard disk with FreeDOS 1.3 installed (unzip it first)
+  freedos-hdd-32mb.img           a 32 MB hard disk with FreeDOS 1.3 installed (18 MB free)
   empty-hdd-32mb.img             an empty, formatted hard disk (FAT16)
   empty-floppy-1440k.img         an empty, formatted 1.44 MB floppy (FAT12)
   empty-floppy-720k.img          an empty, formatted 720 KB floppy (FAT12)
@@ -19,9 +19,10 @@ pc-386/disks/
 
 ## Getting started
 
-- **Ready to go:** unzip `freedos-hdd-128mb.zip` on your computer, rename the image `c.img` and
-  put it in `/pc-386/`. The PC startup boots it to `C:\>`. The install is basic: there is no
-  mouse driver, package manager or CD driver on it yet.
+- **Ready to go:** copy `freedos-hdd-32mb.img` to `/pc-386/c.img`. The PC startup boots it to
+  `C:\>`, with HIMEMX, a disk cache (LBACACHE), CTMOUSE, the CD driver and every package from the
+  install floppies. Its boot menu also offers JEMMEX (upper memory) and JEMM386 (EMS) for programs
+  that need them; both are slower here, because they run DOS in virtual 8086 mode.
 - **Install FreeDOS yourself:** make a hard disk in the home menu (**Create a hard disk**), put
   `freedos/x86BOOT.img` in A: and press Start. When the installer asks for the next disk, press
   Ctrl-Esc and put `x86DSK01.img` (then 02, 03...) in A:.

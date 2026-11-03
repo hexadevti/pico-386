@@ -36,6 +36,7 @@ static int after_eq(uint32_t a, uint32_t b)
 }
 
 #include "i8042.h"
+#include "snap.h"   /* pico-386 */
 
 #ifdef BUILD_ESP32
 #define THREAD_SAFE
@@ -929,3 +930,19 @@ PS2MouseState *ps2_mouse_init(void (*update_irq)(void *, int), void *update_arg)
     ps2_reset(&s->common);
     return s;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). The PS/2 queue keeps the keys the guest had not read yet. */
+void i8042_snap(KBDState *s, struct SnapIO *io)
+{
+	static const SnapKeep kkeep[] = {
+		SNAP_KEEP(PS2KbdState, common.update_irq), SNAP_KEEP(PS2KbdState, common.update_arg),
+		{ 0, 0 } };
+	static const SnapKeep mkeep[] = {
+		SNAP_KEEP(PS2MouseState, common.update_irq), SNAP_KEEP(PS2MouseState, common.update_arg),
+		{ 0, 0 } };
+	snap_io(io, &s->write_cmd, 4);   /* write_cmd, status, mode, pending */
+	snap_struct(io, s->kbd, sizeof(*s->kbd), kkeep);
+	snap_struct(io, s->mouse, sizeof(*s->mouse), mkeep);
+}
+#endif

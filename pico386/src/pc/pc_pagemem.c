@@ -132,6 +132,34 @@ static void evict(int f) {
   s_flags[f] = 0;
 }
 
+int pm_get_page(uint32_t page, void *buf) {
+  const int f = frameOf(page);
+  if (f >= 0) {
+    memcpy(buf, s_frames + ((size_t)f << PM_PAGE_SHIFT), PM_PAGE_SIZE);
+    return 1;
+  }
+  if (page >= s_pages || !(s_valid[page >> 3] & (1u << (page & 7)))) return 0;
+  hal_psram_read(page << PM_PAGE_SHIFT, buf, PM_PAGE_SIZE);
+  return 1;
+}
+
+void pm_put_page(uint32_t page, const void *buf) {
+  if (page >= s_pages) return;
+  const int f = frameOf(page);
+  if (f >= 0) {
+    uint8_t *fr = s_frames + ((size_t)f << PM_PAGE_SHIFT);
+    if (buf) memcpy(fr, buf, PM_PAGE_SIZE);
+    else memset(fr, 0, PM_PAGE_SIZE);
+    s_flags[f] |= F_DIRTY;
+    pm_map[page] = 0;                         // the next access maps it again, writable
+  } else if (buf) {
+    hal_psram_write(page << PM_PAGE_SHIFT, buf, PM_PAGE_SIZE);
+    s_valid[page >> 3] |= (uint8_t)(1u << (page & 7));
+  } else {
+    s_valid[page >> 3] &= (uint8_t)~(1u << (page & 7));
+  }
+}
+
 void *pm_lend(size_t bytes, const uint8_t *above) {
   const int n = (int)((bytes + PM_PAGE_SIZE - 1) >> PM_PAGE_SHIFT);
   if (!s_frames || n <= 0) return NULL;

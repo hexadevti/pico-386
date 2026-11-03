@@ -86,4 +86,9 @@ void i440fx_write_data(void *opaque, uint32_t offset,
                        uint32_t data, int size_log2);
 uint32_t i440fx_read_data(void *opaque, uint32_t offset, int size_log2);
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void i440fx_snap(I440FXState *s, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* PCI_H */

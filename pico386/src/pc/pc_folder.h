@@ -24,6 +24,8 @@ int pfolder_write(PicoFolder *f, uint64_t sector, const uint8_t *buf, int n);
 // Whether the guest has written to any open folder disk since it opened.
 int pfolder_dirty(void);
 int pfolder_is_dirty(PicoFolder *f);
+// The folder of open folder disk i (0, 1, ...), NULL past the last one: what a snapshot records.
+const char *pfolder_root(int i);
 // Applies what the guest changed to this folder, then closes and frees it (a floppy taken out).
 void pfolder_close(PicoFolder *f);
 // Applies what the guest changed to the folders, then closes and frees every folder disk.

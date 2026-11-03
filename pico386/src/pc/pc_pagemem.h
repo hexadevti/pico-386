@@ -76,6 +76,11 @@ uint8_t *pm_ptr(uint32_t a, int write);
 #define PM_MIN_FRAMES 16
 void    *pm_lend(size_t bytes, const uint8_t *above);
 int      pm_unlend(void *p);
+// Snapshots: page `page` copied out or in without faulting it in, so the frames keep what the
+// guest was using. pm_get_page returns 0 (buf untouched) for a page never written, which reads
+// as zeros. pm_put_page with buf NULL makes the page zeros again.
+int      pm_get_page(uint32_t page, void *buf);
+void     pm_put_page(uint32_t page, const void *buf);
 // Fault and write-back counts since pm_init, for the FPS line.
 uint32_t pm_faults(void);
 uint32_t pm_writebacks(void);

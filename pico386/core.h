@@ -18,6 +18,7 @@ struct CoreMenuItem {
   const char *label;
   const char *value;          // right-aligned, may be null
   bool adjust;                // Left/Right change it
+  uint8_t icon;               // a ui::ICON_*, 0 for the drives' pad
 };
 
 struct EmuCore {

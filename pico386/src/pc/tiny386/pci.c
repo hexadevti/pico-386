@@ -31,6 +31,7 @@
 
 //#include "cutils.h"
 #include "pci.h"
+#include "snap.h"   /* pico-386 */
 #ifdef BUILD_ESP32
 void *pcmalloc(long size);
 #else
@@ -624,3 +625,33 @@ void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr,
         }
     }
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). The devices are the ones pc_new registered, in the same slots;
+   their config space is moved and the BARs mapped again from it (the VGA's linear framebuffer). */
+void i440fx_snap(I440FXState *s, struct SnapIO *io)
+{
+    PCIBus *b = s->pci_bus;
+    int i, j;
+    snap_check(io, sizeof(PCIDevice));
+    snap_io(io, &s->config_reg, sizeof(s->config_reg));
+    snap_io(io, s->pic_irq_state, sizeof(s->pic_irq_state));
+    snap_io(io, b->irq_state, sizeof(b->irq_state));
+    for (i = 0; i < 256; i++) {
+        PCIDevice *d = b->device[i];
+        if (!d)
+            continue;
+        snap_check(io, i);
+        snap_io(io, d->config, sizeof(d->config));
+        snap_io(io, &d->next_cap_offset, sizeof(d->next_cap_offset));
+        if (io->load && !io->err) {
+            for (j = 0; j < PCI_NUM_REGIONS; j++)
+                if (d->io_regions[j].enabled) {
+                    d->io_regions[j].bar_set(d->io_regions[j].opaque, j, 0, false);
+                    d->io_regions[j].enabled = false;
+                }
+            pci_update_mappings(d);
+        }
+    }
+}
+#endif

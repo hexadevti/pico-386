@@ -63,6 +63,7 @@ void  t386_free(void *p);
 char *t386_strdup(const char *s);
 FILE *t386_fopen(const char *path, const char *mode);
 int   t386_fclose(FILE *f);
+size_t t386_fwrite(const void *p, size_t size, size_t n, FILE *f);
 #ifdef __cplusplus
 }
 #endif
@@ -76,5 +77,6 @@ int   t386_fclose(FILE *f);
 #define strdup(s)      t386_strdup(s)
 #define fopen(p, m)    t386_fopen(p, m)
 #define fclose(f)      t386_fclose(f)
+#define fwrite(p, s, n, f) t386_fwrite(p, s, n, f)   // a disk written since a snapshot (pc_snapshot.cpp)
 
 #endif

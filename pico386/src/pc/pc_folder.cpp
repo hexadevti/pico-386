@@ -1338,6 +1338,7 @@ PicoFolder *openFolder(const char *dir, bool floppy) {
 // Writes a folder back, with the SRAM the pager lends for the tree it reads.
 void closeOne(PicoFolder *f) {
   if (f->dirty) {
+    pcsnap_touch(f->root.c_str());     // snapshots taken before no longer match the folder
     s_lendOk = true;
     try {
       commit(*f);
@@ -1384,6 +1385,10 @@ extern "C" int pfolder_dirty(void) {
 }
 
 extern "C" int pfolder_is_dirty(PicoFolder *f) { return f && f->dirty; }
+
+extern "C" const char *pfolder_root(int i) {
+  return i >= 0 && i < (int)s_open.size() ? s_open[i]->root.c_str() : nullptr;
+}
 
 extern "C" void pfolder_close(PicoFolder *f) {
   for (size_t i = 0; i < s_open.size(); i++) {

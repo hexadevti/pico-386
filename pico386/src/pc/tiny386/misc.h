@@ -32,4 +32,10 @@ void emulink_data_write(void *s, uint32_t val);
 int emulink_data_write_string(void *s, uint8_t *buf, int size, int count);
 int emulink_data_read_string(void *s, uint8_t *buf, int size, int count);
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void cmos_snap(CMOS *s, struct SnapIO *io);
+void emulink_snap(EMULINK *e, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* MISC_H */

@@ -69,4 +69,9 @@ typedef void VGAPicoLineFunc(void *opaque, int y, const uint16_t *line, int w, i
 void vga_set_line_sink(VGAState *s, VGAPicoLineFunc *f, void *opaque);
 #endif
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void vga_snap(VGAState *s, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* VGA_H */

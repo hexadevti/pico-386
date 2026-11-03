@@ -33,6 +33,7 @@
 
 #include "vga.h"
 #include "pci.h"
+#include "snap.h"   /* pico-386 */
 
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
@@ -2351,5 +2352,35 @@ void vga_pico_info(VGAState *s, VGAPicoInfo *p)
     update_palette16(s, pal);
     for (int i = 0; i < 16; i++)
         p->palette[i] = pal[i];
+}
+#endif
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). The registers, palette and VBE state are moved; what the
+   last frame drew (last_*) is forgotten so the next refresh redraws everything. */
+void vga_snap(VGAState *s, struct SnapIO *io)
+{
+    size_t from = offsetof(VGAState, sr_index), to = offsetof(VGAState, comp_ntsc);
+    size_t vfrom = offsetof(VGAState, vbe_index);
+    size_t vto = offsetof(VGAState, vbe_line_offset) + sizeof(s->vbe_line_offset);
+    snap_check(io, (unsigned)((to - from) << 16 | (vto - vfrom)));
+    snap_io(io, &s->graphic_mode, sizeof(s->graphic_mode));
+    snap_io(io, &s->cursor_blink_time, sizeof(s->cursor_blink_time));
+    snap_io(io, &s->cursor_visible_phase, sizeof(s->cursor_visible_phase));
+    snap_io(io, &s->retrace_time, sizeof(s->retrace_time));
+    snap_io(io, &s->retrace_phase, sizeof(s->retrace_phase));
+    snap_io(io, (char *)s + from, to - from);
+    snap_io(io, (char *)s + vfrom, vto - vfrom);
+    if (io->load) {
+        memset(s->last_palette, 0xff, sizeof(s->last_palette));
+#ifndef FULL_UPDATE
+        memset(s->last_ch_attr, 0xff, sizeof(s->last_ch_attr));
+#endif
+        s->last_width = s->last_height = 0;
+        s->last_line_offset = s->last_start_addr = s->last_cursor_offset = 0xffff;
+        s->last_cursor_start = s->last_cursor_end = 0xff;
+        s->pico_gw = s->pico_gh = 0;
+        s->graphic_mode = -1;   /* vga_refresh clears the screen and draws it all */
+    }
 }
 #endif

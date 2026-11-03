@@ -19,6 +19,8 @@ author's pico-amiga and [emu8](https://github.com/hexadevti/emu8).
 <img src="docs/screenshots/drives.png" width="320" alt="A startup's drives screen">
 <img src="docs/screenshots/zips.png" width="320" alt="Choosing a game zip for D:">
 <img src="docs/screenshots/ingame-menu.png" width="320" alt="The in-game menu">
+<img src="docs/screenshots/snapshot-save.png" width="320" alt="Naming a new snapshot">
+<img src="docs/screenshots/snapshots.png" width="320" alt="A startup's snapshots">
 </p>
 
 The screenshots come from the desktop build, which draws the same 320x320 picture as the
@@ -33,6 +35,8 @@ PicoCalc.
   or a `.zip` as a drive, so a game zip can be played without making an image.
 - **Disk swaps while the PC runs**, for multi-disk installers and games.
 - **Startups:** named sets of drives in the home menu, one for each thing you run.
+- **Snapshots:** save the running PC and start from that point next time, with the same drives,
+  instead of booting DOS again.
 - **Screen:** text mode is drawn in a hand-made 4x12 font that stays readable on 320 pixels.
   Graphics are scaled to 320x240: 320x200 is stretched, and 640x480 is averaged 2:1.
 - **A mouse from the keyboard:** the arrows can move a PS/2 mouse pointer, for Windows and mouse games.
@@ -92,9 +96,8 @@ the file browser opens where your files are:
 The easy way to get there: copy the repo's [`sdcard/pc-386/`](sdcard/) folder to the card's
 root. It already has `roms/`, and `disks/` with the FreeDOS 1.3 install floppies, a FreeDOS hard
 disk, empty hard-disk and floppy images, a CD driver floppy and some tests.
-[`sdcard/README.md`](sdcard/README.md) says what each one is. Then unzip
-`disks/freedos-hdd-128mb.zip`, rename the image `c.img` and put it in `/pc-386/`, and the PC
-startup boots FreeDOS. `games/` and `share/` are yours to make.
+[`sdcard/README.md`](sdcard/README.md) says what each one is. Then copy
+`disks/freedos-hdd-32mb.img` to `/pc-386/c.img`, and the PC startup boots FreeDOS. `games/` and `share/` are yours to make.
 
 A few rules keep things working:
 
@@ -112,6 +115,7 @@ A few rules keep things working:
 /pc-386/pico386.cfg      the frontend settings (volume, FPS meter, font size, last startup)
 /pc-386/.unzipped/       zips unpacked for use as drives, and what the PC saved in them
 /pc-386/.pico386-dN.tmp  a D: folder's pending writes while the PC runs
+/pc-386/snapshots/       snapshots, one folder per startup (sN.snp), and disks.gen
 ```
 
 If you use PicoMultiLoader, the app itself is in `/pico-386/` (with a dash). It is a separate
@@ -182,6 +186,22 @@ while DOS runs, so you can go through a folder of game zips without restarting t
   This is how you feed a multi-disk installer.
 - **C: and D:** restart the PC with the new disk, as a real PC would need.
 
+**Snapshots** keep the running PC: its memory, the screen, every device and the drives it had.
+Boot DOS once, then save a snapshot at the prompt, and start from it next time in a second or
+two.
+
+- **To save:** pick **Save snapshot** in the in-game menu and type a name (for example
+  "DOS ready"). A startup can have any number of snapshots.
+- **To start from one:** pick **Snapshots** on the startup's drives screen, or **Load snapshot**
+  in-game, choose one, then **Start from it**. The drives come back as they were in the snapshot,
+  and the PC goes on from where it stopped. The same list has **Delete**.
+- **When a disk changed since the snapshot:** DOS keeps parts of its disks in memory, so starting
+  a snapshot after its C: (or another written disk) was changed can damage that disk. The list
+  warns with "A disk was written since". Save a new snapshot after installing something.
+- **A D: folder or a folder floppy with unsaved writes can't be snapshotted.** Their writes reach
+  the folder only when the PC stops, so restart the PC first.
+- The DOS clock goes on from the snapshot's time.
+
 **Create a hard disk** (home menu) makes a new, empty, formatted C: drive:
 
 1. Pick a size: 32, 64, 128, 256 or 504 MB.
@@ -208,7 +228,7 @@ Every key goes to the PC except these:
 
 | Keys | What they do |
 |---|---|
-| **Ctrl-Esc** | the in-game menu: Resume, Reset, the drives, the arrows' mode, the mouse buttons, Ctrl+Alt+Del, Quit machine |
+| **Ctrl-Esc** | the in-game menu: Resume, Reset, the drives, Save and Load snapshot, the arrows' mode, the mouse buttons, Ctrl+Alt+Del, Quit machine |
 | **Both Shifts together**, or **Ctrl-Tab** | the next mode for the arrows (see below) |
 | **Ctrl+Alt+Del**, **Ctrl+Alt+Backspace** | restart the PC |
 | **Ctrl-PgUp** (in the PC), **Ctrl-Shift-Up** (in the menus) | back to the loader |

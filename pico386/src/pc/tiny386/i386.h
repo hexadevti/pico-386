@@ -92,4 +92,9 @@ void cpu_abort(CPUI386 *cpu, int code);
 #undef sword
 #endif
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void cpui386_snap(CPUI386 *cpu, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* I386_H */

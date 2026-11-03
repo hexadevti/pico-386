@@ -8,6 +8,7 @@
 #include "pc_glue.h"
 #include "pc_folder.h"
 #include "pc_zip.h"
+#include "tiny386/snap.h"
 
 static PC *s_pc;
 #if defined(PICO386_LOWMEM)
@@ -418,3 +419,70 @@ void t386_change_cd(int ide_drive, const char *path) {
   if (!s_pc || ide_drive < 0 || ide_drive > 3) return;
   ide_change_cd(ide_drive < 2 ? s_pc->ide : s_pc->ide2, ide_drive & 1, path);
 }
+
+// ---- snapshots ----
+// Memory goes as 1 KB pages, each a byte (0: all zeros, 1: data follows) and then its data, so
+// the RAM DOS never touched costs a byte a page. mem is NULL for paged guest RAM (the RP2350).
+#define SNAP_PAGE 1024
+
+static int snap_zero(const uint32_t *w) {
+  for (int i = 0; i < SNAP_PAGE / 4; i++)
+    if (w[i]) return 0;
+  return 1;
+}
+
+static void snap_mem(SnapIO *io, uint8_t *mem, uint32_t bytes) {
+  uint32_t buf[SNAP_PAGE / 4];
+  for (uint32_t pg = 0; pg < bytes / SNAP_PAGE && !io->err; pg++) {
+    uint8_t *p = mem ? mem + pg * SNAP_PAGE : (uint8_t *)buf;
+    uint8_t has = 0;
+    if (!io->load) {
+#if defined(PICO386_LOWMEM)
+      has = mem ? 1 : pm_get_page(pg, buf);
+#else
+      has = 1;
+#endif
+      has = has && !snap_zero((const uint32_t *)p);
+      snap_io(io, &has, 1);
+      if (has) snap_io(io, p, SNAP_PAGE);
+      continue;
+    }
+    snap_io(io, &has, 1);
+    if (has) snap_io(io, p, SNAP_PAGE);
+    if (io->err) break;
+    if (mem) {
+      if (!has) memset(p, 0, SNAP_PAGE);
+    }
+#if defined(PICO386_LOWMEM)
+    else {
+      pm_put_page(pg, has ? buf : NULL);
+    }
+#endif
+  }
+}
+
+static int snap_run(FILE *f, int load) {
+  if (!s_pc) return T386_SNAP_FORMAT;
+  SnapIO io = { f, load, 0 };
+  uint32_t now = get_uticks();
+  snap_check(&io, 0x54333836);                    // "T386"
+  snap_check(&io, (unsigned)s_pc->phys_mem_size);
+  snap_check(&io, (unsigned)s_pc->vga_mem_size);
+  snap_io(&io, &now, sizeof now);
+  pc_snap(s_pc, &io);
+#if defined(PICO386_LOWMEM)
+  snap_mem(&io, NULL, (uint32_t)s_pc->phys_mem_size);
+#else
+  snap_mem(&io, (uint8_t *)s_pc->phys_mem, (uint32_t)s_pc->phys_mem_size);
+#endif
+  snap_mem(&io, (uint8_t *)s_pc->vga_mem, (uint32_t)s_pc->vga_mem_size);
+  snap_check(&io, 0x454e4421);                    // "END!"
+  if (io.err) return io.err == 2 ? T386_SNAP_FORMAT : T386_SNAP_IO;
+  // The guest's clock carries on from the snapshot's: the PIT, the cursor blink and the
+  // keyboard's typematic delay are all timed against it.
+  if (load) t386_clock_set(now);
+  return 0;
+}
+
+int t386_save_state(FILE *f) { return snap_run(f, 0); }
+int t386_load_state(FILE *f) { return snap_run(f, 1); }

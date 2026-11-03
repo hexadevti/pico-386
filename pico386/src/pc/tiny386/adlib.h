@@ -10,4 +10,9 @@ void adlib_callback (void *opaque, uint8_t *stream, int free);
 void adlib_free(AdlibState *s);
 AdlibState *adlib_new();
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void adlib_snap(AdlibState *s, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* ADLIB_H */

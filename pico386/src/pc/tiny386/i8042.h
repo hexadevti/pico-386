@@ -32,4 +32,9 @@ KBDState *i8042_init(PS2KbdState **pkbd,
                      void *sys,
                      void (*system_reset_request)(void *sys));
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void i8042_snap(KBDState *s, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* I8042_H */

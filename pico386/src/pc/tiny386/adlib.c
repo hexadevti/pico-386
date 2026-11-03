@@ -28,6 +28,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "adlib.h"
+#include "snap.h"   /* pico-386 */
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -69,6 +70,12 @@ struct AdlibState {
 #endif
     void *voice;
     FM_OPL *opl;
+#ifdef TINY386_PICO
+    /* pico-386: what the guest last wrote to each register, for snapshots. The OPL's own
+       state holds pointers into itself, so a snapshot replays these into it instead. */
+    uint8_t addr;
+    uint8_t regs[256];
+#endif
 };
 
 static void adlib_stop_opl_timer (AdlibState *s, size_t n)
@@ -98,6 +105,12 @@ void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 
     adlib_kill_timers (s);
 
+#ifdef TINY386_PICO
+    if (a & 1)
+        s->regs[s->addr] = val;
+    else
+        s->addr = val;
+#endif
     OPLWrite (s->opl, a, val);
 }
 
@@ -174,6 +187,31 @@ AdlibState *adlib_new()
     }
     return s;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). Notes that were playing start again from their attack. The
+   timer control (register 4) is left out: replaying it would raise a stale timer status. The
+   OPL is the fresh one t386_start made, so writing the registers is enough. */
+void adlib_snap(AdlibState *s, struct SnapIO *io)
+{
+    int pass, r;
+    snap_check(io, sizeof(s->regs));
+    snap_io(io, &s->active, sizeof(s->active));
+    snap_io(io, &s->addr, sizeof(s->addr));
+    snap_io(io, s->regs, sizeof(s->regs));
+    if (!io->load || io->err)
+        return;
+    for (pass = 0; pass < 2; pass++)   /* key-on (B0-B8, BD) last, once the voices are set */
+        for (r = 1; r < 256; r++) {
+            int key = (r >= 0xb0 && r <= 0xb8) || r == 0xbd;
+            if (r == 4 || key != pass)
+                continue;
+            OPLWrite(s->opl, 0, r);
+            OPLWrite(s->opl, 1, s->regs[r]);
+        }
+    OPLWrite(s->opl, 0, s->addr);
+}
+#endif
 #else
 struct AdlibState {
 };
@@ -202,4 +240,10 @@ AdlibState *adlib_new()
     memset(s, 0, sizeof(AdlibState));
     return s;
 }
+
+#ifdef TINY386_PICO
+void adlib_snap(AdlibState *s, struct SnapIO *io)
+{
+}
+#endif
 #endif

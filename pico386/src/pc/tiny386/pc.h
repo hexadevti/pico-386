@@ -128,4 +128,9 @@ int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value);
 void load_bios_and_reset(PC *pc);
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void pc_snap(PC *pc, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* PC_H */

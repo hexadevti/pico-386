@@ -70,4 +70,8 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
 I8257State *i8257_new(
     char *phys_mem, long phys_mem_size,
     int base, int page_base, int pageh_base, int dshift);
+#ifdef TINY386_PICO
+struct SnapIO;
+void i8257_snap(I8257State *d, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
 #endif

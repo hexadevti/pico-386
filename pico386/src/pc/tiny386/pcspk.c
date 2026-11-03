@@ -24,6 +24,7 @@
  */
 
 #include "pcspk.h"
+#include "snap.h"   /* pico-386 */
 #include <stdlib.h>
 #include <string.h>
 
@@ -157,3 +158,12 @@ PCSpkState *pcspk_init(PITState *pit)
 //    register_ioport_write(0x61, 1, 1, pcspk_ioport_write, s);
     return s;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h) */
+void pcspk_snap(PCSpkState *s, struct SnapIO *io)
+{
+    static const SnapKeep keep[] = { SNAP_KEEP(PCSpkState, pit), { 0, 0 } };
+    snap_struct(io, s, sizeof(*s), keep);
+}
+#endif

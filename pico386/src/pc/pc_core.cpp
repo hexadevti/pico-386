@@ -55,6 +55,9 @@ std::string s_drive[DRIVE_COUNT];  // what each drive holds (relative paths, "" 
 std::string s_driveLabel[DRIVE_COUNT];
 int s_mouseSaved;                  // the keyboard mouse mode the .ini has
 uint32_t s_noteUntil;              // a note in the bottom strip until then (ms), 0 = none
+// A snapshot to save or start from once the menu has closed: on the RP2350 the menu's canvas
+// holds VRAM's place until then.
+std::string s_snapSave, s_snapLoad;
 
 const char *baseName(const std::string &p) {
   const size_t s = p.find_last_of('/');
@@ -62,6 +65,7 @@ const char *baseName(const std::string &p) {
 }
 
 bool pc_loadRom(const char *ini);
+void stopMachine();
 
 #if defined(PICO386_LOWMEM)
 // No framebuffer: tiny386 draws one line at a time into this and hands it to pc_video.
@@ -90,6 +94,14 @@ static const char *biosDir() {
 
 bool pc_loadRom(const char *ini) {
   s_error[0] = 0;
+  s_snapSave.clear();
+  s_snapLoad.clear();
+  // From a snapshot: its .ini (its drives) first, then its state into the new machine.
+  const std::string snap = pcsnap_take_pending();
+  if (!snap.empty() && !pcsnap_write_ini(snap, ini)) {
+    snprintf(s_error, sizeof s_error, "Cannot read the snapshot");
+    return false;
+  }
   const int r = t386_start(ini, hal_sd_root(), biosDir(), s_fb);
   if (r != T386_OK) {
     const char *f = t386_error_file();
@@ -102,6 +114,13 @@ bool pc_loadRom(const char *ini) {
       default:              snprintf(s_error, sizeof s_error, "Not enough memory for this machine"); break;
     }
     return false;
+  }
+  if (!snap.empty()) {
+    if (const char *e = pcsnap_restore(snap)) {
+      t386_stop();
+      snprintf(s_error, sizeof s_error, "%s", e);
+      return false;
+    }
   }
   s_running = true;
   s_ini = ini;
@@ -217,6 +236,27 @@ void showNote(const char *text) {
 
 void pc_runFrame(bool draw) {
   if (!s_running) return;
+  if (!s_snapSave.empty()) {
+    hal_job_wait();
+    showNote("Saving snapshot...");
+    const char *e = pcsnap_save(s_ini, s_snapSave);
+    showNote(e ? e : ("Saved: " + s_snapSave).c_str());
+    s_snapSave.clear();
+  }
+  if (!s_snapLoad.empty()) {
+    const std::string snap = s_snapLoad, ini = s_ini;
+    ui::message("Snapshot", "Restarting from it");
+    pckbd_reset();
+    stopMachine();
+    s_running = false;
+    pcsnap_set_pending(snap);
+    if (!pc_loadRom(ini.c_str())) {
+      ui::message("Error", s_error, 3000);
+      if (!pc_loadRom(ini.c_str())) ui::message("Error", s_error, 3000);   // a plain start instead
+      hal_panel_fill(0, 0, PANEL_W, PANEL_H, 0);
+    }
+    return;
+  }
   uint32_t now = get_uticks();
   // Far behind the last deadline: the machine was stopped (the menu, the file browser). That
   // time is taken out of the guest's clock. Otherwise the PIT fires every missed tick back to
@@ -306,8 +346,8 @@ void pc_shutdown() {
 
 void pc_keyEvent(uint8_t code, uint8_t state) { pckbd_event(code, state); }
 
-// The in-game rows: the drives, then the keyboard mouse, its two button keys and Ctrl+Alt+Del.
-enum { ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_CAD, ROW_EXTRA };
+// The in-game rows: the drives, the snapshots, then the keyboard mouse, its two button keys and Ctrl+Alt+Del.
+enum { ROW_SNAP_SAVE, ROW_SNAP_LOAD, ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_CAD, ROW_EXTRA };
 
 int pc_menuItems(CoreMenuItem *out, int max) {
   if (max < DRIVE_COUNT + ROW_EXTRA) return 0;
@@ -315,6 +355,8 @@ int pc_menuItems(CoreMenuItem *out, int max) {
     s_driveLabel[d] = pcdisk_drive_label(s_drive[d]);
     out[d] = { pcdisk_drive_name(d), s_driveLabel[d].c_str(), false };
   }
+  out[DRIVE_COUNT + ROW_SNAP_SAVE] = { "Save snapshot", nullptr, false, ui::ICON_SAVE };
+  out[DRIVE_COUNT + ROW_SNAP_LOAD] = { "Load snapshot", nullptr, false, ui::ICON_LOAD };
   out[DRIVE_COUNT + ROW_MOUSE] = { "Arrows (both Shifts)", pckbd_mouse_mode_name(pckbd_mouse_mode()), true };
   out[DRIVE_COUNT + ROW_LEFT] = { "Mouse left button", pckbd_mouse_button_label(0), true };
   out[DRIVE_COUNT + ROW_RIGHT] = { "Mouse right button", pckbd_mouse_button_label(1), true };
@@ -372,6 +414,25 @@ bool pc_menuAction(int i, uint8_t key) {
   if (i < DRIVE_COUNT) return key == KEY_ENTER && changeDrive(i);
   const int dir = key == KEY_LEFT ? -1 : 1;
   switch (i - DRIVE_COUNT) {
+    case ROW_SNAP_SAVE: {
+      if (key != KEY_ENTER) return false;
+      if (pfolder_dirty()) {
+        ui::message("Save snapshot", "D: or a folder floppy has unsaved changes: restart first", 2200);
+        return false;
+      }
+      // No default name: "Snapshot 3" says nothing a week later, so the user types one.
+      char name[40] = "";
+      if (!ui::editText("Save snapshot", "Type a name, e.g. DOS ready", name, sizeof name)) return false;
+      s_snapSave = name;                       // saved once the menu has closed (pc_runFrame)
+      return true;
+    }
+    case ROW_SNAP_LOAD: {
+      if (key != KEY_ENTER) return false;
+      std::string snap;
+      if (!pcsnap_pick(s_ini, "Load snapshot", snap)) return false;
+      s_snapLoad = snap;
+      return true;
+    }
     case ROW_MOUSE: {
       const int mode = pckbd_mouse_mode();
       pckbd_set_mouse_mode((mode + (dir < 0 ? 2 : 1)) % 3);

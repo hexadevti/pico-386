@@ -24,6 +24,7 @@
  */
 
 #include "sb16.h"
+#include "snap.h"   /* pico-386 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -1455,3 +1456,14 @@ SB16State *sb16_new(
 
     return s;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h) */
+void sb16_snap(SB16State *s, struct SnapIO *io)
+{
+    static const SnapKeep keep[] = {
+        SNAP_KEEP(SB16State, pic), SNAP_KEEP(SB16State, set_irq), SNAP_KEEP(SB16State, isa_dma),
+        SNAP_KEEP(SB16State, isa_hdma), SNAP_KEEP(SB16State, voice), { 0, 0 } };
+    snap_struct(io, s, sizeof(*s), keep);
+}
+#endif

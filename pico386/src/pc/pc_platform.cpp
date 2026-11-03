@@ -61,6 +61,10 @@ static void untrack(void *p) {
 // ---- open files ------------------------------------------------------------------------------
 static constexpr int kMaxFiles = 16;
 static FILE *s_files[kMaxFiles];
+// The images opened for writing, for the snapshots: the first write to one after a start or a
+// snapshot bumps its generation (pcsnap_touch), so a snapshot knows when its disks changed later.
+static char *s_writePath[kMaxFiles];
+static bool s_wrote[kMaxFiles];
 
 extern "C" {
 
@@ -95,15 +99,44 @@ FILE *t386_fopen(const char *path, const char *mode) {
     return nullptr;
   }
   for (int i = 0; i < kMaxFiles; i++)
-    if (!s_files[i]) { s_files[i] = f; return f; }
+    if (!s_files[i]) {
+      s_files[i] = f;
+      s_wrote[i] = false;
+      if (strchr(mode, '+') || strchr(mode, 'w')) {
+        const size_t n = strlen(path) + 1;
+        if ((s_writePath[i] = (char *)malloc(n))) memcpy(s_writePath[i], path, n);
+      }
+      return f;
+    }
   hal_log("tiny386: more than %d open files", kMaxFiles);
   return f;                   // still works, just isn't closed by t386_release_all()
 }
 
+static void forgetFile(int i) {
+  s_files[i] = nullptr;
+  free(s_writePath[i]);
+  s_writePath[i] = nullptr;
+}
+
 int t386_fclose(FILE *f) {
   for (int i = 0; i < kMaxFiles; i++)
-    if (s_files[i] == f) s_files[i] = nullptr;
+    if (s_files[i] == f) forgetFile(i);
   return fclose(f);
+}
+
+size_t t386_fwrite(const void *p, size_t size, size_t n, FILE *f) {
+  for (int i = 0; i < kMaxFiles; i++)
+    if (s_files[i] == f && s_writePath[i] && !s_wrote[i]) {
+      s_wrote[i] = true;
+      pcsnap_touch(s_writePath[i]);
+    }
+  return fwrite(p, size, n, f);
+}
+
+const char *t386_write_file(int i) { return i >= 0 && i < kMaxFiles && s_files[i] ? s_writePath[i] : nullptr; }
+
+void t386_files_snapped() {
+  for (int i = 0; i < kMaxFiles; i++) s_wrote[i] = false;
 }
 
 void t386_log(const char *fmt, ...) {
@@ -117,7 +150,7 @@ void t386_log(const char *fmt, ...) {
 
 void t386_release_all() {
   for (int i = 0; i < kMaxFiles; i++)
-    if (s_files[i]) { fclose(s_files[i]); s_files[i] = nullptr; }
+    if (s_files[i]) { fclose(s_files[i]); forgetFile(i); }
   if (s_count) hal_log("tiny386: releasing %u blocks, %u KB", (unsigned)s_count, (unsigned)(s_bytes >> 10));
   while (s_blocks.next != &s_blocks) untrack(s_blocks.next + 1);
   // Folder disks are written back last: their tables are pc_folder's own, and on the RP2350 the
@@ -138,6 +171,7 @@ static uint32_t s_clockSkip = 0;
 uint32_t get_uticks() { return hal_micros() - s_clockSkip; }
 
 void t386_clock_skip(uint32_t us) { s_clockSkip += us; }
+void t386_clock_set(uint32_t now) { s_clockSkip = hal_micros() - now; }
 
 void *pcmalloc(long size) { return track((size_t)size, false); }
 

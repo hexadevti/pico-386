@@ -103,6 +103,20 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
     the OPL synthesis. sb16.c's check of the guest's own rate (`freq >= 44100`) is unchanged.
   - **`pc.c`:** `pico_spk_writes` and `pico_adlib_writes` count guest writes to port 61h and to
     the Adlib/SB FM ports. `t386_run_until` reads them to mix right after the guest plays a note.
+- **Snapshots (2026-11-03).** `snap.h` (new, ours) moves each device's state through a `SnapIO`.
+  Every struct is preceded by its size, so a build with another layout refuses the file.
+  - **`pc.c`:** `pc_snap` saves the `PC` fields, then the CPU, PIC, PIT, CMOS, both IDE buses,
+    VGA, i8042, both DMA controllers, SB16, speaker, Adlib, i440FX and emulink. The serial port
+    is not saved.
+  - **`i386.c`, `fpu.c`, `i8042.c`, `i8254.c`, `i8257.c`, `i8259.c`, `ide.c`, `misc.c`, `pci.c`,
+    `pcspk.c`, `sb16.c`, `vga.c`:** a `*_snap` each (under `TINY386_PICO`). They save the whole
+    struct, and on load keep the fields that point into this session (other devices, callbacks,
+    host buffers, open files). The CPU's TLB is emptied on load.
+  - **`adlib.c`:** the OPL's state holds pointers into itself, so `adlib_write` keeps a shadow of
+    the 256 registers and the address latch, and a load replays them (key-on last, timer control
+    left out). Notes that were playing restart from their attack.
+  - **`tiny386_port.h`:** `fwrite` goes to `t386_fwrite` (`pc_platform.cpp`), so the first write
+    to a disk image after a start or a snapshot marks that disk as changed.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 

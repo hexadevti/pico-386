@@ -31,6 +31,7 @@
 
 //#include "cutils.h"
 #include "ide.h"
+#include "snap.h"   /* pico-386 */
 
 //#define DEBUG_IDE
 //#define DEBUG_IDE_ATAPI
@@ -2482,3 +2483,51 @@ void ide_fill_cmos(IDEIFState *s, void *cmos,
     }
     set(cmos, 0x12, d_0x12);
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). The drives are rebuilt by t386_start from the snapshot's ini,
+   so their geometry and images are left alone; the registers and the transfer in progress
+   (the buffer and what to call at its end, saved as an index into this table) are moved. */
+static EndTransferFunc *const ide_end_funcs[] = {
+    ide_transfer_stop, ide_transfer_stop2, ide_sector_read, ide_sector_read_cb_end,
+    ide_sector_write_cb1, ide_identify_cb, ide_atapi_cmd, ide_atapi_cmd_reply_end,
+};
+
+static void ide_drive_snap(IDEState *s, struct SnapIO *io)
+{
+    int fn = -1, i;
+    size_t from = offsetof(IDEState, feature);
+    size_t to = offsetof(IDEState, end_transfer_func);
+    snap_check(io, (unsigned)(to - from));
+    snap_io(io, &s->mult_sectors, sizeof(s->mult_sectors));
+    snap_io(io, (char *)s + from, to - from);
+    for (i = 0; i < (int)(sizeof(ide_end_funcs) / sizeof(ide_end_funcs[0])); i++)
+        if (s->end_transfer_func == ide_end_funcs[i])
+            fn = i;
+    snap_io(io, &fn, sizeof(fn));
+    if (io->load) {
+        if (fn < 0 || fn >= (int)(sizeof(ide_end_funcs) / sizeof(ide_end_funcs[0]))) {
+            io->err = 2;
+            return;
+        }
+        s->end_transfer_func = ide_end_funcs[fn];
+    }
+    snap_io(io, &s->data_index, sizeof(s->data_index));
+    snap_io(io, &s->data_end, sizeof(s->data_end));
+    snap_io(io, s->io_buffer, sizeof(s->io_buffer));
+}
+
+void ide_snap(IDEIFState *s, struct SnapIO *io)
+{
+    int have = (s->drives[0] ? 1 : 0) | (s->drives[1] ? 2 : 0), i;
+    int cur = s->cur_drive == s->drives[1] && s->drives[1] ? 1 : 0;
+    snap_check(io, have);
+    snap_io(io, &s->cmd, sizeof(s->cmd));
+    snap_io(io, &cur, sizeof(cur));
+    if (io->load)
+        s->cur_drive = s->drives[cur & 1];
+    for (i = 0; i < 2; i++)
+        if (s->drives[i])
+            ide_drive_snap(s->drives[i], io);
+}
+#endif

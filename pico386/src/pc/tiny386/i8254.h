@@ -17,4 +17,9 @@ int pit_get_initial_count(PITState *pit, int channel);
 int pit_get_mode(PITState *pit, int channel);
 void pit_set_gate(PITState *pit, int channel, int val);
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void i8254_snap(PITState *s, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* I8254_H */

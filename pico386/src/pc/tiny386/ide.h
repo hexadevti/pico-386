@@ -53,4 +53,8 @@ PCIDevice *piix3_ide_init(PCIBus *pci_bus, int devfn);
 
 void ide_fill_cmos(IDEIFState *s, void *cmos,
                    uint8_t (*set)(void *cmos, int addr, uint8_t val));
+#ifdef TINY386_PICO
+struct SnapIO;
+void ide_snap(IDEIFState *s, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
 #endif /* IDE_H */

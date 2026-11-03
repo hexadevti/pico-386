@@ -457,6 +457,26 @@ std::string pcdisk_drive_label(const std::string &rel) {
 const char *pcdisk_drive_name(int drive) { return kDriveNames[drive]; }
 const char *pcdisk_drive_letter(int drive) { return kLetters[drive]; }
 
+// The folder a kind of disk was last chosen from (PICK_*), if it is still there. It is written to
+// pico386.cfg as soon as the choice is made, so it outlives a power cut or a crash in the game.
+static std::string lastPick(int pick) {
+  const std::string &rel = g_settings.pickDir[pick];
+  if (rel.empty()) return "";
+  const std::string dir = rel == "/" ? std::string(hal_sd_root()) : sdPath(rel.c_str());
+  return isDir(dir) ? dir : "";
+}
+
+static void rememberPick(int pick, const std::string &dir) {
+  const std::string root = hal_sd_root();
+  if (dir.compare(0, root.size(), root)) return;                        // not on the card
+  const std::string rel = dir.size() > root.size() ? pcdisk_rel(dir) : "/";
+  if (rel == g_settings.pickDir[pick]) return;
+  g_settings.pickDir[pick] = rel;
+  settingsSave();
+}
+
+static std::string folderOf(const std::string &path) { return path.substr(0, path.find_last_of('/')); }
+
 int pcdisk_choose(int drive, const std::string &current, const char *note, std::string &out) {
   const bool loaded = !current.empty();
   std::string title = std::string(kDriveNames[drive]);
@@ -511,13 +531,20 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
       if (chooseSetDisk(set, inDrive, letter, out)) return 1;
       continue;
     }
-    // the browsers open beside what the drive holds now, so the next game is a key away
-    std::string start = loaded ? pcdisk_abs(current) : std::string();
-    if (!set.empty() && !hasExt(start, ".zip")) start = pczip_source(pczip_set_dir(start));   // beside the zip, not its disks
-    if (loaded) start = start.substr(0, start.find_last_of('/'));
+    // The browsers open where this kind of disk was last chosen, else beside what the drive holds
+    // now, so the next game is a key away.
+    const int pick = row == ROW_ZIP ? PICK_ZIP : row == ROW_FOLDER ? PICK_FOLDER
+                   : drive == DRIVE_CD ? PICK_CD : floppy ? PICK_FLOPPY : PICK_HDD;
+    std::string start = lastPick(pick);
+    if (start.empty() && loaded) {
+      start = pcdisk_abs(current);
+      if (!set.empty() && !hasExt(start, ".zip")) start = pczip_source(pczip_set_dir(start));   // beside the zip, not its disks
+      start = folderOf(start);
+    }
     if (row == ROW_ZIP) {
       if (!pcdisk_browse(DISK_ZIP, ("Zip file for " + letter).c_str(), out, isDir(start) ? start.c_str() : nullptr))
         continue;
+      rememberPick(pick, folderOf(out));
       // a zip of floppy images goes in as one of them: its only one, or the disk picked
       if (floppy) {
         char dir[256];
@@ -544,9 +571,13 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
         ui::message("Not this folder", "It holds the PC's own disks", 1800);
         continue;
       }
+      rememberPick(pick, folderOf(out));                                // the folder that holds it
       return 1;
     }
-    if (pcdisk_browse(kDriveKind[drive], title.c_str(), out)) return 1;
+    if (pcdisk_browse(kDriveKind[drive], title.c_str(), out, isDir(start) ? start.c_str() : nullptr)) {
+      rememberPick(pick, folderOf(out));
+      return 1;
+    }
   }
 }
 
@@ -554,7 +585,7 @@ int pcdisk_choose(int drive, const std::string &current, const char *note, std::
 
 int pcdisk_machine_menu(const std::string &ini, const char *title, bool canDelete) {
   // Start, the drives, the boot order, then the startup's own rows
-  enum { ROW_START = 0, ROW_DRIVES = 1, ROW_BOOT = ROW_DRIVES + DRIVE_COUNT, ROW_RENAME, ROW_DELETE };
+  enum { ROW_START = 0, ROW_SNAPS, ROW_DRIVES, ROW_BOOT = ROW_DRIVES + DRIVE_COUNT, ROW_RENAME, ROW_DELETE };
   int sel = 0;
   for (;;) {
     std::string vals[DRIVE_COUNT];
@@ -563,6 +594,9 @@ int pcdisk_machine_menu(const std::string &ini, const char *title, bool canDelet
     items[ROW_START] = { "Start", nullptr, ui::ICON_PLAY,
                          cdFirst ? "Boot order: A: (if a floppy is in), CD, C:"
                                  : "Boots from A: if a floppy is in, else from C:" };
+    const size_t nSnaps = pcsnap_list(ini).size();
+    const std::string snapCount = nSnaps ? std::to_string(nSnaps) : "None";
+    items[ROW_SNAPS] = { "Snapshots", snapCount.c_str(), ui::ICON_LOAD, "Start where a snapshot stopped" };
     for (int d = 0; d < DRIVE_COUNT; d++) {
       const std::string rel = pcdisk_drive(ini, d);
       vals[d] = pcdisk_drive_label(rel);
@@ -586,6 +620,12 @@ int pcdisk_machine_menu(const std::string &ini, const char *title, bool canDelet
     }
     if (k != KEY_ENTER) continue;
     if (sel == ROW_RENAME) return MACHINE_RENAME;
+    if (sel == ROW_SNAPS) {
+      std::string snap;
+      if (!pcsnap_pick(ini, title, snap)) continue;
+      pcsnap_set_pending(snap);
+      return MACHINE_SNAPSHOT;
+    }
     if (sel == ROW_DELETE) {
       if (confirm(("Delete " + std::string(title) + "?").c_str(), "The disk images are kept")) return MACHINE_DELETE;
       continue;

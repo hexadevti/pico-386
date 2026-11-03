@@ -1,6 +1,7 @@
 #include "tiny386_port.h"   /* pico-386 */
 #pragma GCC optimize("O3")  /* pico-386: upstream builds this file at -O3 */
 #include "pc.h"
+#include "snap.h"   /* pico-386 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1076,3 +1077,36 @@ int parse_conf_ini(void* user, const char* section,
 #undef NAME
 	return 1;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). Every device of a machine pc_new made from the same ini, in a
+   fixed order; guest RAM and VRAM are moved by t386_save_state/t386_load_state. The serial port
+   and the NE2000 stub are not saved. */
+void pc_snap(PC *pc, struct SnapIO *io)
+{
+	snap_check(io, 0x50433338);   /* "PC38" */
+	snap_io(io, &pc->boot_start_time, sizeof(pc->boot_start_time));
+	snap_io(io, &pc->pci_vga_ram_addr, sizeof(pc->pci_vga_ram_addr));
+	snap_io(io, &pc->port92, sizeof(pc->port92));
+	snap_io(io, &pc->shutdown_state, sizeof(pc->shutdown_state));
+	snap_io(io, &pc->reset_request, sizeof(pc->reset_request));
+	cpui386_snap(pc->cpu, io);
+	i8259_snap(pc->pic, io);
+	i8254_snap(pc->pit, io);
+	cmos_snap(pc->cmos, io);
+	ide_snap(pc->ide, io);
+	ide_snap(pc->ide2, io);
+	vga_snap(pc->vga, io);
+	i8042_snap(pc->i8042, io);
+	i8257_snap(pc->isa_dma, io);
+	i8257_snap(pc->isa_hdma, io);
+	sb16_snap(pc->sb16, io);
+	pcspk_snap(pc->pcspk, io);
+	adlib_snap(pc->adlib, io);
+	i440fx_snap(pc->i440fx, io);
+	emulink_snap(pc->emulink, io);
+	snap_check(io, 0x454e4421);   /* "END!" */
+	if (io->load)
+		pc->full_update = 1;
+}
+#endif

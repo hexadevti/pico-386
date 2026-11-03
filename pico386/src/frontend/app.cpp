@@ -198,7 +198,8 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
       CoreMenuItem ci[12];
       const int m = core.menuItems(ci, 12);
       for (int i = 0; i < m; i++) {
-        items[n] = { ci[i].label, ci[i].value, ui::ICON_PAD, nullptr, -1, ci[i].adjust };
+        items[n] = { ci[i].label, ci[i].value, ci[i].icon ? ci[i].icon : (uint8_t)ui::ICON_PAD, nullptr, -1,
+                     ci[i].adjust };
         kind[n] = K_CORE; arg[n++] = i;
       }
     }
@@ -362,6 +363,7 @@ void app_loop() {
   }
 #if defined(BOARD_DESKTOP)
   if (const char *ini = getenv("PC_INI")) {                                           // test hook
+    if (const char *snap = getenv("PC_SNAP")) pcsnap_set_pending(snap);              // start from it
     runGame(kPC386, ini);
     exit(0);
   }

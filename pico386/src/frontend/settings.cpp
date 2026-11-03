@@ -7,6 +7,7 @@
 #include "../hal/hal.h"
 
 Settings g_settings;
+const char *const kPickKeys[PICK_COUNT] = { "dir_floppy", "dir_hdd", "dir_cd", "dir_zip", "dir_folder" };
 
 std::string sdPath(const char *rel) {
   std::string p = hal_sd_root();
@@ -55,6 +56,9 @@ void settingsLoad() {
     else if (!strcmp(line, "lastdir"))   g_settings.lastDir = v;
     else if (!strcmp(line, "startup"))   g_settings.startup = v;
     else if (!strcmp(line, "biosdir"))   g_settings.biosDir = v;
+    else
+      for (int i = 0; i < PICK_COUNT; i++)
+        if (!strcmp(line, kPickKeys[i])) g_settings.pickDir[i] = v;
   }
   fclose(f);
   if (g_settings.volume < 0 || g_settings.volume > 10) g_settings.volume = 7;
@@ -70,5 +74,7 @@ void settingsSave() {
   fprintf(f, "volume=%d\nframeskip=%d\nshowfps=%d\nfontsize=%d\nlastdir=%s\nstartup=%s\nbiosdir=%s\n",
           g_settings.volume, g_settings.frameskip, g_settings.showFps ? 1 : 0, g_settings.fontSize,
           g_settings.lastDir.c_str(), g_settings.startup.c_str(), g_settings.biosDir.c_str());
+  for (int i = 0; i < PICK_COUNT; i++)
+    if (!g_settings.pickDir[i].empty()) fprintf(f, "%s=%s\n", kPickKeys[i], g_settings.pickDir[i].c_str());
   fclose(f);
 }

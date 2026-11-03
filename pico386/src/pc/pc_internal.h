@@ -66,6 +66,25 @@ const char *pcdisk_drive_letter(int drive);                // "A:"
 int pcdisk_choose(int drive, const std::string &current, const char *note, std::string &out);
 // A startup's drives screen before it starts: what the user chose (MACHINE_*). canDelete adds the
 // "Delete this startup" row.
-enum { MACHINE_BACK, MACHINE_START, MACHINE_RENAME, MACHINE_DELETE };
+enum { MACHINE_BACK, MACHINE_START, MACHINE_RENAME, MACHINE_DELETE, MACHINE_SNAPSHOT };
+// MACHINE_SNAPSHOT: start from the snapshot pcsnap_set_pending was given.
 int pcdisk_machine_menu(const std::string &ini, const char *title, bool canDelete);
 void pcdisk_create_menu();
+
+// ---- pc_snapshot.cpp: snapshots of a running PC, per startup -----------------------------------
+#include <vector>
+struct PcSnapshot { std::string path, name; };
+std::vector<PcSnapshot> pcsnap_list(const std::string &ini);    // newest first
+// Saves the running PC (between steps, VRAM in place). null, or why not.
+const char *pcsnap_save(const std::string &ini, const std::string &name);
+// The list screen: Enter picks one to start from (out = its file), Delete removes one.
+bool pcsnap_pick(const std::string &ini, const char *title, std::string &out);
+// Whether a disk the snapshot had was written since it was taken.
+bool pcsnap_disks_changed(const std::string &snap);
+// The snapshot the next pc_loadRom restores, and taking it (empty when none).
+void pcsnap_set_pending(const std::string &snap);
+std::string pcsnap_take_pending();
+// Before the machine starts: the snapshot's .ini over the startup's. After: its state into the
+// machine (null, or why not; a failed restore leaves the machine to be stopped).
+bool pcsnap_write_ini(const std::string &snap, const std::string &ini);
+const char *pcsnap_restore(const std::string &snap);

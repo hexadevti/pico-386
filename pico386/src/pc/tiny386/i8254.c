@@ -28,6 +28,7 @@
 
 #include <stdio.h>
 #include "i8254.h"
+#include "snap.h"   /* pico-386 */
 //#define DEBUG_PIT
 
 #define RW_STATE_LSB 1
@@ -385,3 +386,12 @@ int pit_get_mode(PITState *pit, int channel)
 	PITChannelState *s = &pit->channels[channel];
 	return s->mode;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). count_load_time is in get_uticks() time, which t386_load_state
+   carries on from the snapshot's. */
+void i8254_snap(PITState *s, struct SnapIO *io)
+{
+	snap_struct(io, s->channels, sizeof(s->channels), NULL);
+}
+#endif

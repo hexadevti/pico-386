@@ -182,6 +182,7 @@ static bool openStartup(const Startup &st, std::string &iniOut) {
   for (;;) {
     switch (pcdisk_machine_menu(st.ini, name.c_str(), !isPc)) {
       case MACHINE_START:
+      case MACHINE_SNAPSHOT:              // pc_loadRom restores the snapshot set pending
         s_title = name;
         iniOut = st.ini;
         return true;

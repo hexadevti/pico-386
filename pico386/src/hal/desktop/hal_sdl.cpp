@@ -213,6 +213,10 @@ void hal_yield() {
       case SDL_QUIT: exit(0);
       case SDL_KEYDOWN:
       case SDL_KEYUP: {
+        // A PC_KEYS run takes no real keys: the window grabs the focus when it opens, and typing
+        // meant for another window would land in the guest.
+        static const bool scripted = getenv("PC_KEYS") != nullptr;
+        if (scripted) break;
         const bool down = e.type == SDL_KEYDOWN;
         if (e.key.keysym.sym == SDLK_LSHIFT || e.key.keysym.sym == SDLK_RSHIFT) s_shift = down;
         if (e.key.keysym.sym == SDLK_LCTRL || e.key.keysym.sym == SDLK_RCTRL) s_ctrl = down;

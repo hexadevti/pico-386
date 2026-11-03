@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "i8259.h"
+#include "snap.h"   /* pico-386 */
 
 typedef struct PicState {
 	uint8_t last_irr; /* edge detection */
@@ -372,3 +373,14 @@ PicState2 *i8259_init(void (*raise_fn)(void *, PicState2 *s), void *obj)
 	s->obj = obj;
 	return s;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h) */
+void i8259_snap(PicState2 *s, struct SnapIO *io)
+{
+	static const SnapKeep keep[] = {
+		SNAP_KEEP(PicState2, pics[0].pics_state), SNAP_KEEP(PicState2, pics[1].pics_state),
+		SNAP_KEEP(PicState2, raise_fn), SNAP_KEEP(PicState2, obj), { 0, 0 } };
+	snap_struct(io, s, sizeof(*s), keep);
+}
+#endif

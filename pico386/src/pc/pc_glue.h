@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #ifndef TINY386_PICO
 #define TINY386_PICO 1
 #endif
@@ -66,6 +67,7 @@ void t386_timer_info(uint32_t *count, uint32_t *behind, uint32_t *fired, uint32_
 // fires every missed tick at once on return.
 uint32_t get_uticks();
 void t386_clock_skip(uint32_t us);
+void t386_clock_set(uint32_t now);      // the guest's clock reads `now` from here on (snapshots)
 // Emulates until the guest's clock reaches deadline_us.
 void t386_run_until(uint32_t deadline_us);
 // Called after every step of t386_run_until; sound_written: the guest wrote the Adlib or the
@@ -98,6 +100,24 @@ enum {
 int  t386_swap_floppy(int drive, const char *path);
 int  t386_floppy_dirty(int drive);      // a folder floppy the guest has written to
 void t386_change_cd(int ide_drive, const char *path);  // 0..3 = primary master .. secondary slave
+
+// Snapshots (pc_snapshot.cpp writes the file around these): the whole machine, guest RAM and
+// VRAM, at the end of a step. Loading needs the machine t386_start built from the snapshot's own
+// ini, before it runs. 0 on success, else a T386_SNAP_* code; a failed load leaves the machine
+// half restored, so stop it.
+enum {
+  T386_SNAP_IO = -1,       // a short read or write (card full, file cut short)
+  T386_SNAP_FORMAT = -2,   // another build's layout, or another amount of RAM
+};
+// The disk images open for writing: the path of slot i (0..15), NULL when that slot holds none.
+const char *t386_write_file(int i);
+// A snapshot was taken: the next write to each image bumps its generation again.
+void t386_files_snapped(void);
+// pc_snapshot.cpp: a disk (an image, or a folder written back) changed, so snapshots taken
+// before now no longer match it.
+void pcsnap_touch(const char *path);
+int  t386_save_state(FILE *f);
+int  t386_load_state(FILE *f);
 
 // pc_platform.cpp
 void   t386_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

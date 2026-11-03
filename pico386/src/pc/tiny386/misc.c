@@ -1,5 +1,6 @@
 #include "tiny386_port.h"   /* pico-386 */
 #include "misc.h"
+#include "snap.h"   /* pico-386 */
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -670,3 +671,26 @@ int emulink_data_read_string(void *s, uint8_t *buf, int size, int count)
 	e->status = -1;
 	return count;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). The periodic interrupt is timed by the host clock, so it is
+   rescheduled from now rather than read back. */
+void cmos_snap(CMOS *s, struct SnapIO *io)
+{
+	snap_check(io, sizeof(s->data));
+	snap_io(io, s->data, sizeof(s->data));
+	snap_io(io, &s->index, sizeof(s->index));
+	if (io->load)
+		cmos_update_timer(s);
+}
+
+/* The drives' images are opened by t386_start from the snapshot's ini; only the command in
+   progress is saved. */
+void emulink_snap(EMULINK *e, struct SnapIO *io)
+{
+	snap_check(io, offsetof(EMULINK, fdd));
+	snap_io(io, e, offsetof(EMULINK, fdd));
+	snap_io(io, &e->fdpos, sizeof(e->fdpos));
+	snap_io(io, e->fdbuf, sizeof(e->fdbuf));
+}
+#endif

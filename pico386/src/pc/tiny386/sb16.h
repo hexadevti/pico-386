@@ -19,4 +19,9 @@ SB16State *sb16_new(
     void *pic,
     void (*set_irq)(void *pic, int irq, int level));
 
+#ifdef TINY386_PICO
+struct SnapIO;
+void sb16_snap(SB16State *s, struct SnapIO *io);   /* pico-386: snap.h */
+#endif
+
 #endif /* SB16_H */

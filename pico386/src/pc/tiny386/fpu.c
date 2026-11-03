@@ -7,6 +7,7 @@
 #include "i386.h"
 #endif
 #include "fpu.h"
+#include "snap.h"   /* pico-386 */
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -1246,4 +1247,12 @@ bool fpu_exec1(FPU *fpu, void *cpu, int op, int group, unsigned int i)
 #define SIMD_fpu_c
 #include "simd_inc.h"
 #undef SIMD_fpu_c
+#endif
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h) */
+void fpu_snap(FPU *fpu, struct SnapIO *io)
+{
+	snap_struct(io, fpu, sizeof(*fpu), NULL);
+}
 #endif

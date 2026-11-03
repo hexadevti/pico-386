@@ -43,6 +43,7 @@
 
 #ifdef I386_ENABLE_FPU
 #include "fpu.h"
+#include "snap.h"   /* pico-386 */
 #else
 #define fpu_new(...) NULL
 #define fpu_exec1(...) false
@@ -5478,3 +5479,22 @@ static void cpu_debug(CPUI386 *cpu)
 	cpu->excerr = excerr;
 	nest--;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). The TLB and the fetch cache are emptied; they fill again from
+   the page tables in guest RAM. */
+void cpui386_snap(CPUI386 *cpu, struct SnapIO *io)
+{
+	static const SnapKeep keep[] = {
+		SNAP_KEEP(CPUI386, fpu), SNAP_KEEP(CPUI386, tlb), SNAP_KEEP(CPUI386, phys_mem),
+		SNAP_KEEP(CPUI386, phys_mem_size), SNAP_KEEP(CPUI386, cb), SNAP_KEEP(CPUI386, gen),
+		{ 0, 0 } };
+	int has_fpu = cpu->fpu != NULL;
+	snap_struct(io, cpu, sizeof(*cpu), keep);
+	snap_check(io, has_fpu);
+	if (cpu->fpu)
+		fpu_snap(cpu->fpu, io);
+	if (io->load)
+		tlb_clear(cpu);
+}
+#endif

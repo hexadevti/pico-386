@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <string>
 
+// The kinds of disk choice (pc_disks.cpp), each of which remembers its own folder.
+enum { PICK_FLOPPY, PICK_HDD, PICK_CD, PICK_ZIP, PICK_FOLDER, PICK_COUNT };
+
 struct Settings {
   int volume = 7;            // 0..10
   int frameskip = 0;         // 0 = auto, N = draw 1 frame in N+1
@@ -12,7 +15,10 @@ struct Settings {
   std::string lastDir;       // where the ROM browser was last
   std::string startup;       // the .ini of the startup last chosen ("pc.ini"), for the home menu's cursor
   std::string biosDir = "pc-386/roms"; // bios.bin + vgabios.bin, relative to the card root
+  std::string pickDir[PICK_COUNT];     // where each kind of disk was last chosen, relative to the card root ("/" is the root)
 };
+
+extern const char *const kPickKeys[PICK_COUNT];
 
 extern Settings g_settings;
 

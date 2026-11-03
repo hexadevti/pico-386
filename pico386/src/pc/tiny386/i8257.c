@@ -23,6 +23,7 @@
  * THE SOFTWARE.
  */
 #include "i8257.h"
+#include "snap.h"   /* pico-386 */
 #include <stdbool.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -697,3 +698,17 @@ I8257State *i8257_new(
 //    d->dma_bh = qemu_bh_new(i8257_dma_run, d);
     return d;
 }
+
+#ifdef TINY386_PICO
+/* pico-386: snapshots (snap.h). The transfer handlers are registered by the SB16 at startup. */
+void i8257_snap(I8257State *d, struct SnapIO *io)
+{
+	int i;
+	snap_check(io, sizeof(I8257Regs));
+	snap_io(io, &d->status, 4);   /* status, command, mask, flip_flop */
+	for (i = 0; i < 4; i++)
+		snap_io(io, &d->regs[i], offsetof(I8257Regs, transfer_handler));
+	snap_io(io, &d->dma_bh_scheduled, sizeof(d->dma_bh_scheduled));
+	snap_io(io, &d->running, sizeof(d->running));
+}
+#endif

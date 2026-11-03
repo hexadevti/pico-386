@@ -562,6 +562,7 @@ extern "C" int pczip_folder(const char *zip, char *out, size_t outSize) {
   snprintf(id, sizeof id, "%s\n%ld %ld\n", zip, (long)st.st_size, (long)st.st_mtime);
   if (readMarker(dir) == id) return 0;             // unpacked before, from this very zip
 
+  pcsnap_touch(dir.c_str());                       // a D: snapshot of the old contents is stale
   if (!unpack(zip, dir, base)) {
     remove((dir + "/" + kMarker).c_str());
     return -1;

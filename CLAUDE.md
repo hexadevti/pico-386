@@ -32,6 +32,18 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     - The last step, extracting `FREEDOS.SAF`, fails with a garbled filename, so CTMOUSE,
       FDNPKG and the CD driver are missing. The cause is not yet known; it may be FreeDOS
       reading a file opened on disk 1 after the swap.
+    - With all 115 volumes in one folder as D:, `cd \freedos` and
+      `slicerex /voxf d:\freedos.saf /g 486` extract everything (1310 files, about 7 min on
+      the desktop). So the failure comes from the swaps. The repo's
+      FreeDOS image was repaired this way on 2026-11-02 and boots with no errors. The repo ships
+      it as `disks/freedos-hdd-32mb.img` (xcopied to a 32 MB disk; the 128 MB zip was dropped
+      on 2026-11-03, the user asked). A local MS-DOS 6.22 disk, `msdos622-hdd-32mb.img`
+      (from DOSHDD, no Windows), sits beside it and is kept out by `.git/info/exclude`.
+    - Its FDCONFIG.SYS now defaults (1 s menu) to HIMEMX + `LBACACHE 1024` (in FDAUTO.BAT).
+      JEMMEX/JEMM386 (options 2 and 3) run DOS in V86 mode, where every INT traps: with
+      `SPEED.COM` (a loop count per second) INT 21h was 2.3x, INT 10h 2.5x and REP MOVSW 2.8x
+      slower under JEMMEX on the desktop. On the RP2350 V86 also means guest paging through the
+      pager. MS-DOS 6 on DOSHDD felt faster for that reason (and SMARTDRV).
 - **Never tested:**
   - the keyboard mouse with a real driver
   - the Adlib. The SB16 was tested on the desktop on 2026-10-19 with a DMA sine-test .COM: after
@@ -295,6 +307,10 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     after 250 ms. `ui::list` jumps to rows by typed letters (several letters within 1 s add up).
   - It edits the ini's drive keys (`pcini_get`/`pcini_set`, where "" comments the key out).
   - It provides the per-drive chooser and the drives screen.
+  - Each kind of choice (floppy, hard-disk or CD image, zip, folder) opens in the folder it was last
+    made in (2026-11-02, the user asked). These are `dir_floppy`, `dir_hdd`, `dir_cd`, `dir_zip`
+    and `dir_folder` in pico386.cfg, relative to the card root. `rememberPick` writes the cfg as
+    soon as the choice is made. Without one, the chooser opens beside what the drive holds.
   - `makeHardDisk` writes an MBR, a FAT16 partition at LBA 63 and the format, using 16 heads,
     63 sectors, at most 504 MB. The boot code is placeholder text until DOS's `sys` replaces it.
 - **`pc_folder.cpp`, the D: folder disk (`hdb` = a directory):**
@@ -348,6 +364,24 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     sectors (on the desktop it only worked after `SMARTDRV /R`). The user chose the restart.
   - DOS sees floppy swaps; this was tested by copying from B: before and after a swap.
     Emulink itself has no change line.
+- **Snapshots (`pc_snapshot.cpp`, 2026-11-03, the user asked):**
+  - In-game Save/Load snapshot rows, and a Snapshots row on the startup's drives screen
+    (`MACHINE_SNAPSHOT`). The save asks for a name with an empty field (the user wanted names
+    that say what the snapshot is, not "Snapshot N").
+  - File: `/pc-386/snapshots/<ini base>/sN.snp` = "P386SNP1", the name, the startup's .ini text,
+    the disks with their generations, then `t386_save_state` (`snap_run` in pc_glue.c: "T386", RAM
+    and VRAM sizes, the guest clock, `pc_snap` (THIRD_PARTY.md), RAM in 1 KB pages, VRAM).
+  - Restoring writes the snapshot's ini over the startup's (keeping `[pico] name`), starts the
+    machine and loads the state (`pcsnap_set_pending`, then `pc_loadRom`). The in-game save and
+    load both run in `pc_runFrame` after the menu has closed (the RP2350's menu parks VRAM).
+  - `disks.gen` counts each disk's writes: `t386_fwrite` bumps a disk on its first write after a
+    start or a snapshot, and so do a dirty folder commit and a zip unpacked again. A snapshot
+    whose disks moved on gets a warning in the list. A dirty folder disk refuses the save.
+  - Desktop: `PC_SNAP=path.snp` with `PC_INI` restores at start. A `PC_KEYS` run now ignores real
+    keys: the SDL window takes the focus, and typing meant for another window reached the guest
+    (stray "da"/"rama" at the prompt looked like a snapshot bug).
+  - Tested on the desktop, `build-lowmem` and the device (2026-11-03): save at the FreeDOS prompt,
+    `cls`, Load snapshot brought the boot screen back in about 1 s, and `ver` worked.
 - **`core.h`:** the EmuCore gained `keyEvent`, `menuItems`/`menuAction` (core rows in the in-game
   menu), `lastError` and `selfPaced`. `app.cpp` builds the in-game menu from these.
 - **The mixer's quirk:** `mixer_callback` *adds* into the stream, and the SB16 leaves it untouched
@@ -408,7 +442,7 @@ the repo root, because `PC_INI` paths are relative to the cwd.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
 
 Test data in `sdcard/`. It is gitignored except what may be shared (2026-11-02, the user asked):
-`pc-386/roms/`, `pc-386/disks/` (FreeDOS floppies, `dos.img` zipped as `freedos-hdd-128mb.zip`, empty
+`pc-386/roms/`, `pc-386/disks/` (FreeDOS floppies, `freedos-hdd-32mb.img`, empty
 images from `tools/make_disk.py`, the tests) and the test .ini files. Never commit MS-DOS,
 Windows or games (DOSHDD, Win31Disk, games/). GitHub refuses files over 100 MB.
 
