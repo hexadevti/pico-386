@@ -15,6 +15,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "../hal.h"
+#include "../keyscript.h"
 
 #define KBD_REG_FIF   0x09
 #define KBD_REG_BAT   0x0B
@@ -24,6 +25,7 @@
 #define BAT_POLL_MS   10000
 
 void p4CheckSerialCmd();          // system_p4.cpp
+void p4Shot();                    // display_p4.cpp
 
 static QueueHandle_t s_keys = nullptr;
 static bool s_wireUp = false;
@@ -71,6 +73,35 @@ static void sendKey(uint8_t code, uint8_t state) {
   if (s_lost) return;                    // still full: this one is covered by the release-all
   const KeyEvent ev = { code, state };
   if (xQueueSend(s_keys, &ev, 0) != pdTRUE) s_lost = true;
+}
+
+// ---- the serial remote's key scripts ("@keys", system_p4.cpp) ---------------------------------
+static KeyScript s_script;
+static char *s_scriptText = nullptr;
+
+static void scriptEnd(const char *why) {
+  if (s_script.held) sendKey(s_script.held, KEYSTATE_RELEASED);
+  while (s_script.nmods) sendKey(s_script.mods[--s_script.nmods], KEYSTATE_RELEASED);
+  free(s_scriptText);
+  s_scriptText = nullptr;
+  s_script.start(nullptr);
+  Serial.println(why);
+}
+
+void p4RemoteKeys(const char *script) {
+  if (s_scriptText) scriptEnd("@keys cancelled");
+  s_scriptText = strdup(script);
+  if (!s_scriptText) { Serial.println("@keys no memory"); return; }
+  s_script.start(s_scriptText);
+}
+
+static void scriptStep() {
+  if (!s_scriptText) return;
+  char t[16];
+  if (s_script.step(millis(), uxQueueMessagesWaiting(s_keys) == 0, sendKey, t, sizeof(t))) {
+    if (!strcmp(t, "shot")) p4Shot();
+  }
+  if (!s_script.busy(millis())) scriptEnd("@keys done");
 }
 
 static bool readFifo(uint8_t *state, uint8_t *code) {
@@ -125,6 +156,7 @@ static void kbdTask(void *) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(10));
     p4CheckSerialCmd();
+    scriptStep();
     if (g_bootedHeadless) {
       if (mainboardPresent()) { hal_log("mainboard is up - rebooting"); delay(50); ESP.restart(); }
       continue;

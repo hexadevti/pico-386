@@ -64,6 +64,7 @@ char *t386_strdup(const char *s);
 FILE *t386_fopen(const char *path, const char *mode);
 int   t386_fclose(FILE *f);
 size_t t386_fwrite(const void *p, size_t size, size_t n, FILE *f);
+int   t386_putchar(int c);
 #ifdef __cplusplus
 }
 #endif
@@ -78,5 +79,9 @@ size_t t386_fwrite(const void *p, size_t size, size_t n, FILE *f);
 #define fopen(p, m)    t386_fopen(p, m)
 #define fclose(f)      t386_fclose(f)
 #define fwrite(p, s, n, f) t386_fwrite(p, s, n, f)   // a disk written since a snapshot (pc_snapshot.cpp)
+#if defined(BOARD_PICOCALC_P4)
+#undef putchar
+#define putchar(c)     t386_putchar(c)   // a line at a time, under the log lock (pc_platform.cpp)
+#endif
 
 #endif

@@ -7,6 +7,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <stdarg.h>
+#include <string.h>
 #include "esp_heap_caps.h"
 #include "esp_ldo_regulator.h"
 #include "soc/soc.h"
@@ -19,7 +20,6 @@ void p4DisplayInit();              // display_p4.cpp
 void p4InputInit();                // input_p4.cpp
 
 #define ESP32LOADER_MAGIC 0x10ADE125u   // esp32loader main/loader_api.h: boot the loader once
-#define LOADER_SERIAL_CMD "@uf2menu\n"  // same command the emu8 deploy tools send
 
 static SPIClass s_sdSpi(HSPI);
 static bool s_sdOk = false;
@@ -29,13 +29,25 @@ uint32_t hal_micros()          { return micros(); }
 void     hal_delay(uint32_t ms){ delay(ms); }
 void     hal_yield()           { taskYIELD(); }
 
+// A screenshot's rows (p4Shot) take the log lock one at a time, so a log line never lands in the
+// middle of one.
+static SemaphoreHandle_t s_logLock = nullptr;
+
+void p4LogLock(bool on) {
+  if (!s_logLock || xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return;
+  if (on) xSemaphoreTake(s_logLock, portMAX_DELAY);
+  else xSemaphoreGive(s_logLock);
+}
+
 void hal_log(const char *fmt, ...) {
   char b[192];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(b, sizeof(b), fmt, ap);
   va_end(ap);
+  p4LogLock(true);
   Serial.println(b);
+  p4LogLock(false);
 }
 
 void hal_reboot() { delay(50); esp_restart(); }
@@ -47,15 +59,37 @@ void hal_reboot_to_loader() {
   esp_restart();
 }
 
-// The PC can ask for the loader over the console UART (emu8 tools/deploy-p4-wifi.py et al.).
+// Commands on the console UART (COM9), one per line, polled by the keyboard task, as on the
+// RP2350 (system_rp2350.cpp); tools/remote.py drives them:
+//   @uf2menu         back to esp32loader (tools/deploy-p4.py, emu8's deploy tools)
+//   @keys <script>   type a PC_KEYS script (keyscript.h); "@keys done" when it has run
+//   @shot            the screen, as "@S" rows (p4Shot)
+void p4RemoteKeys(const char *script);   // input_p4.cpp
+void p4Shot();                           // display_p4.cpp
+
+static void serialCommand(char *line) {
+  if (!strcmp(line, "@uf2menu")) hal_reboot_to_loader();
+  else if (!strncmp(line, "@keys ", 6)) p4RemoteKeys(line + 6);
+  else if (!strcmp(line, "@shot")) p4Shot();
+}
+
 void p4CheckSerialCmd() {
-  static const char cmd[] = LOADER_SERIAL_CMD;
-  static uint8_t matched = 0;
+  static char line[160];
+  static uint8_t len = 0;
+  static bool tooLong = false;            // a longer line is dropped whole, not cut short
   while (Serial.available()) {
     const int c = Serial.read();
     if (c < 0) break;
-    if (c != (uint8_t)cmd[matched]) matched = 0;
-    if (c == (uint8_t)cmd[matched] && !cmd[++matched]) hal_reboot_to_loader();
+    if (c == '\r') continue;
+    if (c != '\n') {
+      if (len < sizeof(line) - 1) line[len++] = (char)c;
+      else tooLong = true;
+      continue;
+    }
+    line[len] = 0;
+    len = 0;
+    if (tooLong) { tooLong = false; Serial.println("@error line too long"); continue; }
+    if (line[0] == '@') serialCommand(line);
   }
 }
 
@@ -130,6 +164,7 @@ static void sdInit() {
 
 void hal_init() {
   Serial.begin(115200);
+  s_logLock = xSemaphoreCreateMutex();
   delay(50);
   hal_log("pico-386 on " BOARD_NAME ", PSRAM %u KB free, internal %u KB free",
           (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10),

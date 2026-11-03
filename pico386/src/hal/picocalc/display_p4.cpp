@@ -192,8 +192,27 @@ static const uint8_t kInit[] = {
   0xF7, 4, 0xA9, 0x51, 0x2C, 0x82,
 };
 
+// ---- a copy of the panel, for the serial remote's screenshots (p4Shot) ------------------------
+// The RP2350 reads its panel back over MISO; here PSRAM is plentiful, so every write to the panel
+// also goes to this copy, under s_lock like the write itself.
+static uint16_t *s_shadow = nullptr;     // PANEL_W x PANEL_H
+
+static void shadowRect(int x, int y, int w, int h, const uint16_t *px, int stride) {
+  if (!s_shadow) return;
+  for (int r = 0; r < h; r++) memcpy(s_shadow + (y + r) * PANEL_W + x, px + r * stride, w * 2);
+}
+
+static void shadowFill(int x, int y, int w, int h, uint16_t c) {
+  if (!s_shadow) return;
+  for (int r = 0; r < h; r++) {
+    uint16_t *d = s_shadow + (y + r) * PANEL_W + x;
+    for (int i = 0; i < w; i++) d[i] = c;
+  }
+}
+
 static void panelFillRawLocked(int x, int y, int w, int h, uint16_t c) {
   if (w <= 0 || h <= 0) return;
+  shadowFill(x, y, w, h, c);
   panelWindow(x, y, x + w - 1, y + h - 1);
   txSolid(c, (uint32_t)w * (uint32_t)h);
   txWait();
@@ -214,6 +233,7 @@ static void videoTask(void *) {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     panelWindow(0, SCREEN_Y0 + s_vy, SCREEN_W - 1, SCREEN_Y0 + s_vy + s_vh - 1);
     txRect(src, SCREEN_W, s_vh, SCREEN_W);
+    shadowRect(0, SCREEN_Y0 + s_vy, SCREEN_W, s_vh, src, SCREEN_W);   // while the DMA runs
     txWait();
     xSemaphoreGive(s_lock);
     xSemaphoreGive(s_vIdle);
@@ -271,6 +291,7 @@ void hal_panel_push(int x, int y, int w, int h, const uint16_t *px, int stride) 
   xSemaphoreTake(s_lock, portMAX_DELAY);
   panelWindow(x, y, x + w - 1, y + h - 1);
   txRect(px, w, h, stride);
+  shadowRect(x, y, w, h, px, stride);
   txWait();
   xSemaphoreGive(s_lock);
 }
@@ -281,8 +302,57 @@ void hal_display_push(int x, int y, int w, int h, const uint16_t *px, int stride
   hal_panel_push(x, y + SCREEN_Y0, w, h, px, stride);
 }
 
+// ---- screenshots for the serial remote (system_p4.cpp, tools/remote.py) ------------------------
+// The same lines as the RP2350's (display_rp2350.cpp): "@shot 320 320", a line per row,
+// "@S <y> <base64> <sum>", and "@shot end". A row's bytes are runs of one RGB565 colour,
+// [count-1][hi][lo], so each run is 4 base64 characters; sum is their 16-bit byte sum in hex.
+// The copy is taken whole under s_lock, so the picture is one moment and the PC runs on while it
+// goes out at 115200 baud.
+void p4LogLock(bool on);                 // system_p4.cpp
+
+static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+void p4Shot() {
+  uint16_t *pic = s_shadow ? (uint16_t *)hal_alloc_big(PANEL_W * PANEL_H * 2) : nullptr;
+  if (!pic) { Serial.println("@shot no memory"); return; }
+  xSemaphoreTake(s_lock, portMAX_DELAY);
+  memcpy(pic, s_shadow, PANEL_W * PANEL_H * 2);
+  xSemaphoreGive(s_lock);
+  char line[80];
+  p4LogLock(true);
+  int n = snprintf(line, sizeof(line), "@shot %d %d\r\n", PANEL_W, PANEL_H);
+  Serial.write(line, n);
+  p4LogLock(false);
+  for (int y = 0; y < PANEL_H; y++) {
+    p4LogLock(true);
+    n = snprintf(line, sizeof(line), "@S %d ", y);
+    uint16_t sum = 0, run = 0;
+    int count = 0;
+    auto emit = [&]() {
+      const uint8_t t[3] = { (uint8_t)(count - 1), (uint8_t)(run >> 8), (uint8_t)run };
+      sum += t[0] + t[1] + t[2];
+      const uint32_t v = (uint32_t)t[0] << 16 | (uint32_t)t[1] << 8 | t[2];
+      for (int k = 18; k >= 0; k -= 6) line[n++] = kB64[(v >> k) & 63];
+      if (n > 64) { Serial.write(line, n); n = 0; }
+    };
+    const uint16_t *row = pic + y * PANEL_W;
+    for (int x = 0; x < PANEL_W; x++) {
+      if (count && (row[x] != run || count == 256)) { emit(); count = 0; }
+      run = row[x];
+      count++;
+    }
+    emit();
+    n += snprintf(line + n, sizeof(line) - n, " %04x\r\n", sum);
+    Serial.write(line, n);
+    p4LogLock(false);
+  }
+  Serial.println("@shot end");
+  hal_free(pic);
+}
+
 void p4DisplayInit() {
   s_lock = xSemaphoreCreateMutex();
+  s_shadow = (uint16_t *)hal_alloc_big(PANEL_W * PANEL_H * 2);
   lcdHwInit();
   for (size_t i = 0; i < sizeof(kInit);) {
     const uint8_t cmd = kInit[i], n = kInit[i + 1];

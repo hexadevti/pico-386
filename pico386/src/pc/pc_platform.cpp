@@ -92,6 +92,19 @@ char *t386_strdup(const char *s) {
   return d;
 }
 
+// The guest's debug port (0x402, SeaBIOS's log) on the P4: whole lines through hal_log, which
+// holds the log lock, so they no longer cut into the serial remote's screenshot rows.
+int t386_putchar(int c) {
+  static char line[128];
+  static size_t len = 0;
+  if (c != '\n' && len < sizeof(line) - 1) { line[len++] = (char)c; return c; }
+  if (c != '\n') line[len++] = (char)c;
+  line[len] = 0;
+  len = 0;
+  hal_log("%s", line);
+  return c;
+}
+
 FILE *t386_fopen(const char *path, const char *mode) {
   FILE *f = fopen(path, mode);
   if (!f) {

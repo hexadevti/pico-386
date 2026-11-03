@@ -23,21 +23,54 @@ static int16_t  s_out[256];
 static int      s_outN = 0;
 static uint32_t s_waitUs = 0;
 static volatile uint32_t s_underruns = 0;
-static const int kDmaFrames = 256;
-// Output frames handed to the driver and played by the DMA: the difference is what is queued.
-static volatile uint32_t s_written = 0, s_played = 0;
+static const int kDmaDescs = 12, kDmaFrames = 256;
+// What is queued, from a mirror of the driver's free-buffer queue (esp_driver_i2s i2s_common.c):
+// every buffer the DMA finishes is cleared and goes on that queue (11 deep; when full, the oldest
+// is dropped and on_send_q_ovf fires), and i2s_channel_write takes buffers from it, waiting when
+// it is empty. s_free mirrors its length, s_fill how much of the buffer being written is filled.
+// Counting frames written against buffers sent read about 40 ms low (2026-11-03): sent buffers
+// that were silence (ahead of the first data after a quiet spell, or the half the driver leaves
+// when it moves on early) counted as played data. pc_audio then saw an empty queue at 22 ms,
+// kept topping it up, and every write blocked: the guest got 5-50% of the time, and DOS took over
+// a minute to boot.
+static volatile int s_free = 0;
+static int s_fill = kDmaFrames;
+static bool s_cur = false;
 
 static bool IRAM_ATTR onSent(i2s_chan_handle_t, i2s_event_data_t *, void *) {
-  s_played += kDmaFrames;
+  if (s_free < kDmaDescs - 1) s_free++;
   return false;
 }
 
-// The TX queue ran empty: the DMA plays a cleared (silent) buffer, heard as a tick. Nothing is
-// queued now, so the count of played frames catches up with the written ones.
+// Every buffer is free: the DMA plays cleared (silent) ones, heard as a tick.
 static bool IRAM_ATTR onSendEmpty(i2s_chan_handle_t, i2s_event_data_t *, void *) {
   s_underruns++;
-  s_played = s_written;
   return false;
+}
+
+// Frames written and not yet played: the buffers taken from the free queue, less the one being
+// filled, plus what that one holds (the buffer the DMA is playing is left out).
+static int queuedFrames() {
+  if (!s_cur) return 0;
+  const int taken = kDmaDescs - 1 - s_free;
+  return taken > 0 ? (taken - 1) * kDmaFrames + s_fill : s_fill;
+}
+
+// After a write: the buffers it took, by the driver's rule (a new one when the current one is
+// full, or when at most one slot of the free queue is left, i.e. nearly everything has played).
+// The driver took them during the write, after on_sent had freed any it waited for.
+static void tookFrames(int n) {
+  while (n > 0) {
+    if (!s_cur || s_fill == kDmaFrames || s_free >= kDmaDescs - 2) {
+      int f = s_free;     // on_sent may add one meanwhile
+      while (f > 0 && !__atomic_compare_exchange_n((int *)&s_free, &f, f - 1, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+      s_cur = true;
+      s_fill = 0;
+    }
+    const int k = n < kDmaFrames - s_fill ? n : kDmaFrames - s_fill;
+    s_fill += k;
+    n -= k;
+  }
 }
 
 static const int16_t kVolume[11] = { 0, 16, 32, 52, 76, 104, 136, 172, 212, 256, 320 };
@@ -93,7 +126,7 @@ static void flushOut() {
   const uint32_t t0 = micros();
   if (s_tx && s_outN) {
     i2s_channel_write(s_tx, s_out, (size_t)s_outN * 2 * sizeof(int16_t), &wrote, portMAX_DELAY);
-    s_written += s_outN;
+    tookFrames(s_outN);
   }
   s_waitUs += micros() - t0;
   s_outN = 0;
@@ -122,9 +155,6 @@ void hal_audio_write(const int16_t *mono, int n) {
 void hal_audio_silence() { s_outN = 0; }
 uint32_t hal_audio_wait_us() { return s_waitUs; }
 uint32_t hal_audio_underruns() { return s_underruns; }
-uint32_t hal_audio_queued_us() {
-  const int32_t q = (int32_t)(s_written - s_played);
-  return q > 0 ? (uint32_t)((uint64_t)q * 1000000 / AUDIO_OUT_RATE) : 0;
-}
+uint32_t hal_audio_queued_us() { return (uint32_t)((uint64_t)queuedFrames() * 1000000 / AUDIO_OUT_RATE); }
 
 #endif // BOARD_PICOCALC_P4

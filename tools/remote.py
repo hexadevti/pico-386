@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# remote.py -- drives pico-386 on the RP2350 PicoCalc over its serial log port (the mainboard's
-# USB-C, a CH340): types PC_KEYS scripts and saves screenshots. The firmware side is
-# rp2350CheckSerialCmd (system_rp2350.cpp). Needs pyserial, and Pillow for .png.
+# remote.py -- drives pico-386 on the PicoCalc over its serial log port: types PC_KEYS scripts and
+# saves screenshots. RP2350: the mainboard's USB-C (a CH340, COM6), rp2350CheckSerialCmd
+# (system_rp2350.cpp). P4 (--p4): the module's USB-C (a CH343, COM9), p4CheckSerialCmd
+# (system_p4.cpp). Needs pyserial, and Pillow for .png.
 #
 #   remote.py keys "dir,enter,w2000,shot"   type a script; each "shot" in it saves a picture
 #   remote.py shot [name.png]               one screenshot
 #   remote.py raw <y>                       a panel row's raw RAMRD bytes (format check)
 #   remote.py log [seconds]                 just print the log
 #
-# Options: --port COM6, --out <prefix> (shots go to <prefix>N.png, default sdcard/rshot).
+# Options: --port COM6, --p4 (COM9 unless --port), --out <prefix> (shots go to <prefix>N.png, default sdcard/rshot).
 # Everything else the device prints is passed through, so the log stays visible.
 import argparse, base64, os, sys, time
 import serial
@@ -31,8 +32,14 @@ def chunks(script):
 
 
 class Remote:
-    def __init__(self, port, out):
-        self.p = serial.Serial(port, 115200, timeout=0.2)
+    def __init__(self, port, out, p4=False):
+        self.p = serial.Serial()
+        self.p.port, self.p.baudrate, self.p.timeout = port, 115200, 0.2
+        if p4:
+            # the P4's CH343 resets the board when DTR and RTS differ, and opening with both low
+            # reset it too: open with both high and never change them (deploy-p4.py)
+            self.p.dtr = self.p.rts = True
+        self.p.open()
         self.out = out
         self.buf = b''
         self.shot = None          # rows while a shot is coming in
@@ -122,10 +129,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('cmd', choices=['keys', 'shot', 'raw', 'log'])
     ap.add_argument('arg', nargs='?')
-    ap.add_argument('--port', default='COM6')
+    ap.add_argument('--port')
+    ap.add_argument('--p4', action='store_true')
     ap.add_argument('--out', default='sdcard/rshot')
     a = ap.parse_args()
-    r = Remote(a.port, a.arg if a.cmd == 'shot' and a.arg else a.out)
+    port = a.port or ('COM9' if a.p4 else 'COM6')
+    r = Remote(port, a.arg if a.cmd == 'shot' and a.arg else a.out, a.p4)
     if a.cmd == 'keys':
         r.keys(a.arg or '')
     elif a.cmd == 'shot':

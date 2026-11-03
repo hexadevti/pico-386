@@ -55,8 +55,8 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     writes (over 70 ms = a gap). Prince of Persia on the device read `g836 s0 17ms`, so the
     output ran dry with no long gaps: sound was made at exactly the rate it was played, so the
     queue never built a cushion. `pc_audio` now steers the queue (`hal_audio_queued_us`,
-    which counts `on_sent` on the P4; see the RP2350's Prince notes for today's rule), and `g`
-    counts per second.
+    which mirrors the I2S driver's free-buffer queue on the P4; see the RP2350's Prince notes for
+    today's rule), and `g` counts per second.
     **Fixed on the device (2026-10-19): `g0 s0 17ms`, no ticks.** The desktop was always clean. Test: `pop.ini` (C: =
     DOSHDD.img, `C:\PRINCE\PRINCE.EXE`).
   - VBE modes and Windows
@@ -82,6 +82,25 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       - -O2 (118 KB): 8.5x, 1.9 MIPS.
       - -Os (91 KB): 6.5x, 1.4 MIPS.
       Smaller code is slower, so the L1 instruction cache is not the limit any more.
+    - **Slow boot (2026-11-03):** DOS took over a minute to boot, at 0.0-0.3 MIPS. The audio writes
+      blocked for 1-1.9 s of every 2 s. `hal_audio_queued_us` counted frames written against
+      buffers sent, and sent buffers of silence counted as played data. So it read 0-22 ms with
+      the queue full, and `pc_audio` kept topping the queue up. `audio_p4.cpp` now mirrors the
+      driver's free-buffer queue (`s_free`, `tookFrames`). Now 0 blocks, about 40 ms queued, `g0`,
+      and MS-DOS 6.22 reaches `C:\>` in about 25 s (HIMEM's test of 24 MB reads 0.1 MIPS: each
+      REP counts as one instruction).
+    - **Driving the device yourself (2026-11-03, the user asked for it).** The P4 stays on COM9
+      (console UART, open it with DTR and RTS both high before `open()`, or it resets), with
+      esp32loader on Wi-Fi at 192.168.0.100. Never flash it over serial.
+      - `python -I tools/deploy-p4.py` sends `@uf2menu`, waits for the loader's web server (F4,
+        ESC O S, if Wi-Fi autostart is off), uploads `~/.pico386-p4-build/pico386.ino.bin` to
+        `/pico-386/pico386-p4.bin` (keeping `pico386-p4.prev.bin`) and flashes it. About 15 s.
+      - `python -I tools/remote.py --p4 [--out prefix] keys "..."` and `remote.py --p4 shot x.png`
+        work as on the RP2350 (options before the command). The commands are parsed in
+        `system_p4.cpp`. Send keys only once the home menu is up: a `@keys` sent during boot is lost.
+      - A shot reads a PSRAM shadow of the panel (`display_p4.cpp`, written with every push), not
+        the panel. SeaBIOS's port 402h log goes through `hal_log` a line at a time, under the
+        log lock, so it no longer cuts into the shot's rows.
 
 - **RP2350 (a plain Pico 2 in the PicoCalc, 2026-10-27):** the user chose the Pico 2 without
   PSRAM. It builds (546 KB of flash, 436 KB of static RAM; 10.3 KB of heap free with a PC

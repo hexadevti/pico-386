@@ -117,6 +117,9 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
     left out). Notes that were playing restart from their attack.
   - **`tiny386_port.h`:** `fwrite` goes to `t386_fwrite` (`pc_platform.cpp`), so the first write
     to a disk image after a start or a snapshot marks that disk as changed.
+- **The guest's debug port on the P4 (2026-11-03).** `tiny386_port.h` sends `putchar` to
+  `t386_putchar` (`pc_platform.cpp`), which writes SeaBIOS's port 402h log a line at a time through
+  `hal_log`. Written straight to the UART, it cut into the serial remote's screenshot rows.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 
