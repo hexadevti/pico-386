@@ -133,6 +133,7 @@ bool pc_loadRom(const char *ini) {
   s_mouseSaved = atoi(pcini_get_in(s_ini, "pico", "mouse").c_str());
   pckbd_set_mouse_mode(s_mouseSaved);
   s_mouseSaved = pckbd_mouse_mode();
+  pckbd_set_shift_arrows(atoi(pcini_get_in(s_ini, "pico", "shift_arrows").c_str()) != 0);
   s_noteUntil = 0;
   pcvid_reset();
   hal_audio_start(kRate);
@@ -347,8 +348,9 @@ void pc_shutdown() {
 
 void pc_keyEvent(uint8_t code, uint8_t state) { pckbd_event(code, state); }
 
-// The in-game rows: the drives, the snapshots, then the keyboard mouse, its two button keys and Ctrl+Alt+Del.
-enum { ROW_SNAP_SAVE, ROW_SNAP_LOAD, ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_CAD, ROW_EXTRA };
+// The in-game rows: the drives, the snapshots, then the keyboard mouse, its two button keys, what
+// Shift+Up/Down send, and Ctrl+Alt+Del.
+enum { ROW_SNAP_SAVE, ROW_SNAP_LOAD, ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_SHIFT_ARROWS, ROW_CAD, ROW_EXTRA };
 
 int pc_menuItems(CoreMenuItem *out, int max) {
   if (max < DRIVE_COUNT + ROW_EXTRA) return 0;
@@ -361,6 +363,7 @@ int pc_menuItems(CoreMenuItem *out, int max) {
   out[DRIVE_COUNT + ROW_MOUSE] = { "Arrows (both Shifts)", pckbd_mouse_mode_name(pckbd_mouse_mode()), true };
   out[DRIVE_COUNT + ROW_LEFT] = { "Mouse left button", pckbd_mouse_button_label(0), true };
   out[DRIVE_COUNT + ROW_RIGHT] = { "Mouse right button", pckbd_mouse_button_label(1), true };
+  out[DRIVE_COUNT + ROW_SHIFT_ARROWS] = { "Shift+Up/Down", pckbd_shift_arrows() ? "Shift+arrow" : "PgUp/PgDn", true };
   out[DRIVE_COUNT + ROW_CAD] = { "Ctrl+Alt+Del", nullptr, false };
   return DRIVE_COUNT + ROW_EXTRA;
 }
@@ -446,6 +449,10 @@ bool pc_menuAction(int i, uint8_t key) {
       pcini_set_in(s_ini, "pico", b ? "mouse_right" : "mouse_left", pckbd_mouse_button(b));
       return false;
     }
+    case ROW_SHIFT_ARROWS:
+      pckbd_set_shift_arrows(!pckbd_shift_arrows());
+      pcini_set_in(s_ini, "pico", "shift_arrows", pckbd_shift_arrows() ? "1" : "0");
+      return false;
     case ROW_CAD:
       if (key != KEY_ENTER) return false;
       pckbd_ctrl_alt_del();

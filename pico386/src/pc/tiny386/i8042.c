@@ -96,12 +96,19 @@ static int after_eq(uint32_t a, uint32_t b)
 #define KBD_PENDING_KBD         1
 #define KBD_PENDING_AUX         2
 
+#define KBD_HOLD_US             1000    /* pico-386: see KBDState.kbd_hold */
+static uint32_t ps2_last_data(void *opaque);
+
 struct KBDState {
     uint8_t write_cmd; /* if non zero, write data to port 60 is expected */
     uint8_t status;
     uint8_t mode;
     /* Bitmask of devices with data available.  */
     uint8_t pending;
+    /* pico-386: after the guest takes a keyboard byte, the next one waits KBD_HOLD_US (kbd_step),
+       as a real keyboard's next byte takes about 1 ms on the wire. Kept out of snapshots. */
+    uint8_t kbd_hold;
+    uint32_t kbd_hold_until;
     PS2KbdState *kbd;
     PS2MouseState *mouse;
 
@@ -132,7 +139,9 @@ static void kbd_update_irq(KBDState *s)
     irq_kbd_level = 0;
     irq_mouse_level = 0;
     s->status &= ~(KBD_STAT_OBF | KBD_STAT_MOUSE_OBF);
-    if (s->pending) {
+    /* pico-386: during the hold the output buffer still holds the keyboard byte just read (see
+       kbd_read_data), so mouse data stays hidden until kbd_step ends the hold. */
+    if (s->pending && !(s->kbd_hold && s->pending == KBD_PENDING_AUX)) {
         s->status |= KBD_STAT_OBF;
         /* kbd data takes priority over aux data.  */
         if (s->pending == KBD_PENDING_AUX) {
@@ -153,6 +162,8 @@ static void kbd_update_kbd_irq(void *opaque, int level)
 {
     KBDState *s = (KBDState *)opaque;
 
+    if (level && s->kbd_hold)
+        return;     /* pico-386: kbd_step raises it when the hold ends */
     if (level)
         s->pending |= KBD_PENDING_KBD;
     else
@@ -266,10 +277,24 @@ uint32_t kbd_read_data(void *opaque, uint32_t addr)
 {
     KBDState *s = opaque;
     uint32_t val;
-    if (s->pending == KBD_PENDING_AUX)
+    if (s->kbd_hold && !(s->pending & KBD_PENDING_KBD))
+        /* pico-386: just after a keyboard byte was taken, a read gives it again and takes
+           nothing from either queue. Upstream took the next byte here, so an INT 9 handler that
+           reads port 60h and then chains to the BIOS's (which reads it again) lost every
+           other byte while keys were queued: Prince of Persia missed key releases and kept
+           running. Mouse data waiting behind it must not show either: SeaBIOS's INT 9 then
+           drops the key ("found mouse data"), and Prince, which reads Shift from the BIOS's
+           flags, never saw Shift. */
+        val = ps2_last_data(s->kbd);
+    else if (s->pending == KBD_PENDING_AUX)
         val = ps2_read_data(s->mouse);
-    else
+    else if (!(s->pending & KBD_PENDING_KBD))
+        val = ps2_last_data(s->kbd);    /* nothing pending: upstream gives the last byte too */
+    else {
+        s->kbd_hold = 1;
+        s->kbd_hold_until = get_uticks() + KBD_HOLD_US;
         val = ps2_read_data(s->kbd);
+    }
 #ifdef DEBUG_KBD
     printf("kbd: read data=0x%02x\n", val);
 #endif
@@ -566,6 +591,14 @@ void kbd_step(void *opaque)
         kbd->delay = false;
         ps2_queue(&(kbd->common), kbd->delay_keycode);
     }
+    /* pico-386: the next byte reaches the output buffer once the hold is over */
+    if (s->kbd_hold && after_eq(get_uticks(), s->kbd_hold_until)) {
+        s->kbd_hold = 0;
+        if (s->pending == KBD_PENDING_AUX)
+            kbd_update_irq(s);          /* the mouse data hidden by the hold shows now */
+    }
+    if (!s->kbd_hold && kbd->common.queue.count && !(s->pending & KBD_PENDING_KBD))
+        kbd_update_kbd_irq(s, 1);
 
 #ifdef THREAD_SAFE
     atomic_flag_clear_explicit(&(kbd->delay_flag), memory_order_release);
@@ -611,6 +644,13 @@ uint32_t ps2_read_data(void *opaque)
     xSemaphoreGive(q->mutex);
 #endif
     return val;
+}
+
+/* pico-386: the byte the guest read last, for reads of an empty output buffer */
+static uint32_t ps2_last_data(void *opaque)
+{
+    PS2Queue *q = &((PS2State *)opaque)->queue;
+    return q->data[q->rptr ? q->rptr - 1 : PS2_QUEUE_SIZE - 1];
 }
 
 static void ps2_reset_keyboard(PS2KbdState *s)
@@ -942,6 +982,8 @@ void i8042_snap(KBDState *s, struct SnapIO *io)
 		SNAP_KEEP(PS2MouseState, common.update_irq), SNAP_KEEP(PS2MouseState, common.update_arg),
 		{ 0, 0 } };
 	snap_io(io, &s->write_cmd, 4);   /* write_cmd, status, mode, pending */
+	if (io->load)
+		s->kbd_hold = 0;
 	snap_struct(io, s->kbd, sizeof(*s->kbd), kkeep);
 	snap_struct(io, s->mouse, sizeof(*s->mouse), mkeep);
 }

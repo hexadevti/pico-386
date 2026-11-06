@@ -306,12 +306,17 @@ bool pcsnap_write_ini(const std::string &snap, const std::string &ini) {
   const bool ok = readHeader(f, h, false);
   fclose(f);
   if (!ok || h.ini.empty()) return false;
-  const std::string name = pcini_get_in(ini, "pico", "name");   // a startup renamed since keeps its name
+  // The startup keeps its name (renamed since) and its keyboard settings, which belong to the
+  // player, not to the machine: a snapshot older than a change would undo it at every load.
+  static const char *const kKeep[] = { "name", "mouse", "mouse_left", "mouse_right", "shift_arrows" };
+  std::string kept[sizeof kKeep / sizeof kKeep[0]];
+  for (size_t i = 0; i < sizeof kKeep / sizeof kKeep[0]; i++) kept[i] = pcini_get_in(ini, "pico", kKeep[i]);
   FILE *o = fopen(ini.c_str(), "wb");
   if (!o) return false;
   const bool wrote = put(o, h.ini.data(), h.ini.size());
   if (fclose(o) != 0 || !wrote) return false;
-  if (pcini_get_in(ini, "pico", "name") != name) pcini_set_in(ini, "pico", "name", name);
+  for (size_t i = 0; i < sizeof kKeep / sizeof kKeep[0]; i++)
+    if (pcini_get_in(ini, "pico", kKeep[i]) != kept[i]) pcini_set_in(ini, "pico", kKeep[i], kept[i]);
   return true;
 }
 

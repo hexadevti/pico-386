@@ -133,6 +133,23 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   CheckIt on the P4: 9.40x to 10.95x PC-XT under MS-DOS 6.22, and 7.65x to 8.68x under FreeDOS with
   JEMMEX (V86 mode). `cpu_exec1` grew by 8 KB of IRAM. The RP2350 keeps the original code
   (`SLOW(name)` = `name`), because its SRAM has no room for it.
+- **`i8042.c`: one keyboard byte at a time (2026-11-06).** In Prince of Persia, keys piled up and
+  the prince kept moving on his own. Upstream took the next queued byte on every read of port
+  60h. A real 8042 keeps the byte it holds until the keyboard sends another, about 1 ms later. So
+  an INT 9 handler that reads 60h and then chains to the BIOS's, which reads it again, lost every
+  other byte while keys were queued (the typematic repeat queues them), key releases included.
+  - Now a read takes a byte only when the output buffer is full (`KBD_PENDING_KBD`). Otherwise it
+    returns the last byte again (`ps2_last_data`).
+  - After each byte the next one waits `KBD_HOLD_US` (1 ms of guest time): `kbd_hold` keeps the
+    IRQ down, and `kbd_step` raises it when the hold ends.
+  - The hold is kept out of snapshots (it sits after the 4 bytes `i8042_snap` moves) and cleared
+    on load.
+  - During the hold, mouse data waiting behind the keyboard byte stays hidden: no `MOUSE_OBF`, no
+    IRQ 12, and port 60h still gives the keyboard byte. `kbd_step` shows it when the hold ends.
+    Prince masks IRQ 12, so mouse packets sent while it ran (the keyboard mouse, with CTMOUSE
+    loaded) stayed queued for good. SeaBIOS's INT 9 then saw `MOUSE_OBF` after Prince's read
+    and dropped every key ("ps2 keyboard irq but found mouse data?!"). Prince reads Shift from
+    the BIOS's flags, so Shift+Down never picked up the sword.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 

@@ -20,6 +20,10 @@ const char *pckbd_mouse_button(int button);          // the .ini name
 const char *pckbd_mouse_button_label(int button);    // "Right Shift"
 void pckbd_next_mouse_button(int button, int dir);   // dir -1 / +1 through the choices
 void pckbd_ctrl_alt_del();
+// The STM32 sends Shift+Up/Down as PgUp/PgDn. On, they reach the guest as Shift+Up/Down (games
+// such as Prince of Persia); off, as PgUp/PgDn (the only way to type those on the PicoCalc).
+void pckbd_set_shift_arrows(bool on);
+bool pckbd_shift_arrows();
 
 // ---- pc_video.cpp: the guest screen on the 320x320 panel --------------------------------------
 void pcvid_reset();                          // forget caches: the next frame is drawn in full

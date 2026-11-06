@@ -214,8 +214,9 @@ void hal_yield() {
       case SDL_KEYDOWN:
       case SDL_KEYUP: {
         // A PC_KEYS run takes no real keys: the window grabs the focus when it opens, and typing
-        // meant for another window would land in the guest.
-        static const bool scripted = getenv("PC_KEYS") != nullptr;
+        // meant for another window would land in the guest. PC_KEYS_LIVE=1 keeps them (a script
+        // that only starts a game for someone to play).
+        static const bool scripted = getenv("PC_KEYS") != nullptr && getenv("PC_KEYS_LIVE") == nullptr;
         if (scripted) break;
         const bool down = e.type == SDL_KEYDOWN;
         if (e.key.keysym.sym == SDLK_LSHIFT || e.key.keysym.sym == SDLK_RSHIFT) s_shift = down;

@@ -13,6 +13,10 @@
 // Ctrl+Alt+Del also comes from Ctrl+Alt+Backspace: on the PicoCalc, Del with Ctrl and Alt held
 // did not reach the guest (2026-10-19), and Backspace sits next to it.
 //
+// The STM32 sends Shift+Up/Down as PgUp/PgDn. With [pico] shift_arrows on (the in-game menu's
+// "Shift+Up/Down"), those arrive as Shift+Up/Down while a Shift is held: Prince of Persia picks
+// things up with Shift and Down. Off, they stay PgUp/PgDn, which the PicoCalc has no other key for.
+//
 // The keyboard sends one press and one release per key, so the PC typematic repeat (500 ms, then
 // 30/s) is made here, for the last key pressed, as a real keyboard does it.
 //
@@ -117,6 +121,7 @@ bool s_shiftL, s_shiftR;            // the Shift keys physically held, buttons o
 uint8_t s_repeatKey;                // PicoCalc code of the key that repeats
 uint32_t s_repeatAt;
 bool s_needRepeatTime;
+bool s_shiftArrows;                 // PgUp/PgDn with a Shift held are Shift+Up/Down
 
 int s_mouseMode;                    // MOUSE_*
 uint8_t s_button[2] = { KEY_ALT, KEY_SHIFT_R };   // the left and right button keys (0 = none)
@@ -270,6 +275,13 @@ void pckbd_next_mouse_button(int button, int dir) {
   s_button[button & 1] = kButtonKeys[i].code;
 }
 
+void pckbd_set_shift_arrows(bool on) {
+  pckbd_reset();
+  s_shiftArrows = on;
+}
+
+bool pckbd_shift_arrows() { return s_shiftArrows; }
+
 void pckbd_ctrl_alt_del() {
   pckbd_reset();
   send(true, K_LCTRL);
@@ -326,19 +338,27 @@ void pckbd_event(uint8_t code, uint8_t state) {
   }
 
   if (!down) {
-    if (s_down[code]) {
-      send(false, s_down[code]);
-      if (code == KEY_SHIFT_L) s_lshift = false;
-      if (code == KEY_SHIFT_R) s_rshift = false;
-      s_down[code] = 0;
+    // A PgUp/PgDn pressed as an arrow may come back as the arrow (Shift let go first), or the other way.
+    const uint8_t partner = code == KEY_PGUP ? KEY_UP : code == KEY_UP ? KEY_PGUP :
+                            code == KEY_PGDN ? KEY_DOWN : code == KEY_DOWN ? KEY_PGDN : 0;
+    const uint8_t arrowCode = code == KEY_PGUP || code == KEY_UP ? K_UP : K_DOWN;
+    uint8_t c = code;
+    if (!s_down[code] && partner && s_down[partner] == arrowCode) c = partner;
+    if (s_down[c]) {
+      send(false, s_down[c]);
+      if (c == KEY_SHIFT_L) s_lshift = false;
+      if (c == KEY_SHIFT_R) s_rshift = false;
+      s_down[c] = 0;
     }
-    if (code == s_repeatKey) s_repeatKey = 0;
+    if (c == s_repeatKey) s_repeatKey = 0;
     return;
   }
 
   if (code == KEY_CAPS) { s_caps = !s_caps; return; }
   if (s_down[code]) return;                    // already down
   Mapped m = mapKeyCaps(code);
+  if (s_shiftArrows && (code == KEY_PGUP || code == KEY_PGDN) && (s_down[KEY_SHIFT_L] || s_down[KEY_SHIFT_R]))
+    m = { code == KEY_PGUP ? K_UP : K_DOWN, false, true };   // the guest already holds the Shift
   if (s_down[KEY_CTRL] && s_down[KEY_ALT]) {
     hal_log("kbd: Ctrl+Alt+0x%02X", code);       // what the PicoCalc sends with both held
     if (code == KEY_BACKSPACE || code == KEY_DEL) m = { K_DELETE, false, true };
@@ -366,7 +386,7 @@ void pckbd_tick(uint32_t nowMs) {
       s_needRepeatTime = false;
     } else if ((int32_t)(nowMs - s_repeatAt) >= 0) {
       const Mapped m = mapKeyCaps(s_repeatKey);
-      if (m.raw) send(true, m.code);
+      if (m.raw) send(true, s_down[s_repeatKey]);  // what it pressed (PgDn may be Down)
       else pressChar(m);
       s_repeatAt = nowMs + 33;
     }

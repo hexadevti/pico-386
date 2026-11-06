@@ -289,6 +289,18 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     that is a button is held (or any Shift, in Mouse mode), `shiftedArrowOf` turns PgUp/PgDn back
     into pointer arrows, so vertical drags work on the device. Sideways drags with a Shift button
     can't work. The desktop never sends them that way.
+  - Shift+Up/Down (2026-11-06): the in-game row "Shift+Up/Down" (`[pico] shift_arrows`) sends the
+    STM32's PgUp/PgDn as Shift+Up/Down while a Shift is held. Prince of Persia picks things up with
+    Shift+Down. Off by default, since PgUp/PgDn have no other key. Tested on the desktop with
+    `shift+pgdn` in Prince. The device's log showed Shift held, then 0xD7 (PgDn) for Down, in
+    Arrows mode. Restoring a snapshot keeps the startup's `name`, `mouse`, `mouse_left`,
+    `mouse_right` and `shift_arrows` (`pcsnap_write_ini`'s `kKeep`). Before, an older snapshot's
+    ini turned the option off again at every load.
+    It still failed on the device until the i8042 fix for stuck mouse data (THIRD_PARTY.md): Prince
+    reads Shift from the BIOS's flags, and SeaBIOS dropped every key ("found mouse data") after
+    Mouse mode had queued packets that Prince never reads. Works on the device (2026-11-06).
+    Repro on the desktop: `popfd.ini` (FreeDOS with CTMOUSE, Prince on A:), Ctrl+Tab, arrows,
+    back to Arrows, then count "mouse data" in the log.
   - Caps Lock (2026-10-19) is kept in `s_caps` and never sent to the guest. The STM32 applies
     its own Caps Lock to letters and the desktop doesn't, so a guest Caps Lock as well turned
     'A' back into 'a' on the device. `mapKeyCaps` sets a letter's Shift from the Shift keys held.
