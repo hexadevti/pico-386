@@ -501,7 +501,7 @@ static int typeAhead(const Screen &screen, const Item *items, int n, int sel, ui
 uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
   bool tall = false;
   for (int i = 0; i < n; i++) tall |= rowOf(screen, items, i).sub != nullptr;
-  const int rowH = tall ? 40 : 24;
+  const int rowH = screen.rowH ? screen.rowH : tall ? 40 : 24;
   const int cardX = 6, cardY = kHeadH + 8, cardW = PANEL_W - 12;
   const int rows = (kFootY - 6 - cardY - 8) / rowH;
   const int cardH = (n < rows ? (n > 0 ? n : 1) : rows) * rowH + 8;      // shrink to the content
@@ -533,6 +533,10 @@ uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
       }
       const uint16_t fg = on ? kSelText : kText;
       int lx = rowX + 10;
+      if (screen.picture) {
+        screen.picture(screen.ctx, first + i, lx - 4, y + 3, on);
+        lx += screen.pictureW + 4;
+      }
       if (it.icon) {
         icon(lx, cy - 6, it.icon, on ? kSelText : kAccent);
         lx += 20;

@@ -41,6 +41,60 @@ inline uint16_t avg2(uint16_t a, uint16_t b) {
 
 int16_t s_x0[SCREEN_W], s_x1[SCREEN_W];
 
+// ---- snapshot thumbnails (pcvid_thumb) ---------------------------------------------------------
+// Rows of the drawn screen are box-averaged into PCVID_THUMB_W x PCVID_THUMB_H as they go by:
+// every row of the picture's box (y0, h) adds into the thumbnail row it falls in, which is sent on
+// (s_th.out) once a row of a later one arrives. Only a few sums live here, so LOWMEM can catch
+// the rows on their way to the panel without a frame to read them from.
+struct ThumbTap {
+  bool on = false;
+  void (*out)(void *, const uint16_t *) = nullptr;
+  void *ctx = nullptr;
+  int y0 = 0, h = 1;                           // the picture's rows on the screen
+  int ty = 0, n = 0;                           // the thumbnail row being summed, screen rows in it
+  uint16_t r[PCVID_THUMB_W], g[PCVID_THUMB_W], b[PCVID_THUMB_W];
+} s_th;
+
+void thumbEmit() {
+  constexpr int kCols = SCREEN_W / PCVID_THUMB_W;
+  uint16_t row[PCVID_THUMB_W];
+  const int k = s_th.n * kCols;
+  for (int x = 0; x < PCVID_THUMB_W; x++)
+    row[x] = k ? (uint16_t)((s_th.r[x] / k) << 11 | (s_th.g[x] / k) << 5 | s_th.b[x] / k) : 0;
+  s_th.out(s_th.ctx, row);
+  memset(s_th.r, 0, sizeof s_th.r);
+  memset(s_th.g, 0, sizeof s_th.g);
+  memset(s_th.b, 0, sizeof s_th.b);
+  s_th.n = 0;
+  s_th.ty++;
+}
+
+// rows screen rows from y on, stride SCREEN_W
+void thumbRows(int y, const uint16_t *px, int rows) {
+  if (!s_th.on) return;
+  constexpr int kCols = SCREEN_W / PCVID_THUMB_W;
+  for (int i = 0; i < rows; i++, px += SCREEN_W) {
+    const int sy = y + i - s_th.y0;
+    if (sy < 0 || sy >= s_th.h) continue;
+    const int want = sy * PCVID_THUMB_H / s_th.h;
+    while (s_th.ty < want) thumbEmit();
+    if (s_th.ty != want) continue;             // an earlier row again: already sent
+    for (int x = 0; x < PCVID_THUMB_W; x++)
+      for (int c = 0; c < kCols; c++) {
+        const uint16_t p = px[x * kCols + c];
+        s_th.r[x] += p >> 11;
+        s_th.g[x] += (p >> 5) & 63;
+        s_th.b[x] += p & 31;
+      }
+    s_th.n++;
+  }
+}
+
+void thumbEnd() {
+  while (s_th.ty < PCVID_THUMB_H) thumbEmit();
+  s_th.on = false;
+}
+
 #if defined(PICO386_LOWMEM)
 constexpr int kBandH = 16;                     // output rows per panel push (>= the tallest text cell)
 uint16_t s_band[SCREEN_W * kBandH];
@@ -49,8 +103,10 @@ int s_srcW = -1, s_outY;                       // the picture's width the column
 uint16_t s_rowCur[SCREEN_W], s_rowPend[SCREEN_W];
 
 void flushBand() {
-  if (s_bandRows)
+  if (s_bandRows) {
     hal_panel_push(0, SCREEN_Y0 + (SCREEN_H - kOutH) / 2 + s_bandY0, SCREEN_W, s_bandRows, s_band, SCREEN_W);
+    thumbRows((SCREEN_H - kOutH) / 2 + s_bandY0, s_band, s_bandRows);
+  }
   s_bandY0 += s_bandRows;
   s_bandRows = 0;
 }
@@ -213,22 +269,29 @@ uint16_t mix(uint16_t bg, uint16_t fg, int k) {   // k of 3 parts fg
 }
 
 // LOWMEM: dst is ignored and each character row goes to the panel through s_band.
-bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force) {
-  const int cols = in.cols, rows = in.rows;
-  if (cols <= 0 || rows <= 0 || cols > 160 || rows > 100 || in.cheight <= 0) return false;
-  const int cw = SCREEN_W / cols < 1 ? 1 : SCREEN_W / cols > kMaxCellW ? kMaxCellW : SCREEN_W / cols;
-  int ch = SCREEN_H / rows;
+// A text mode's cell height on the panel, 0 when the mode cannot be drawn.
+int textCellH(const VGAPicoInfo &in) {
+  if (in.cols <= 0 || in.rows <= 0 || in.cols > 160 || in.rows > 100 || in.cheight <= 0) return 0;
+  int ch = SCREEN_H / in.rows;
   const int maxCh = g_settings.fontSize == 1 ? 8 : 12;
   if (ch > maxCh) ch = maxCh;
   if (ch < 1) ch = 1;
+#if defined(PICO386_LOWMEM)
+  if (ch > kBandH) ch = kBandH;
+#endif
+  return ch;
+}
+
+bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force) {
+  const int cols = in.cols, rows = in.rows;
+  const int ch = textCellH(in);
+  if (!ch) return false;
+  const int cw = SCREEN_W / cols < 1 ? 1 : SCREEN_W / cols > kMaxCellW ? kMaxCellW : SCREEN_W / cols;
   const int cheight = in.cheight > 32 ? 32 : in.cheight;
 
   // font: rebuilt when its bits (or the cell size) change
   uint32_t fh = 2166136261u;
   for (int c = 0; c < 256; c++) fh = hashBytes(fh, in.font + c * 32 * 4, cheight * 4, 4);
-#if defined(PICO386_LOWMEM)
-  if (ch > kBandH) ch = kBandH;
-#endif
   if (fh != s_fontHash || cw != s_glyphW || ch != s_glyphH || cheight != s_glyphCh) {
     buildGlyphs(in.font, cheight, cw, ch);
     s_fontHash = fh;
@@ -306,6 +369,7 @@ bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force
     }
 #if defined(PICO386_LOWMEM)
     hal_panel_push(0, SCREEN_Y0 + y0 + y * ch, SCREEN_W, ch, s_band, SCREEN_W);
+    thumbRows(y0 + y * ch, s_band, ch);
 #endif
   }
   return true;
@@ -386,4 +450,38 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
     return drawn || clear;
   }
   return clear;
+}
+
+bool pcvid_thumb(const uint16_t *frame, void (*row)(void *, const uint16_t *), void *ctx) {
+  VGAPicoInfo in;
+  t386_info(&in);
+  int y0, h;
+  if (in.mode == 2) {
+    y0 = (SCREEN_H - kOutH) / 2;
+    h = kOutH;
+  } else if (in.mode == 1 && textCellH(in)) {
+    h = in.rows * textCellH(in);
+    y0 = (SCREEN_H - h) / 2;
+  } else {
+    return false;                              // blank, or nothing pc_video draws
+  }
+#if !defined(PICO386_LOWMEM)
+  if (!frame) return false;
+#endif
+  s_th = ThumbTap();
+  s_th.out = row;
+  s_th.ctx = ctx;
+  s_th.y0 = y0;
+  s_th.h = h;
+  s_th.on = true;
+#if defined(PICO386_LOWMEM)
+  // No frame to read: the screen is drawn again in full and its rows caught on their way out.
+  (void)frame;
+  pcvid_reset();
+  pcvid_render(nullptr, nullptr, hal_millis());
+#else
+  thumbRows(0, frame, SCREEN_H);
+#endif
+  thumbEnd();
+  return true;
 }

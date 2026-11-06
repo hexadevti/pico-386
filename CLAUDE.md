@@ -410,6 +410,15 @@ started from on 2026-10-18, and **emu16** and **emu8**.
   - Desktop: `PC_SNAP=path.snp` with `PC_INI` restores at start. A `PC_KEYS` run now ignores real
     keys: the SDL window takes the focus, and typing meant for another window reached the guest
     (stray "da"/"rama" at the prompt looked like a snapshot bug).
+  - Each snapshot has `sN.bmp` beside it (2026-11-06, the user asked): the guest's screen, 80x60
+    RGB565 top-down (`pcvid_thumb`, box-averaged from the picture's area). The P4 and the desktop
+    read `hal_video_front()`; LOWMEM draws the screen again and catches the rows on their way to
+    the panel (`thumbRows`). The Load list shows it left of the name (`ui::Screen::picture`,
+    `rowH`), read straight into the canvas. Tested on the desktop (mode 13h) and `build-lowmem`
+    (FreeDOS text). Not yet tested on the device.
+  - Saving with snapshots there (2026-11-06, the user asked) first lists "New snapshot" and then
+    the snapshots to overwrite (`pcsnap_pick_save`); the name field starts from the old name.
+    An overwrite writes a new `sN` and only then deletes the old one, so it moves to the top.
   - Tested on the desktop, `build-lowmem` and the device (2026-11-03): save at the FreeDOS prompt,
     `cls`, Load snapshot brought the boot screen back in about 1 s, and `ver` worked.
 - **`core.h`:** the EmuCore gained `keyEvent`, `menuItems`/`menuAction` (core rows in the in-game

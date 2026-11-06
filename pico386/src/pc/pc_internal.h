@@ -27,6 +27,13 @@ void pcvid_reset();                          // forget caches: the next frame is
 // frame need not be submitted.
 // fb is the guest framebuffer (T386_FB_W x T386_FB_H) the machine draws graphics modes into.
 bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs);
+// A small picture of the guest screen for a snapshot: the picture's area (not the black around it)
+// box-averaged to PCVID_THUMB_W x PCVID_THUMB_H, handed to row(ctx, px) a row at a time, top row
+// first. frame is the last frame drawn (hal_video_front()); LOWMEM has none, so the screen is
+// drawn to the panel again and its rows are caught on the way (VRAM must be in place). false =
+// no picture (a blank or undrawable mode); row is then never called.
+constexpr int PCVID_THUMB_W = 80, PCVID_THUMB_H = 60;
+bool pcvid_thumb(const uint16_t *frame, void (*row)(void *, const uint16_t *), void *ctx);
 
 // ---- pc_profiles.cpp: the PC and the home menu ------------------------------------------------
 // The home menu: picks a startup (a machine .ini with its drives) and returns the .ini to start,
@@ -75,8 +82,12 @@ void pcdisk_create_menu();
 #include <vector>
 struct PcSnapshot { std::string path, name; };
 std::vector<PcSnapshot> pcsnap_list(const std::string &ini);    // newest first
-// Saves the running PC (between steps, VRAM in place). null, or why not.
-const char *pcsnap_save(const std::string &ini, const std::string &name);
+// Saves the running PC (between steps, VRAM in place). null, or why not. replace: a snapshot
+// this one takes the place of, deleted only once the new one is written (it becomes the newest).
+const char *pcsnap_save(const std::string &ini, const std::string &name, const std::string &replace = "");
+// The save screen: "New snapshot" or one to overwrite (replace = its file, else empty), then the
+// name (an overwrite starts from the old one). false = cancelled.
+bool pcsnap_pick_save(const std::string &ini, std::string &replace, std::string &name);
 // The list screen: Enter picks one to start from (out = its file), Delete removes one.
 bool pcsnap_pick(const std::string &ini, const char *title, std::string &out);
 // Whether a disk the snapshot had was written since it was taken.

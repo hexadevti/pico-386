@@ -93,6 +93,11 @@ struct Screen {
   // With items null, list asks for each row here instead (also with ctx): a folder of hundreds
   // of files then needs no Item for every one of them.
   Item (*itemAt)(void *ctx, int i) = nullptr;
+  // A picture at the left of each row (the snapshots' screens): rows are rowH tall, and
+  // picture(ctx, i, x, y, on) draws row i's, pictureW wide, with its top-left at x, y.
+  int rowH = 0;                        // 0: 24, or 40 with a second line
+  int pictureW = 0;
+  void (*picture)(void *ctx, int i, int x, int y, bool on) = nullptr;
 };
 
 // Draws the list and handles Up/Down/PgDn/Home/End. Typing a letter or digit jumps to the next

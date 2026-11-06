@@ -57,7 +57,7 @@ int s_mouseSaved;                  // the keyboard mouse mode the .ini has
 uint32_t s_noteUntil;              // a note in the bottom strip until then (ms), 0 = none
 // A snapshot to save or start from once the menu has closed: on the RP2350 the menu's canvas
 // holds VRAM's place until then.
-std::string s_snapSave, s_snapLoad;
+std::string s_snapSave, s_snapReplace, s_snapLoad;   // the save's name, the snapshot it overwrites
 
 const char *baseName(const std::string &p) {
   const size_t s = p.find_last_of('/');
@@ -239,9 +239,10 @@ void pc_runFrame(bool draw) {
   if (!s_snapSave.empty()) {
     hal_job_wait();
     showNote("Saving snapshot...");
-    const char *e = pcsnap_save(s_ini, s_snapSave);
+    const char *e = pcsnap_save(s_ini, s_snapSave, s_snapReplace);
     showNote(e ? e : ("Saved: " + s_snapSave).c_str());
     s_snapSave.clear();
+    s_snapReplace.clear();
   }
   if (!s_snapLoad.empty()) {
     const std::string snap = s_snapLoad, ini = s_ini;
@@ -420,10 +421,10 @@ bool pc_menuAction(int i, uint8_t key) {
         ui::message("Save snapshot", "D: or a folder floppy has unsaved changes: restart first", 2200);
         return false;
       }
-      // No default name: "Snapshot 3" says nothing a week later, so the user types one.
-      char name[40] = "";
-      if (!ui::editText("Save snapshot", "Type a name, e.g. DOS ready", name, sizeof name)) return false;
+      std::string name, replace;
+      if (!pcsnap_pick_save(s_ini, replace, name)) return false;
       s_snapSave = name;                       // saved once the menu has closed (pc_runFrame)
+      s_snapReplace = replace;
       return true;
     }
     case ROW_SNAP_LOAD: {
