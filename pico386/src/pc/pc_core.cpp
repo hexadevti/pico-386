@@ -102,7 +102,9 @@ bool pc_loadRom(const char *ini) {
     snprintf(s_error, sizeof s_error, "Cannot read the snapshot");
     return false;
   }
-  const int r = t386_start(ini, hal_sd_root(), biosDir(), s_fb);
+  const long snapRam = snap.empty() ? 0 : pcsnap_ram(snap);
+  if (snapRam > 0) t386_limit_mem(snapRam);
+  const int r =t386_start(ini, hal_sd_root(), biosDir(), s_fb);
   if (r != T386_OK) {
     const char *f = t386_error_file();
     const char *root = hal_sd_root();
@@ -116,6 +118,14 @@ bool pc_loadRom(const char *ini) {
     return false;
   }
   if (!snap.empty()) {
+    // Less RAM than the snapshot had (the PSRAM has less room now): say so, not "another version".
+    if (snapRam > 0 && t386_mem_bytes() != snapRam) {
+      snprintf(s_error, sizeof s_error, "The snapshot needs %ld MB of RAM, only %ld MB fit", snapRam >> 20,
+               t386_mem_bytes() >> 20);
+      hal_log("snapshot: %s", s_error);
+      t386_stop();
+      return false;
+    }
     if (const char *e = pcsnap_restore(snap)) {
       t386_stop();
       snprintf(s_error, sizeof s_error, "%s", e);

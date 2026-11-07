@@ -431,6 +431,13 @@ started from on 2026-10-18, and **emu16** and **emu8**.
   - Saving with snapshots there (2026-11-06, the user asked) first lists "New snapshot" and then
     the snapshots to overwrite (`pcsnap_pick_save`); the name field starts from the old name.
     An overwrite writes a new `sN` and only then deletes the old one, so it moves to the top.
+  - "Snapshot from another version" on the P4 (2026-11-07): the snapshots had 24 MB of RAM, and
+    the restart for the load got 20 MB, because the 27 MB block was freed with each machine and
+    the PSRAM fragmented. Guest RAM and VRAM now come from a block kept for the whole session
+    (`t386_reserve_big`, `bigmalloc` in pc_platform.cpp). A load asks for the snapshot's RAM
+    (`pcsnap_ram`, `t386_limit_mem`) and otherwise says "needs N MB". A failed `snap_check`
+    logs its offset and both values. Works on the device (2026-11-07): prince 1, prince 2 and p3
+    loaded one after another in-game, each at 24 MB.
   - Tested on the desktop, `build-lowmem` and the device (2026-11-03): save at the FreeDOS prompt,
     `cls`, Load snapshot brought the boot screen back in about 1 s, and `ver` worked.
 - **`core.h`:** the EmuCore gained `keyEvent`, `menuItems`/`menuAction` (core rows in the in-game
@@ -450,6 +457,11 @@ arduino-cli compile --fqbn esp32:esp32:esp32p4:PSRAM=enabled,FlashSize=16M,ChipV
   --build-path ~/.pico386-p4-build pico386
 ```
 
+- The core is Arduino-ESP32 **3.3.10** in `~/.emu6502-p4` (emu8's version). It was missing on
+  2026-11-07 and was installed again with `arduino-cli core install esp32:esp32@3.3.10
+  --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json`.
+  That day's build went to `build-p4` in the repo (the user asked; gitignored), and
+  `tools/deploy-p4.py build-p4/pico386.ino.bin` deploys it.
 - Arduino copies only known source extensions into the build tree, so vendored `.inc`/`.def` files
   must be renamed `.h`.
 - `compiler.cpp.extra_flags` doesn't reach the C files; `tiny386_port.h` must not depend on it.

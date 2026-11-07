@@ -15,6 +15,8 @@ typedef struct SnapIO {
 	FILE *f;
 	int load;   /* 1: read into the structs, 0: write them out */
 	int err;    /* set by the first short read or write; later calls do nothing */
+	unsigned want, got;  /* the first snap_check that failed: this build's value, the file's */
+	long at;             /* and where in the file it was */
 } SnapIO;
 
 static inline void snap_io(SnapIO *io, void *p, size_t n)
@@ -31,8 +33,12 @@ static inline void snap_check(SnapIO *io, unsigned v)
 {
 	unsigned r = v;
 	snap_io(io, &r, sizeof(r));
-	if (io->load && !io->err && r != v)
+	if (io->load && !io->err && r != v) {
 		io->err = 2;
+		io->want = v;
+		io->got = r;
+		io->at = ftell(io->f) - (long)sizeof(r);
+	}
 }
 
 /* A field to keep on load: SNAP_KEEP(Type, field), ended by {0, 0}. */

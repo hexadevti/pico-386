@@ -102,4 +102,6 @@ std::string pcsnap_take_pending();
 // Before the machine starts: the snapshot's .ini over the startup's. After: its state into the
 // machine (null, or why not; a failed restore leaves the machine to be stopped).
 bool pcsnap_write_ini(const std::string &snap, const std::string &ini);
+// The guest RAM the snapshot's machine had (0 if it cannot be read): it loads only into as much.
+long pcsnap_ram(const std::string &snap);
 const char *pcsnap_restore(const std::string &snap);

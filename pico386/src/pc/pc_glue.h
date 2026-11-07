@@ -118,10 +118,16 @@ void t386_files_snapped(void);
 void pcsnap_touch(const char *path);
 int  t386_save_state(FILE *f);
 int  t386_load_state(FILE *f);
+// The next t386_start gives the guest this much RAM at most (a snapshot's), once.
+void t386_limit_mem(long bytes);
+long t386_mem_bytes(void);              // the running machine's guest RAM
 
 // pc_platform.cpp
 void   t386_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void   t386_release_all();
+// Makes room for guest RAM and VRAM (bigmalloc), bytes in all, with margin bytes free beside it;
+// the block is kept across machines. 0 when it does not fit.
+int    t386_reserve_big(size_t bytes, size_t margin);
 void   t386_flush_files();
 size_t t386_heap_bytes();
 

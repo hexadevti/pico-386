@@ -291,6 +291,17 @@ bool pcsnap_disks_changed(const std::string &snap) {
   return false;
 }
 
+long pcsnap_ram(const std::string &snap) {
+  // t386_save_state starts with "T386", then the guest RAM's size.
+  FILE *f = fopen(snap.c_str(), "rb");
+  if (!f) return 0;
+  Header h;
+  uint32_t v[2];
+  const bool ok = readHeader(f, h, false) && get(f, v, sizeof v) && v[0] == 0x54333836;
+  fclose(f);
+  return ok ? (long)v[1] : 0;
+}
+
 void pcsnap_set_pending(const std::string &snap) { s_pending = snap; }
 
 std::string pcsnap_take_pending() {

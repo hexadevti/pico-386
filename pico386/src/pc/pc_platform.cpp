@@ -31,6 +31,14 @@ static_assert(sizeof(Block) == 16, "header must keep 16-byte alignment");
 static Block s_blocks = { &s_blocks, &s_blocks, 0, 0 };
 static size_t s_bytes = 0, s_count = 0;
 
+// Guest RAM and VRAM (bigmalloc) come from one PSRAM block that is kept for the whole session and
+// reused by every machine, never freed with the rest. Freed with each machine, the room for them
+// was split by whatever the menus and the folder disks allocated in between: on the P4 the first
+// PC got 24 MB of RAM and every restart after it 20 MB, so a snapshot taken in one could not be
+// loaded into the other (its RAM size differed).
+static uint8_t *s_pool = nullptr;
+static size_t s_poolSize = 0, s_poolUsed = 0;
+
 static void *track(size_t n, bool big) {
   const size_t total = sizeof(Block) + (n ? n : 1);
   Block *b = (Block *)(big || n > kFastMax ? hal_alloc_big(total) : hal_alloc_fast(total));
@@ -166,6 +174,7 @@ void t386_release_all() {
     if (s_files[i]) { fclose(s_files[i]); forgetFile(i); }
   if (s_count) hal_log("tiny386: releasing %u blocks, %u KB", (unsigned)s_count, (unsigned)(s_bytes >> 10));
   while (s_blocks.next != &s_blocks) untrack(s_blocks.next + 1);
+  s_poolUsed = 0;                       // the block itself stays for the next machine
   // Folder disks are written back last: their tables are pc_folder's own, and on the RP2350 the
   // write-back needs the heap the machine's blocks held (about 10 KB is free while it runs).
   pfolder_close_all();
@@ -188,7 +197,32 @@ void t386_clock_set(uint32_t now) { s_clockSkip = hal_micros() - now; }
 
 void *pcmalloc(long size) { return track((size_t)size, false); }
 
-void *bigmalloc(size_t size) { return track(size, true); }
+int t386_reserve_big(size_t bytes, size_t margin) {
+  s_poolUsed = 0;
+  if (s_pool && s_poolSize >= bytes) return 1;
+  // A bigger machine than the block holds: let it go and look for room, with margin bytes to
+  // spare beside it (the probe is freed, so the block lands where it was).
+  if (s_pool) hal_free(s_pool);
+  s_pool = nullptr;
+  s_poolSize = 0;
+  void *probe = hal_alloc_big(bytes + margin);
+  if (!probe) return 0;
+  hal_free(probe);
+  if (!(s_pool = (uint8_t *)hal_alloc_big(bytes))) return 0;
+  s_poolSize = bytes;
+  return 1;
+}
+
+// pc_new zeroes guest RAM and VRAM itself, so a block reused from the last machine is fine.
+void *bigmalloc(size_t size) {
+  const size_t n = (size + 15) & ~(size_t)15;
+  if (s_pool && s_poolSize - s_poolUsed >= n) {
+    void *p = s_pool + s_poolUsed;
+    s_poolUsed += n;
+    return p;
+  }
+  return track(size, true);
+}
 
 int load_rom(void *phys_mem, const char *file, uint32_t addr, int backward) {
   FILE *fp = fopen(file, "rb");

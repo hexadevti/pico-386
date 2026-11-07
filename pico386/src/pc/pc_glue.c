@@ -17,11 +17,16 @@ static int s_parked;                    // the arena's start is in PSRAM while t
 #define PARK_BYTES (PANEL_W * PANEL_H * 2 > PM_VRAM_BYTES ? PANEL_W * PANEL_H * 2 : PM_VRAM_BYTES)
 #endif
 static char s_err_file[160];
+static long s_mem_limit;                // t386_limit_mem: the next start's RAM at most (0: none)
 // What A: and B: hold, as emulink got it (a zip as the folder it unpacked to), so a swap can tell
 // a folder in the other drive or in D: from the one it replaces.
 static char s_fd_path[2][256];
 
 const char *t386_error_file() { return s_err_file; }
+
+void t386_limit_mem(long bytes) { s_mem_limit = bytes; }
+
+long t386_mem_bytes(void) { return s_pc ? (long)s_pc->phys_mem_size : 0; }
 
 // ---- configuration ---------------------------------------------------------------------------
 
@@ -88,6 +93,8 @@ static int parse_ini(void *user, const char *section, const char *name, const ch
 
 int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, uint16_t *fb) {
   s_err_file[0] = 0;
+  const long mem_limit = s_mem_limit;   // for this start only, even one that fails
+  s_mem_limit = 0;
   if (s_pc) t386_stop();
 
   PCConfig conf;
@@ -110,6 +117,8 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
   if (conf.cpu_gen < 3) conf.cpu_gen = 3;
   if (conf.cpu_gen > 5) conf.cpu_gen = 5;
   if (conf.vga_mem_size < 256 * 1024) conf.vga_mem_size = 256 * 1024;
+  // A snapshot is loaded into a machine with its own amount of RAM, not with what fits now.
+  if (mem_limit > 0 && conf.mem_size > mem_limit) conf.mem_size = mem_limit;
   conf.bios = join(bios_dir, "bios.bin");
   conf.vga_bios = join(bios_dir, "vgabios.bin");
   conf.enable_serial = 0;
@@ -218,19 +227,20 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
 #else
   // Guest RAM and VRAM are the big allocations; tiny386 does not check them.
   // pc.ini asks for T386_MEM_MAX_MB, which may be more than PSRAM has: step down 4 MB at a
-  // time to what fits, keeping 2 MB for the framebuffer, D:'s tables and the rest.
+  // time to what fits, keeping 2 MB for the framebuffer, D:'s tables and the rest. They come
+  // from a block kept from one machine to the next (t386_reserve_big), so the RAM a machine
+  // gets does not shrink as the PSRAM fragments.
   if (conf.mem_size > (long)T386_MEM_MAX_MB << 20) conf.mem_size = (long)T386_MEM_MAX_MB << 20;
-  void *probe;
-  while (!(probe = bigmalloc((size_t)conf.mem_size + (size_t)conf.vga_mem_size + 2 * 1024 * 1024)) &&
+  int fits;
+  while (!(fits = t386_reserve_big((size_t)conf.mem_size + (size_t)conf.vga_mem_size + 64, 2 * 1024 * 1024)) &&
          conf.mem_size > 4L << 20)
     conf.mem_size -= 4L << 20;
-  if (!probe) {
+  if (!fits) {
     t386_log("tiny386: not enough PSRAM for %ld KB RAM + %ld KB VRAM",
              conf.mem_size >> 10, conf.vga_mem_size >> 10);
     t386_release_all();
     return T386_ERR_MEMORY;
   }
-  free(probe);
 #endif
 
   t386_log("tiny386: %ld KB RAM, %ld KB VRAM, gen %d, fpu %d", conf.mem_size >> 10,
@@ -463,7 +473,9 @@ static void snap_mem(SnapIO *io, uint8_t *mem, uint32_t bytes) {
 
 static int snap_run(FILE *f, int load) {
   if (!s_pc) return T386_SNAP_FORMAT;
-  SnapIO io = { f, load, 0 };
+  SnapIO io = { f, load, 0, 0, 0, 0 };
+  t386_log("snapshot: %s, %u KB RAM, %u KB VRAM", load ? "loading" : "saving",
+          (unsigned)(s_pc->phys_mem_size >> 10), (unsigned)(s_pc->vga_mem_size >> 10));
   uint32_t now = get_uticks();
   snap_check(&io, 0x54333836);                    // "T386"
   snap_check(&io, (unsigned)s_pc->phys_mem_size);
@@ -477,7 +489,14 @@ static int snap_run(FILE *f, int load) {
 #endif
   snap_mem(&io, (uint8_t *)s_pc->vga_mem, (uint32_t)s_pc->vga_mem_size);
   snap_check(&io, 0x454e4421);                    // "END!"
-  if (io.err) return io.err == 2 ? T386_SNAP_FORMAT : T386_SNAP_IO;
+  if (io.err) {
+    // Which check failed says which device's layout (or the RAM size) differs.
+    if (io.err == 2)
+      t386_log("snapshot: mismatch at offset %ld: this machine has 0x%x, the file 0x%x", io.at, io.want, io.got);
+    else
+      t386_log("snapshot: short %s", load ? "read" : "write");
+    return io.err == 2 ? T386_SNAP_FORMAT : T386_SNAP_IO;
+  }
   // The guest's clock carries on from the snapshot's: the PIT, the cursor blink and the
   // keyboard's typematic delay are all timed against it.
   if (load) t386_clock_set(now);
