@@ -59,6 +59,12 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     today's rule), and `g` counts per second.
     **Fixed on the device (2026-10-19): `g0 s0 17ms`, no ticks.** The desktop was always clean. Test: `pop.ini` (C: =
     DOSHDD.img, `C:\PRINCE\PRINCE.EXE`).
+  - **`BLASTER` (2026-11-10):** the SB16 is A220 I5 D1 H5 (`sb16_new` in pc.c). FastDoom (Apogee
+    Sound System) with SB sound effects and no `BLASTER` set prints "Error setup sound device: -1"
+    and drops to DOS. The text is lost on the device, since the screen is cleared, so it looks like
+    a hang at "Startup Sound". `SET BLASTER=A220 I5 D1 H5 P330 T6` is now in
+    `freedos-hdd-32mb.img`'s FDAUTO.BAT (it had no T6, which also worked) and in the AUTOEXEC.BAT of
+    the local MS-DOS images and the device's DOSHDD. With it, FastDoom has sound on the desktop and the device.
   - VBE modes and Windows
   - writes to a hard-disk image
   - a D: folder disk above 504 MB (FAT16 LBA, type 0Eh), and D: with Windows 95 long names
@@ -87,6 +93,10 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       (3767 Dhrystones) under MS-DOS 6.22, 8.68x under FreeDOS with JEMMEX. What is left is flat:
       instruction fetch and decode (`fetch8pf`, about 10%), lazy flags (about 6%), the dispatch's
       indirect jump, and PSRAM latency on guest RAM. Each is worth 2-3% at most.
+    - **FastDoom (2026-11-10):** `DOOM.BAT` (FDOOM13H, low detail, no music) shows 4-5 fps in its
+      corner counter on the device at 1.7-1.8 MIPS (33 on the desktop). About 75% of core 1 is the
+      interpreter. A silent OPL took about 7% until `fmopl.c` skipped it (THIRD_PARTY.md). A full
+      `-timedemo demo1` takes over 15 minutes on the device, so compare MIPS and `prof` instead.
     - **Profiler:** `python -I tools/remote.py --p4 prof 8` samples core 1 at 2 kHz (`prof_p4.cpp`,
       `@prof`/`@profdump`) and prints hot functions and lines through addr2line on the build's .elf.
       Names are the innermost inlined function, so `pload8` or `fetch8pf` usually means code inside
@@ -230,6 +240,16 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       (1502 in one folder), 1000 files on a floppy, zips on A:+B:+D: together, a 429-file
       zip swapped onto B: in-game (54.6 KB before), D: zip changed twice in-game (restarts), and
       writes on D: written back. Not yet tested on the device.
+  - **`rp2350.ini` (2026-11-10, v0.2.1, the user asked):** a user's AliExpress RP2350 froze within
+    seconds of boot on v0.2.0. arduino-pico leaves the RP2350's core at 1.10 V at 300 MHz (it
+    raises the voltage only on the RP2040), and the PSRAM calibration takes the fastest divider
+    that passes one test. The optional `/pico-386/rp2350.ini` (`mhz`, `vreg`, `psram_div`; the
+    shipped one has every line commented out) is read in `hal_init` (`applyTune`) before the
+    PSRAM, the panel and the SD's SPI are set up. It re-begins UART0, resets the keyboard's I2C
+    clock and reloads SysTick on both cores, because FreeRTOS loaded it from F_CPU. With no file,
+    nothing changes. The log shows `rp2350.ini: ...` and the MHz and mV in use. Compiled, but not
+    yet run on a device: the PicoCalc was offline. Another user reported freezes from LyraCalc's
+    keyboard firmware, which went away with ClockworkPi's official 1.7.
   - Test it on the desktop with the `build-lowmem` CMake dir (`-DEMU_LOWMEM=ON`), which simulates
     the PSRAM. Prince of Persia and MS-DOS 6 run there.
   - `psram_rp2350.cpp` drives the PSRAM as plain SPI from pio1 (CS 20, SCK 21, SIO0 2, SIO1 3).

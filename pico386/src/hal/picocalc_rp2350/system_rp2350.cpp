@@ -18,6 +18,9 @@
 #include <malloc.h>
 #include <stdarg.h>
 #include <hardware/watchdog.h>
+#include <hardware/clocks.h>
+#include <hardware/vreg.h>
+#include <hardware/structs/systick.h>
 #include "../hal.h"
 
 bool picocalcWaitForMainboard();   // input_rp2350.cpp
@@ -195,6 +198,96 @@ static void sdInit() {
   hal_log("SD: mount failed");
 }
 
+// ---- rp2350.ini: clock, core voltage and PSRAM speed, for boards that need them ----------------
+// Every Pico 2 runs at 300 MHz (the build's freq=300), and arduino-pico leaves the RP2350's core
+// at its power-on 1.10 V (it raises it only on the RP2040). Ours copes; a user's AliExpress RP2350
+// froze within seconds of boot (2026-11-10). So an optional /pico-386/rp2350.ini can set
+//   mhz       = 250    clk_sys, 100-300 (default 300)
+//   vreg      = 1.20   the core's volts, 1.10-1.30 (default: left at 1.10)
+//   psram_div = 3      the fastest PSRAM clock divider tried, 2-10 (default 2: SCK = clk_sys / 4)
+// Without the file nothing changes. It is read before anything but the serial ports depends on the
+// clock (the panel, the SD's SPI, the PSRAM's PIO, the audio PWM are set up after it).
+uint8_t g_psramMinDiv = 2;                 // psram_rp2350.cpp
+
+void rp2350KbdReclock();                   // input_rp2350.cpp
+
+// FreeRTOS loaded each core's SysTick from F_CPU (configCPU_CLOCK_HZ); it counts clk_sys.
+static void tickReload() { systick_hw->rvr = clock_get_hz(clk_sys) / configTICK_RATE_HZ - 1; }
+static void tickCore1(void *) {
+  tickReload();
+  vTaskDelete(nullptr);
+}
+
+struct Tune { int mhz = 0, mv = 0, psramDiv = 0; };
+
+// "key = value" lines; [sections], ';' and '#' comments are ignored.
+static Tune readTune() {
+  Tune t;
+  SPI.setSCK(SD_SCK_PIN);
+  SPI.setTX(SD_MOSI_PIN);
+  SPI.setRX(SD_MISO_PIN);
+  SDFS.setConfig(SDFSConfig(SD_CS_PIN, 4000000, SPI));     // slow: any card, one small file
+  if (!SDFS.begin()) return t;
+  File f = SDFS.open("/pico-386/rp2350.ini", "r");
+  if (f) {
+    char line[80];
+    while (f.available()) {
+      const size_t n = f.readBytesUntil('\n', line, sizeof line - 1);
+      line[n] = 0;
+      char *p = line;
+      while (*p == ' ' || *p == '\t') p++;
+      if (*p == ';' || *p == '#' || *p == '[') continue;
+      char *eq = strchr(p, '=');
+      if (!eq) continue;
+      char *k = p, *ke = eq;
+      while (ke > k && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+      *ke = 0;
+      const char *v = eq + 1;
+      if (!strcmp(k, "mhz")) t.mhz = atoi(v);
+      else if (!strcmp(k, "vreg")) t.mv = (int)(atof(v) * 1000.0 + 0.5);
+      else if (!strcmp(k, "psram_div")) t.psramDiv = atoi(v);
+    }
+    f.close();
+  }
+  SDFS.end();
+  return t;
+}
+
+static char s_tuneLog[120] = "";
+
+static void applyTune() {
+  const Tune t = readTune();
+  char *o = s_tuneLog;
+  const char *end = s_tuneLog + sizeof s_tuneLog;
+  if (t.psramDiv >= 2 && t.psramDiv <= 10) {
+    g_psramMinDiv = (uint8_t)t.psramDiv;
+    o += snprintf(o, end - o, " psram_div %d", t.psramDiv);
+  }
+  // 1.10-1.30 V in 50 mV steps (VREG_VOLTAGE_1_10 .. _1_30 are consecutive); above needs unlocking.
+  int vsel = -1;
+  if (t.mv >= 1100 && t.mv <= 1300) vsel = VREG_VOLTAGE_1_10 + (t.mv - 1100 + 25) / 50;
+  else if (t.mv) o += snprintf(o, end - o, " vreg %d mV ignored (1.10-1.30)", t.mv);
+  const uint32_t khz = (t.mhz >= 100 && t.mhz <= 300) ? (uint32_t)t.mhz * 1000 : 0;
+  if (t.mhz && !khz) o += snprintf(o, end - o, " mhz %d ignored (100-300)", t.mhz);
+  if (vsel < 0 && (!khz || khz * 1000 == clock_get_hz(clk_sys))) return;
+
+  // Raise the voltage before a faster clock; lower clocks are safe at any voltage, so it goes after.
+  rp2350LogLock(true);
+  Serial1.flush();
+  if (vsel >= 0 && vsel > (int)vreg_get_voltage()) { vreg_set_voltage((vreg_voltage)vsel); busy_wait_us_32(1000); }
+  if (khz && khz * 1000 != clock_get_hz(clk_sys) && !set_sys_clock_khz(khz, false)) o += snprintf(o, end - o, " %lu MHz not reachable", (unsigned long)(khz / 1000));
+  if (vsel >= 0 && vsel < (int)vreg_get_voltage()) vreg_set_voltage((vreg_voltage)vsel);
+  tickReload();
+  Serial1.end();
+  Serial1.begin(115200);
+  rp2350LogLock(false);
+  rp2350KbdReclock();
+  TaskHandle_t h = nullptr;
+  if (xTaskCreate(tickCore1, "tick1", 256, nullptr, configMAX_PRIORITIES - 1, &h) == pdPASS)
+    vTaskCoreAffinitySet(h, 1u << 1);
+  if (vsel >= 0) o += snprintf(o, end - o, " vreg %d mV", 1100 + (vsel - VREG_VOLTAGE_1_10) * 50);
+}
+
 void hal_init() {
   s_logLock = xSemaphoreCreateMutexStatic(&s_logLockBuf);
   Serial.begin(115200);
@@ -208,14 +301,17 @@ void hal_init() {
   rp2350DiagStart();
   jobInit();
   const bool board = picocalcWaitForMainboard();
+  if (board) applyTune();
+  if (s_tuneLog[0]) hal_log("rp2350.ini:%s", s_tuneLog);
   rp2350PsramInit();
   rp2350DisplayInit();
   if (board) sdInit();
   rp2350InputInit();
   const struct mallinfo mi = mallinfo();
-  hal_log("pico-386 on " BOARD_NAME " at %lu MHz, heap %u KB used, arena %u KB",
-          (unsigned long)(rp2040.f_cpu() / 1000000), (unsigned)(mi.uordblks >> 10),
-          (unsigned)(sizeof(s_arena) >> 10));
+  hal_log("pico-386 on " BOARD_NAME " at %lu MHz, core %u mV, heap %u KB used, arena %u KB",
+          (unsigned long)(clock_get_hz(clk_sys) / 1000000),
+          1100u + ((unsigned)vreg_get_voltage() - VREG_VOLTAGE_1_10) * 50u,
+          (unsigned)(mi.uordblks >> 10), (unsigned)(sizeof(s_arena) >> 10));
 }
 
 #endif // BOARD_PICOCALC_RP2350

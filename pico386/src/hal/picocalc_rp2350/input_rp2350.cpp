@@ -39,6 +39,11 @@ static void wireBegin() {
   s_wireUp = true;
 }
 
+// The I2C divider comes from clk_sys, so rp2350.ini's clock change (system_rp2350.cpp) sets it again.
+void rp2350KbdReclock() {
+  if (s_wireUp) Wire1.setClock(KBD_I2C_HZ);
+}
+
 static void selectReg(uint8_t reg) {
   Wire1.beginTransmission(KBD_I2C_ADDR);
   Wire1.write(reg);

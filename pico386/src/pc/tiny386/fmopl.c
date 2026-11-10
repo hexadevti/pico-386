@@ -1035,6 +1035,26 @@ void YM3812UpdateOne(FM_OPL *OPL, int16_t *buffer, int length)
 		vib_table = OPL->vib_table;
 	}
 	R_CH = rhythm ? &S_CH[6] : E_CH;
+	/* pico-386: with every operator's envelope off and holding (evc at EG_OFF, evs 0), each
+	   sample is 0 and no slot changes, so skip the synthesis. Games that set up the OPL and never
+	   play music (FastDoom -nomusic) cost about 7% of the emulator's core on the P4. The loop
+	   below would also advance the LFOs and zero the feedback history, so do that here. */
+	{
+		int silent = 1;
+		for(CH=S_CH ; CH < E_CH && silent ; CH++)
+			if( CH->SLOT[SLOT1].evc < EG_OFF || CH->SLOT[SLOT1].evs ||
+			    CH->SLOT[SLOT2].evc < EG_OFF || CH->SLOT[SLOT2].evs )
+				silent = 0;
+		if( silent )
+		{
+			memset(buffer, 0, length * sizeof(int16_t));
+			for(CH=S_CH ; CH < E_CH ; CH++)
+				CH->op1_out[0] = CH->op1_out[1] = 0;
+			OPL->amsCnt = amsCnt + amsIncr * (uint32_t)length;
+			OPL->vibCnt = vibCnt + vibIncr * (uint32_t)length;
+			return;
+		}
+	}
 	for( i=0; i < length ; i++ )
 	{
 		/*            channel A         channel B         channel C      */

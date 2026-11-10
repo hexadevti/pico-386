@@ -80,6 +80,10 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
 - **`pc.c`:** the IDE attach loop skips an empty path only for hard disks, so an empty CD drive
   is still created.
 - **`fmopl.h`:** single-precision `FLOAT` under `TINY386_PICO`, as on upstream's ESP32 builds (the P4 FPU is single precision).
+- **`fmopl.c`:** `YM3812UpdateOne` returns zeros without running the synthesis when every
+  operator's envelope is off and holding (`evc >= EG_OFF`, `evs == 0`). It still advances the
+  LFO counters and clears the feedback history, as the loop would. FastDoom with `-nomusic`
+  spent about 7% of the P4's emulator core on a silent OPL (2026-11-10).
 - **`sb16.c`:** the six `resample_*` functions are replaced by one resampler (`sb16_read` plus
   the loop in `sb16_audio_callback`, state in `rs_frac`/`rs_prev`/`rs_cur`). Upstream's restarted
   its rate counters on every mixer call and rounded the rate ratio to a fraction with a

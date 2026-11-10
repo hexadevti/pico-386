@@ -33,6 +33,8 @@
 #define PSRAM_CS_MAX_US 8                // tCEM
 #define PSRAM_PAGE     1024u             // the chip's wrap-around page
 
+extern uint8_t g_psramMinDiv;            // system_rp2350.cpp, from rp2350.ini
+
 static uint     s_sm = 0, s_off = 0;
 static int      s_dmaTx = -1, s_dmaRx = -1;
 static size_t   s_size = 0;              // 0 until the chip answered and passed the test
@@ -263,11 +265,13 @@ void rp2350PsramInit() {
   hw_set_bits(&PSRAM_PIO->input_sync_bypass, 1u << PSRAM_MISO_PIN);
   dmaInit();
 
-  // Fastest first: SCK = clk_sys / (2 * div).
+  // Fastest first: SCK = clk_sys / (2 * div). rp2350.ini's psram_div skips the faster ones
+  // (g_psramMinDiv, system_rp2350.cpp), for boards where the fastest passes here but fails later.
   static const float kDiv[] = { 2.0f, 3.0f, 4.0f, 6.0f, 10.0f };
   static const uint  kWait[] = { 8, 9, 7 };
   for (float div : kDiv)
     for (uint wc : kWait) {
+      if (div < g_psramMinDiv && div < kDiv[sizeof kDiv / sizeof kDiv[0] - 1]) continue;
       smStart(div, wc);
       s_size = PSRAM_BYTES;                 // selfTest goes through the raw paths
       if (selfTest()) {

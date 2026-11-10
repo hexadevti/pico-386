@@ -264,6 +264,21 @@ relative to the card root. Our keys are under `[pico]`:
 - `mouse_left`, `mouse_right`: the button keys (`alt`, `rshift`, `lshift`, `ctrl`, `space`,
   `enter`, `tab`, `bs`, `z`, `x` or `none`)
 
+### If the Pico 2 freezes
+
+The RP2350 build runs the chip at 300 MHz, twice its rated clock, on its default core voltage.
+Most Pico 2 boards cope, but some RP2350 boards freeze at random within seconds. `pico-386/rp2350.ini`
+(read at power-on, ignored by the P4) has three settings, all commented out. Uncomment one at a time
+by removing the `;`:
+
+- `vreg = 1.20`: a little more core voltage (1.10-1.30), keeps the speed
+- `mhz = 250`: a lower clock (100-300), slower but steadier
+- `psram_div = 3`: a slower clock for the RAM chip (2-10)
+
+The serial log on the USB-C port (115200 baud) shows what was applied (`rp2350.ini: ...`) and
+the clock and voltage in use. Also make sure the keyboard runs ClockworkPi's official firmware
+(1.7). Custom keyboard firmware has caused freezes.
+
 ## Making a disk image
 
 A FreeDOS hard disk, all on the PicoCalc:

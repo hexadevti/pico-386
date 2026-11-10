@@ -18,6 +18,7 @@ sdcard/pico-386/*
 !sdcard/pico-386/m13.ini
 !sdcard/pico-386/beep.ini
 !sdcard/pico-386/cdboot.ini
+!sdcard/pico-386/rp2350.ini
 
 .claude/
 sdcard/pico-386/disks/freedos-hdd-128mb/
