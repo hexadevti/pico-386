@@ -184,9 +184,9 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
   MenuResult result = MenuResult::Resume;
   enum Kind : uint8_t { K_RESUME, K_RESET, K_SAVE, K_LOAD, K_CORE, K_SETTING, K_QUIT };
   for (;;) {
-    ui::Item items[24];
-    Kind kind[24];
-    int arg[24];
+    ui::Item items[28];
+    Kind kind[28];
+    int arg[28];
     int n = 0;
     items[n] = { "Resume", nullptr, ui::ICON_PLAY }; kind[n++] = K_RESUME;
     items[n] = { "Reset", nullptr, ui::ICON_RESET }; kind[n++] = K_RESET;
@@ -195,8 +195,8 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
       items[n] = { "Load state", nullptr, ui::ICON_LOAD }; kind[n++] = K_LOAD;
     }
     if (core.menuItems) {
-      CoreMenuItem ci[12];
-      const int m = core.menuItems(ci, 12);
+      CoreMenuItem ci[16];
+      const int m = core.menuItems(ci, 16);
       for (int i = 0; i < m; i++) {
         items[n] = { ci[i].label, ci[i].value, ci[i].icon ? ci[i].icon : (uint8_t)ui::ICON_PAD, nullptr, -1,
                      ci[i].adjust };

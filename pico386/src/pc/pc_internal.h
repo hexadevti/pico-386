@@ -20,10 +20,14 @@ const char *pckbd_mouse_button(int button);          // the .ini name
 const char *pckbd_mouse_button_label(int button);    // "Right Shift"
 void pckbd_next_mouse_button(int button, int dir);   // dir -1 / +1 through the choices
 void pckbd_ctrl_alt_del();
-// The STM32 sends Shift+Up/Down as PgUp/PgDn. On, they reach the guest as Shift+Up/Down (games
-// such as Prince of Persia); off, as PgUp/PgDn (the only way to type those on the PicoCalc).
-void pckbd_set_shift_arrows(bool on);
-bool pckbd_shift_arrows();
+// The STM32 sends no Shift+arrows (Shift+Up/Down arrive as PgUp/PgDn). The "shift key" is another
+// key that is then the guest's Left Shift, so arrows can be pressed with it; with one set, PgUp/PgDn
+// with a real Shift held are Shift+Up/Down too. None: PgUp/PgDn stay themselves.
+bool pckbd_shift_key_ok(uint8_t code);               // not Esc, Caps Lock, an arrow or PgUp/PgDn
+void pckbd_set_shift_key(uint8_t code);              // a PicoCalc code; one not ok = none
+void pckbd_set_shift_key_name(const char *iniName);  // "ctrl", "z", ... ("" = none)
+const char *pckbd_shift_key_name();                  // the .ini name, "" = none
+const char *pckbd_shift_key_label();                 // "Ctrl", "Z", "Off"
 
 // ---- pc_video.cpp: the guest screen on the 320x320 panel --------------------------------------
 void pcvid_reset();                          // forget caches: the next frame is drawn in full

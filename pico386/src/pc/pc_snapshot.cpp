@@ -1,6 +1,6 @@
 // pc_snapshot.cpp -- snapshots of a running PC, per startup, to start from later where it stopped.
 //
-// A snapshot is /pico-386/snapshots/<startup>/sN.snp: a header with its name, the startup's .ini
+// A snapshot is /pico-386/snapshots/<hardware>/<startup>/sN.snp: a header with its name, the startup's .ini
 // as it was (so the same drives come back) and the generation of each disk it had open, then the
 // machine itself (t386_save_state: the devices, guest RAM, VRAM). Restoring writes that .ini back
 // over the startup's (keeping the startup's name), starts the machine and loads the state into it.
@@ -15,6 +15,12 @@
 // Beside each sN.snp is sN.bmp, the guest's screen when it was taken (pcvid_thumb: 80x60, RGB565
 // top-down, so a PC opens it too). The list shows it at the left of the name. A snapshot without
 // one (taken in a blank mode, or before 2026-11-06) gets an empty frame.
+//
+// <hardware> (kHardware) keeps each build's snapshots apart (2026-11-08, the user asked): the state
+// holds the guest RAM and VRAM as that build sized them, and the RP2350 (4 MB, paged) cannot load
+// what the P4 saved (24 MB), so one card used in both listed snapshots that could only fail.
+// Snapshots taken before that sit in /pico-386/snapshots/<startup>/ and are no longer listed;
+// moving the folder under the right <hardware> brings them back.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +29,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include "../../board.h"
 #include "pc_internal.h"
 #include "pc_glue.h"
 #include "pc_folder.h"
@@ -38,11 +45,21 @@ std::string s_pending;                 // the snapshot pc_loadRom restores next
 
 std::string genFile() { return sdPath("pico-386/snapshots/disks.gen"); }
 
+#if defined(BOARD_PICOCALC_P4)
+constexpr char kHardware[] = "p4";
+#elif defined(BOARD_PICOCALC_RP2350)
+constexpr char kHardware[] = "rp2350";
+#elif defined(PICO386_LOWMEM)
+constexpr char kHardware[] = "desktop-lowmem";   // the RP2350's memory model, on the desktop
+#else
+constexpr char kHardware[] = "desktop";
+#endif
+
 std::string snapDir(const std::string &ini) {
   std::string base = ini.substr(ini.find_last_of('/') + 1);
   const size_t dot = base.find_last_of('.');
   if (dot != std::string::npos) base.resize(dot);
-  return sdPath(("pico-386/snapshots/" + base).c_str());
+  return sdPath(("pico-386/snapshots/" + std::string(kHardware) + "/" + base).c_str());
 }
 
 // The card's paths are written relative to its root, as in the .ini files.
@@ -319,7 +336,7 @@ bool pcsnap_write_ini(const std::string &snap, const std::string &ini) {
   if (!ok || h.ini.empty()) return false;
   // The startup keeps its name (renamed since) and its keyboard settings, which belong to the
   // player, not to the machine: a snapshot older than a change would undo it at every load.
-  static const char *const kKeep[] = { "name", "mouse", "mouse_left", "mouse_right", "shift_arrows" };
+  static const char *const kKeep[] = { "name", "mouse", "mouse_left", "mouse_right", "shift_key" };
   std::string kept[sizeof kKeep / sizeof kKeep[0]];
   for (size_t i = 0; i < sizeof kKeep / sizeof kKeep[0]; i++) kept[i] = pcini_get_in(ini, "pico", kKeep[i]);
   FILE *o = fopen(ini.c_str(), "wb");

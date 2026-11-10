@@ -143,7 +143,12 @@ bool pc_loadRom(const char *ini) {
   s_mouseSaved = atoi(pcini_get_in(s_ini, "pico", "mouse").c_str());
   pckbd_set_mouse_mode(s_mouseSaved);
   s_mouseSaved = pckbd_mouse_mode();
-  pckbd_set_shift_arrows(atoi(pcini_get_in(s_ini, "pico", "shift_arrows").c_str()) != 0);
+  {
+    // shift_key replaced shift_arrows and ctrl_arrows (2026-11-08): ctrl_arrows = 1 becomes Ctrl
+    std::string k = pcini_get_in(s_ini, "pico", "shift_key");
+    if (k.empty() && atoi(pcini_get_in(s_ini, "pico", "ctrl_arrows").c_str())) k = "ctrl";
+    pckbd_set_shift_key_name(k.c_str());
+  }
   s_noteUntil = 0;
   pcvid_reset();
   hal_audio_start(kRate);
@@ -359,8 +364,8 @@ void pc_shutdown() {
 void pc_keyEvent(uint8_t code, uint8_t state) { pckbd_event(code, state); }
 
 // The in-game rows: the drives, the snapshots, then the keyboard mouse, its two button keys, what
-// Shift+Up/Down send, and Ctrl+Alt+Del.
-enum { ROW_SNAP_SAVE, ROW_SNAP_LOAD, ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_SHIFT_ARROWS, ROW_CAD, ROW_EXTRA };
+// the key that is Shift for the arrows, and Ctrl+Alt+Del.
+enum { ROW_SNAP_SAVE, ROW_SNAP_LOAD, ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_SHIFT_KEY, ROW_CAD, ROW_EXTRA };
 
 int pc_menuItems(CoreMenuItem *out, int max) {
   if (max < DRIVE_COUNT + ROW_EXTRA) return 0;
@@ -373,7 +378,7 @@ int pc_menuItems(CoreMenuItem *out, int max) {
   out[DRIVE_COUNT + ROW_MOUSE] = { "Arrows (both Shifts)", pckbd_mouse_mode_name(pckbd_mouse_mode()), true };
   out[DRIVE_COUNT + ROW_LEFT] = { "Mouse left button", pckbd_mouse_button_label(0), true };
   out[DRIVE_COUNT + ROW_RIGHT] = { "Mouse right button", pckbd_mouse_button_label(1), true };
-  out[DRIVE_COUNT + ROW_SHIFT_ARROWS] = { "Shift+Up/Down", pckbd_shift_arrows() ? "Shift+arrow" : "PgUp/PgDn", true };
+  out[DRIVE_COUNT + ROW_SHIFT_KEY] = { "Shift for arrows", pckbd_shift_key_label(), true };
   out[DRIVE_COUNT + ROW_CAD] = { "Ctrl+Alt+Del", nullptr, false };
   return DRIVE_COUNT + ROW_EXTRA;
 }
@@ -459,10 +464,25 @@ bool pc_menuAction(int i, uint8_t key) {
       pcini_set_in(s_ini, "pico", b ? "mouse_right" : "mouse_left", pckbd_mouse_button(b));
       return false;
     }
-    case ROW_SHIFT_ARROWS:
-      pckbd_set_shift_arrows(!pckbd_shift_arrows());
-      pcini_set_in(s_ini, "pico", "shift_arrows", pckbd_shift_arrows() ? "1" : "0");
+    case ROW_SHIFT_KEY: {
+      // Waits for the key that will be Shift. Esc turns it off; keys that cannot be one (arrows,
+      // PgUp/PgDn, Caps Lock) are ignored. Read straight from the keyboard, so PgUp does not
+      // reboot to the loader as ui::waitKey's would.
+      ui::message("Shift for arrows", "Press the key to use as Shift (Esc: off)");
+      uint8_t k = 0;
+      for (;;) {
+        KeyEvent ev;
+        if (!hal_key_poll(&ev)) { hal_delay(10); continue; }
+        if (ev.state != KEYSTATE_PRESSED) continue;
+        if (ev.code == KEY_ESC || pckbd_shift_key_ok(ev.code)) { k = ev.code; break; }
+      }
+      pckbd_set_shift_key(k == KEY_ESC ? 0 : k);
+      pcini_set_in(s_ini, "pico", "shift_key", pckbd_shift_key_name());
+      for (const char *old : { "shift_arrows", "ctrl_arrows" })   // the options it replaced
+        if (!pcini_get_in(s_ini, "pico", old).empty()) pcini_set_in(s_ini, "pico", old, "");
+      ui::message("Shift for arrows", pckbd_shift_key_label(), 700);
       return false;
+    }
     case ROW_CAD:
       if (key != KEY_ENTER) return false;
       pckbd_ctrl_alt_del();

@@ -47,7 +47,7 @@ def open_port(name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('bin', nargs='?', default=os.path.expanduser('~/.pico386-p4-build/pico386.ino.bin'))
+    ap.add_argument('bin', nargs='?', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build-p4', 'pico386.ino.bin'))
     ap.add_argument('--ip', default='192.168.0.100')
     ap.add_argument('--port', default='COM9')
     ap.add_argument('--path', default='/pico-386/pico386-p4.bin')

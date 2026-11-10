@@ -104,7 +104,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       (console UART, open it with DTR and RTS both high before `open()`, or it resets), with
       esp32loader on Wi-Fi at 192.168.0.100. Never flash it over serial.
       - `python -I tools/deploy-p4.py` sends `@uf2menu`, waits for the loader's web server (F4,
-        ESC O S, if Wi-Fi autostart is off), uploads `~/.pico386-p4-build/pico386.ino.bin` to
+        ESC O S, if Wi-Fi autostart is off), uploads `build-p4/pico386.ino.bin` to
         `/pico-386/pico386-p4.bin` (keeping `pico386-p4.prev.bin`) and flashes it. About 15 s.
       - `python -I tools/remote.py --p4 [--out prefix] keys "..."` and `remote.py --p4 shot x.png`
         work as on the RP2350 (options before the command). The commands are parsed in
@@ -289,16 +289,22 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     that is a button is held (or any Shift, in Mouse mode), `shiftedArrowOf` turns PgUp/PgDn back
     into pointer arrows, so vertical drags work on the device. Sideways drags with a Shift button
     can't work. The desktop never sends them that way.
-  - Shift+Up/Down (2026-11-06): the in-game row "Shift+Up/Down" (`[pico] shift_arrows`) sends the
-    STM32's PgUp/PgDn as Shift+Up/Down while a Shift is held. Prince of Persia picks things up with
-    Shift+Down. Off by default, since PgUp/PgDn have no other key. Tested on the desktop with
-    `shift+pgdn` in Prince. The device's log showed Shift held, then 0xD7 (PgDn) for Down, in
-    Arrows mode. Restoring a snapshot keeps the startup's `name`, `mouse`, `mouse_left`,
-    `mouse_right` and `shift_arrows` (`pcsnap_write_ini`'s `kKeep`). Before, an older snapshot's
-    ini turned the option off again at every load.
-    It still failed on the device until the i8042 fix for stuck mouse data (THIRD_PARTY.md): Prince
+  - Shift with the arrows (2026-11-08, the user asked): the STM32 sends Shift+Up/Down as PgUp/PgDn
+    (0xD6/0xD7) and nothing at all for Shift+Left/Right (seen on the device's log). Prince of
+    Persia picks things up with Shift+Down and steps carefully with Shift+Left/Right. The in-game
+    row "Shift for arrows" (`[pico] shift_key`, an ini name such as `ctrl` or a character) waits
+    for a key (Esc = off; arrows, PgUp/PgDn and Caps Lock are refused). That key is then the
+    guest's Left Shift and nothing else (`s_shiftKey`, filed in `s_down` in lower case), so arrows
+    pressed with it are Shift+arrows. With a key set, PgUp/PgDn pressed with a real Shift also go
+    as Shift+Up/Down. It replaced two options, `shift_arrows` (PgUp/PgDn) and `ctrl_arrows`; a
+    startup with `ctrl_arrows = 1` and no `shift_key` gets Ctrl. Restoring a snapshot keeps the
+    startup's `name`, `mouse`, `mouse_left`, `mouse_right` and `shift_key` (`pcsnap_write_ini`'s
+    `kKeep`). Tested on the desktop with `popc.ini` (Ctrl+Right steps about 25 px). The
+    `ctrl_arrows` version worked on the RP2350; the merged option is not yet tested on a device.
+    It failed on the device until the i8042 fix for stuck mouse data (THIRD_PARTY.md): Prince
     reads Shift from the BIOS's flags, and SeaBIOS dropped every key ("found mouse data") after
     Mouse mode had queued packets that Prince never reads. Works on the device (2026-11-06).
+    The in-game menu takes up to 16 core rows (`app.cpp`).
     Repro on the desktop: `popfd.ini` (FreeDOS with CTMOUSE, Prince on A:), Ctrl+Tab, arrows,
     back to Arrows, then count "mouse data" in the log.
   - Caps Lock (2026-10-19) is kept in `s_caps` and never sent to the guest. The STM32 applies
@@ -410,7 +416,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
   - In-game Save/Load snapshot rows, and a Snapshots row on the startup's drives screen
     (`MACHINE_SNAPSHOT`). The save asks for a name with an empty field (the user wanted names
     that say what the snapshot is, not "Snapshot N").
-  - File: `/pico-386/snapshots/<ini base>/sN.snp` = "P386SNP1", the name, the startup's .ini text,
+  - File: `/pico-386/snapshots/<hardware>/<ini base>/sN.snp` = "P386SNP1", the name, the startup's .ini text,
     the disks with their generations, then `t386_save_state` (`snap_run` in pc_glue.c: "T386", RAM
     and VRAM sizes, the guest clock, `pc_snap` (THIRD_PARTY.md), RAM in 1 KB pages, VRAM).
   - Restoring writes the snapshot's ini over the startup's (keeping `[pico] name`), starts the
@@ -438,6 +444,10 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     (`pcsnap_ram`, `t386_limit_mem`) and otherwise says "needs N MB". A failed `snap_check`
     logs its offset and both values. Works on the device (2026-11-07): prince 1, prince 2 and p3
     loaded one after another in-game, each at 24 MB.
+  - `<hardware>` (2026-11-08, the user asked) is `p4`, `rp2350`, `desktop` or `desktop-lowmem`
+    (`kHardware`), so each build lists only snapshots it can load. Older snapshots in
+    `snapshots/<ini base>/` are no longer listed; moving the folder under the right hardware brings
+    them back. `disks.gen` stays shared. Tested on the desktop (save and list); works on the RP2350 (2026-11-08).
   - Tested on the desktop, `build-lowmem` and the device (2026-11-03): save at the FreeDOS prompt,
     `cls`, Load snapshot brought the boot screen back in about 1 s, and `ver` worked.
 - **`core.h`:** the EmuCore gained `keyEvent`, `menuItems`/`menuAction` (core rows in the in-game
@@ -454,14 +464,14 @@ export ARDUINO_DIRECTORIES_DATA=~/.emu6502-p4/data ARDUINO_DIRECTORIES_USER=~/.e
 arduino-cli compile --fqbn esp32:esp32:esp32p4:PSRAM=enabled,FlashSize=16M,ChipVariant=postv3,PartitionScheme=huge_app,DebugLevel=error \
   --build-property compiler.optimization_flags=-O2 \
   --build-property compiler.cpp.extra_flags=-DBOARD_PICOCALC_P4 \
-  --build-path ~/.pico386-p4-build pico386
+  --build-path build-p4 pico386
 ```
 
 - The core is Arduino-ESP32 **3.3.10** in `~/.emu6502-p4` (emu8's version). It was missing on
   2026-11-07 and was installed again with `arduino-cli core install esp32:esp32@3.3.10
   --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json`.
-  That day's build went to `build-p4` in the repo (the user asked; gitignored), and
-  `tools/deploy-p4.py build-p4/pico386.ino.bin` deploys it.
+- Builds go to `build-p4` and `build-rp2350` in the repo (gitignored), never to the user folder
+  (the user asked, 2026-11-08). The tasks, `package.ps1`, `deploy-p4.py` and `remote.py` use them.
 - Arduino copies only known source extensions into the build tree, so vendored `.inc`/`.def` files
   must be renamed `.h`.
 - `compiler.cpp.extra_flags` doesn't reach the C files; `tiny386_port.h` must not depend on it.

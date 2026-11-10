@@ -6,8 +6,8 @@
   //   * "desktop: build" / "desktop: run"   -> SDL2 debug build (CMake, MSYS2 MinGW32)
   //
   // The P4 tasks use the same isolated arduino-cli data directory as emu8 (~/.emu6502-p4), which
-  // holds Arduino-ESP32 3.x for the P4. Build output goes to ~/.pico386-p4-build (outside the repo:
-  // the deep core tree would overrun the Windows 260-character path limit).
+  // holds Arduino-ESP32 3.x for the P4. Build output goes to build-p4 and build-rp2350 in the repo (the user asked,
+  // 2026-11-08; both gitignored), not to the user folder.
   "version": "2.0.0",
   "tasks": [
     {
@@ -23,7 +23,7 @@
         "--build-property",
         "compiler.cpp.extra_flags=-DBOARD_PICOCALC_P4",
         "--build-path",
-        "${userHome}/.pico386-p4-build",
+        "${workspaceFolder}/build-p4",
         "${workspaceFolder}/pico386"
       ],
       "options": {
@@ -47,7 +47,7 @@
         "--fqbn",
         "esp32:esp32:esp32p4:PSRAM=enabled,FlashSize=16M,ChipVariant=postv3,PartitionScheme=huge_app,DebugLevel=error",
         "--input-dir",
-        "${userHome}/.pico386-p4-build",
+        "${workspaceFolder}/build-p4",
         "${workspaceFolder}/pico386"
       ],
       "options": {
@@ -83,8 +83,6 @@
         "--build-property",
         "compiler.c.extra_flags=-DBOARD_PICOCALC_RP2350 -I{build.source.path}/src/hal/picocalc_rp2350/include",
         "--build-path",
-        "${userHome}/.pico386-rp2350-build",
-        "--output-dir",
         "${workspaceFolder}/build-rp2350",
         "${workspaceFolder}/pico386"
       ],

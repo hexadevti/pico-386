@@ -13,9 +13,12 @@
 // Ctrl+Alt+Del also comes from Ctrl+Alt+Backspace: on the PicoCalc, Del with Ctrl and Alt held
 // did not reach the guest (2026-10-19), and Backspace sits next to it.
 //
-// The STM32 sends Shift+Up/Down as PgUp/PgDn. With [pico] shift_arrows on (the in-game menu's
-// "Shift+Up/Down"), those arrive as Shift+Up/Down while a Shift is held: Prince of Persia picks
-// things up with Shift and Down. Off, they stay PgUp/PgDn, which the PicoCalc has no other key for.
+// Shift with the arrows: the STM32 sends Shift+Up/Down as PgUp/PgDn and Shift+Left/Right not at
+// all (seen on the device's log, 2026-11-08), and Prince of Persia needs all four (pick up, careful
+// step). The in-game menu's "Shift for arrows" ([pico] shift_key) picks another key, which is then
+// a Left Shift for the guest and nothing else; the STM32 leaves arrows pressed with it alone. With
+// a key picked, PgUp/PgDn pressed with a real Shift also reach the guest as Shift+Up/Down. Off,
+// they stay PgUp/PgDn, which the PicoCalc has no other key for.
 //
 // The keyboard sends one press and one release per key, so the PC typematic repeat (500 ms, then
 // 30/s) is made here, for the last key pressed, as a real keyboard does it.
@@ -121,7 +124,7 @@ bool s_shiftL, s_shiftR;            // the Shift keys physically held, buttons o
 uint8_t s_repeatKey;                // PicoCalc code of the key that repeats
 uint32_t s_repeatAt;
 bool s_needRepeatTime;
-bool s_shiftArrows;                 // PgUp/PgDn with a Shift held are Shift+Up/Down
+uint8_t s_shiftKey;                 // the key that is a Shift for the arrows (lower case; 0 = none)
 
 int s_mouseMode;                    // MOUSE_*
 uint8_t s_button[2] = { KEY_ALT, KEY_SHIFT_R };   // the left and right button keys (0 = none)
@@ -153,6 +156,11 @@ void send(bool down, uint8_t code) {
   if (code) t386_key(down ? 1 : 0, code);
 }
 
+uint8_t lower(uint8_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+// A Shift the user holds: a real one or the picked key (filed under s_shiftKey).
+bool userShift() { return s_down[KEY_SHIFT_L] || s_down[KEY_SHIFT_R] || (s_shiftKey && s_down[s_shiftKey]); }
+
 void setGuestShift(bool want) {
   const bool have = s_lshift || s_rshift;
   if (want == have) return;
@@ -169,7 +177,7 @@ void setGuestShift(bool want) {
 // Back to the Shift the user really holds (the PicoCalc keys, not our temporary presses). A Shift
 // that is a mouse button never reaches s_down.
 void restoreShift() {
-  const bool l = s_down[KEY_SHIFT_L] != 0, r = s_down[KEY_SHIFT_R] != 0;
+  const bool l = s_down[KEY_SHIFT_L] || (s_shiftKey && s_down[s_shiftKey]), r = s_down[KEY_SHIFT_R] != 0;
   if (s_lshift != l) { send(l, K_LSHIFT); s_lshift = l; }
   if (s_rshift != r) { send(r, K_RSHIFT); s_rshift = r; }
 }
@@ -180,8 +188,6 @@ void pressChar(const Mapped &m) {
   send(true, m.code);
   restoreShift();
 }
-
-uint8_t lower(uint8_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
 
 // Which mouse button code is (0 left, 1 right), or -1. Letters match in either case.
 int buttonOf(uint8_t code) {
@@ -224,7 +230,7 @@ void mouseButtons() {
 Mapped mapKeyCaps(uint8_t code) {
   Mapped m = mapKey(code);
   if (s_caps && ((code >= 'a' && code <= 'z') || (code >= 'A' && code <= 'Z')))
-    m.shift = !(s_down[KEY_SHIFT_L] || s_down[KEY_SHIFT_R]);
+    m.shift = !userShift();
   return m;
 }
 
@@ -275,12 +281,59 @@ void pckbd_next_mouse_button(int button, int dir) {
   s_button[button & 1] = kButtonKeys[i].code;
 }
 
-void pckbd_set_shift_arrows(bool on) {
-  pckbd_reset();
-  s_shiftArrows = on;
+// The keys with a name of their own: name in the .ini, name in the menu, PicoCalc code. Any other
+// printable key is itself in the .ini and in upper case in the menu.
+namespace {
+struct NamedKey { const char *ini, *label; uint8_t code; };
+const NamedKey kNamedKeys[] = {
+  { "ctrl", "Ctrl", KEY_CTRL },      { "alt", "Alt", KEY_ALT },
+  { "lshift", "Left Shift", KEY_SHIFT_L }, { "rshift", "Right Shift", KEY_SHIFT_R },
+  { "sym", "Sym", KEY_SYM },         { "space", "Space", ' ' },
+  { "enter", "Enter", KEY_ENTER },   { "tab", "Tab", KEY_TAB },
+  { "bs", "Backspace", KEY_BACKSPACE }, { "del", "Del", KEY_DEL },
+  { "ins", "Ins", KEY_INSERT },      { "home", "Home", KEY_HOME },
+  { "end", "End", KEY_END },         { "break", "Break", KEY_BREAK },
+  { "f1", "F1", KEY_F1 }, { "f2", "F2", KEY_F2 }, { "f3", "F3", KEY_F3 }, { "f4", "F4", KEY_F4 },
+  { "f5", "F5", KEY_F5 }, { "f6", "F6", KEY_F6 }, { "f7", "F7", KEY_F7 }, { "f8", "F8", KEY_F8 },
+  { "f9", "F9", KEY_F9 }, { "f10", "F10", KEY_F10 },
+};
+} // namespace
+
+bool pckbd_shift_key_ok(uint8_t code) {
+  if (code == KEY_ESC || code == KEY_CAPS || arrowOf(code) >= 0 || code == KEY_PGUP || code == KEY_PGDN) return false;
+  for (const NamedKey &k : kNamedKeys)
+    if (k.code == code) return true;
+  return code > ' ' && code < 127;
 }
 
-bool pckbd_shift_arrows() { return s_shiftArrows; }
+void pckbd_set_shift_key(uint8_t code) {
+  pckbd_reset();
+  s_shiftKey = pckbd_shift_key_ok(code) ? lower(code) : 0;
+}
+
+void pckbd_set_shift_key_name(const char *iniName) {
+  for (const NamedKey &k : kNamedKeys)
+    if (!strcmp(k.ini, iniName)) { pckbd_set_shift_key(k.code); return; }
+  pckbd_set_shift_key(iniName[0] && !iniName[1] ? (uint8_t)iniName[0] : 0);
+}
+
+const char *pckbd_shift_key_name() {
+  static char one[2];
+  if (!s_shiftKey) return "";
+  for (const NamedKey &k : kNamedKeys)
+    if (k.code == s_shiftKey) return k.ini;
+  one[0] = (char)s_shiftKey;
+  return one;
+}
+
+const char *pckbd_shift_key_label() {
+  static char one[2];
+  if (!s_shiftKey) return "Off";
+  for (const NamedKey &k : kNamedKeys)
+    if (k.code == s_shiftKey) return k.label;
+  one[0] = (char)(s_shiftKey >= 'a' && s_shiftKey <= 'z' ? s_shiftKey - 32 : s_shiftKey);
+  return one;
+}
 
 void pckbd_ctrl_alt_del() {
   pckbd_reset();
@@ -344,20 +397,32 @@ void pckbd_event(uint8_t code, uint8_t state) {
     const uint8_t arrowCode = code == KEY_PGUP || code == KEY_UP ? K_UP : K_DOWN;
     uint8_t c = code;
     if (!s_down[code] && partner && s_down[partner] == arrowCode) c = partner;
+    if (s_shiftKey && lower(c) == s_shiftKey) c = s_shiftKey;   // it may come back in the other case
     if (s_down[c]) {
       send(false, s_down[c]);
       if (c == KEY_SHIFT_L) s_lshift = false;
       if (c == KEY_SHIFT_R) s_rshift = false;
+      const bool wasShiftKey = s_shiftKey && c == s_shiftKey;
       s_down[c] = 0;
+      if (wasShiftKey) {                       // a real Left Shift still held goes down again
+        s_lshift = false;
+        restoreShift();
+      }
     }
     if (c == s_repeatKey) s_repeatKey = 0;
     return;
   }
 
   if (code == KEY_CAPS) { s_caps = !s_caps; return; }
+  if (s_shiftKey && lower(code) == s_shiftKey) {   // the picked key: a Left Shift, no repeat
+    if (s_down[s_shiftKey]) return;
+    s_down[s_shiftKey] = K_LSHIFT;
+    if (!s_lshift) { send(true, K_LSHIFT); s_lshift = true; }
+    return;
+  }
   if (s_down[code]) return;                    // already down
   Mapped m = mapKeyCaps(code);
-  if (s_shiftArrows && (code == KEY_PGUP || code == KEY_PGDN) && (s_down[KEY_SHIFT_L] || s_down[KEY_SHIFT_R]))
+  if (s_shiftKey && (code == KEY_PGUP || code == KEY_PGDN) && (s_down[KEY_SHIFT_L] || s_down[KEY_SHIFT_R]))
     m = { code == KEY_PGUP ? K_UP : K_DOWN, false, true };   // the guest already holds the Shift
   if (s_down[KEY_CTRL] && s_down[KEY_ALT]) {
     hal_log("kbd: Ctrl+Alt+0x%02X", code);       // what the PicoCalc sends with both held

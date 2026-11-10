@@ -48,12 +48,12 @@ if (-not $SkipBuild) {
   Invoke-Compile @('--fqbn', $RP_FQBN,
     '--build-property', "compiler.cpp.extra_flags=$rpFlags",
     '--build-property', "compiler.c.extra_flags=$rpFlags",
-    '--build-path', "$HOME\.pico386-rp2350-build", '--output-dir', $rpOut)
+    '--build-path', (Join-Path $repo 'build-rp2350'), '--output-dir', $rpOut)
   Write-Host "== ESP32-P4"
   Invoke-Compile @('--fqbn', $P4_FQBN,
     '--build-property', 'compiler.optimization_flags=-O2',
     '--build-property', 'compiler.cpp.extra_flags=-DBOARD_PICOCALC_P4',
-    '--build-path', "$HOME\.pico386-p4-build", '--output-dir', $p4Out) `
+    '--build-path', (Join-Path $repo 'build-p4'), '--output-dir', $p4Out) `
     @{ ARDUINO_DIRECTORIES_DATA = "$HOME\.emu6502-p4\data"; ARDUINO_DIRECTORIES_USER = "$HOME\.emu6502-p4\user" }
 }
 

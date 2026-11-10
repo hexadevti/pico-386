@@ -135,7 +135,7 @@ def main():
     ap.add_argument('--p4', action='store_true')
     ap.add_argument('--out', default='sdcard/rshot')
     ap.add_argument('--hz', type=int, default=2000)
-    ap.add_argument('--elf', default=os.path.expanduser('~/.pico386-p4-build/pico386.ino.elf'))
+    ap.add_argument('--elf', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build-p4', 'pico386.ino.elf'))
     a = ap.parse_args()
     port = a.port or ('COM9' if a.p4 else 'COM6')
     r = Remote(port, a.arg if a.cmd == 'shot' and a.arg else a.out, a.p4)
