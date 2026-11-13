@@ -10,6 +10,8 @@ void i8259_ioport_write(PicState2 *s, uint32_t addr, uint32_t val);
 int i8259_read_irq(PicState2 *s);
 void i8259_set_irq(PicState2 *s, int irq, int level);
 int i8259_irq_pending(PicState2 *s, int irq);  /* pico-386 */
+int i8259_irq_in_service(PicState2 *s, int irq);  /* pico-386 */
+void i8259_debug_info(PicState2 *s, uint8_t r[6]);  /* pico-386 */
 
 #ifdef TINY386_PICO
 struct SnapIO;

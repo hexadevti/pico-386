@@ -29,6 +29,7 @@
 // mouse). In Mouse and Both, the two button keys (Alt and Right Shift unless the startup picks
 // others) are the mouse buttons and nothing else.
 #include <string.h>
+#include <algorithm>
 #include "pc_internal.h"
 #include "pc_glue.h"
 #include "../hal/hal.h"
@@ -133,6 +134,13 @@ bool s_arrow[4];                    // the pointer's arrows held: left, right, u
 bool s_arrowShifted[4];             // ...pressed as their Shift form (PgUp etc.)
 int s_mouseButtons;
 uint32_t s_mouseHeldSince;
+uint32_t s_mouseSentAt;             // t386_instructions() at the last packet
+uint32_t s_mouseInstr = 8500;       // guest instructions between packets (see pckbd_tick)
+#if PICO386_LOWMEM
+int s_mouseStep = 4;                // the most a packet moves, so a slow guest's pointer glides
+#else
+int s_mouseStep = 8;
+#endif
 
 // The keys a mouse button can be: name in the .ini, name in the menu, PicoCalc code.
 struct ButtonKey { const char *ini, *label; uint8_t code; };
@@ -444,6 +452,12 @@ void pckbd_event(uint8_t code, uint8_t state) {
   }
 }
 
+// Tuning from the RP2350's serial (@mpace): instructions between packets and the largest step.
+void pckbd_mouse_pace(uint32_t instr, int step) {
+  s_mouseInstr = instr;
+  s_mouseStep = step > 0 ? step : 1;
+}
+
 void pckbd_tick(uint32_t nowMs) {
   if (s_repeatKey && s_down[s_repeatKey]) {
     if (s_needRepeatTime) {
@@ -461,10 +475,22 @@ void pckbd_tick(uint32_t nowMs) {
     const int dx = (s_arrow[1] ? 1 : 0) - (s_arrow[0] ? 1 : 0);
     const int dy = (s_arrow[3] ? 1 : 0) - (s_arrow[2] ? 1 : 0);
     if (dx || dy) {
-      // 1 px a frame at first, up to 8 after about a second
+      // 1 px a packet at first, up to s_mouseStep after about a second
       const uint32_t held = nowMs - s_mouseHeldSince;
-      const int speed = held < 150 ? 1 : held > 1000 ? 8 : 1 + (int)(held - 150) * 7 / 850;
-      t386_mouse(dx * speed, dy * speed, s_mouseButtons);
+      const int speed = std::min(s_mouseStep,
+                                 held < 150 ? 1 : held > 1000 ? 8 : 1 + (int)(held - 150) * 7 / 850);
+      // Windows 3.1 on the RP2350 (about 0.075 MIPS, paging) reads each packet at once but takes
+      // a long time to act on it, so a packet a frame kept the pointer moving for seconds after
+      // the arrow was let go. A packet goes only once the last was read and the guest has run
+      // s_mouseInstr instructions since (every frame on a fast guest). Movement is never added up
+      // while it waits: big steps made the pointer jump (Windows accelerates them up to 4x), so a
+      // slow guest gets a slower pointer that still glides. On the device 8.5k instructions gave
+      // about 20 packets a second with no drift after release; 7.5k drifted 50 px, 5k 80 px.
+      const uint32_t ins = t386_instructions();
+      if (!t386_mouse_busy() && ins - s_mouseSentAt >= s_mouseInstr) {
+        t386_mouse(dx * speed, dy * speed, s_mouseButtons);
+        s_mouseSentAt = ins;
+      }
     }
   }
 }

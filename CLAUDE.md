@@ -65,6 +65,13 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     a hang at "Startup Sound". `SET BLASTER=A220 I5 D1 H5 P330 T6` is now in
     `freedos-hdd-32mb.img`'s FDAUTO.BAT (it had no T6, which also worked) and in the AUTOEXEC.BAT of
     the local MS-DOS images and the device's DOSHDD. With it, FastDoom has sound on the desktop and the device.
+  - **SimCity Classic (2026-11-13):** the startup `simcity.ini` ("SimCity") has C: = MS-DOS 5.0
+    (`msdos5-hdd-32mb.img`) and D: = `games/simcity.zip` (`/pico-386/simcity.zip` on the RP2350's
+    card, which has no `games`). DOS-128 left 23 KB too little conventional memory. The game's
+    AIL drivers ignore `BLASTER` and default to IRQ 7, so the digital driver failed its check
+    ("Sound hardware not found") until `CLASSIC.CFG` named the port, IRQ and DMA (lines after each
+    .ADV: 220, 5, 1, *). Runs on the RP2350 with music; the OPL takes about 35% (690 ms of mix
+    per 2 s).
   - VBE modes and Windows
   - writes to a hard-disk image
   - a D: folder disk above 504 MB (FAT16 LBA, type 0Eh), and D: with Windows 95 long names
@@ -131,8 +138,12 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     (1.1M guest instructions a second, no page faults while it runs). See THIRD_PARTY.md.
     - From flash, `cpu_exec1` ran through the 16 KB XIP cache, which core 1 shares.
     - SRAM is full. The 90 KB interpreter fits only because VRAM went from 256 KB to 160 KB
-      (mode 12h needs 150 KB; EGA/VGA games that keep pages above that lose them) and `pm_map`
-      went from pointers to 2-byte frame numbers.
+      (mode 12h needs 150 KB) and `pm_map` went from pointers to 2-byte frame numbers.
+      The other 96 KB (2026-11-13) are in PSRAM below the park area (`pm_vram_hi`, one 256-byte
+      line cached), for planar reads and writes only. Windows 3.0's VGA driver keeps bitmaps there
+      and was garbled without it (Win 3.1's isn't). The screen shows only the first 160 KB, so
+      page flips above 40 KB per plane still show the wrong page. Fixed on `build-lowmem` with
+      `ms5.ini` (MS-DOS 5.0 + Windows 3.0 on `msdos5-hdd-32mb.img`). Works on the device.
     - Ideas not tried yet: hot non-i386 code in SRAM (`pc_step`, the PIC/PIT, port I/O).
   - `PICO386_LOWMEM` (board.h): guest RAM lives in the mainboard's 8 MB PSRAM, which hangs off
     a PIO and is not memory-mapped. It is paged through 1 KB SRAM frames (`pc_pagemem.c`).
@@ -300,7 +311,13 @@ started from on 2026-10-18, and **emu16** and **emu8**.
   - It handles typematic repeat and the keyboard mouse.
   - The keyboard mouse has three modes (2026-10-19): `MOUSE_ARROWS`, `MOUSE_ON` (arrows move the
     pointer only) and `MOUSE_BOTH` (pointer and arrow keys). Both Shifts held together, or Ctrl+Tab,
-    cycles them; the first Shift has already reached the guest by then. The two button keys come
+    cycles them; the first Shift has already reached the guest by then.
+    Pointer packets are paced by guest instructions (2026-11-13, `s_mouseInstr`, THIRD_PARTY.md):
+    Windows 3.1 on the RP2350 runs at about 0.075 MIPS (7000 page faults/2 s) and drifted on for
+    seconds after an arrow was let go. Works on the device: it stops on release. Then it jumped
+    (40k instructions, movement added up); now 8.5k and at most 4 px a packet, never added up (7.5k drifts).
+    `python -I tools/remote.py mpace "8500 4"` retunes it live on the RP2350. The RP2350
+    heartbeat logs `diag: mouse` (bytes unread, packets sent). The two button keys come
     from `kButtonKeys` (`[pico] mouse_left`/`mouse_right`, default alt/rshift); outside ARROWS
     they are only buttons. `pc_core` saves the mode and keys to the ini and shows a 2 s note
     in the bottom strip (`showNote`). Test with `PC_KEYS=...,shift+rshift,...`.
@@ -325,6 +342,11 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     reads Shift from the BIOS's flags, and SeaBIOS dropped every key ("found mouse data") after
     Mouse mode had queued packets that Prince never reads. Works on the device (2026-11-06).
     The in-game menu takes up to 16 core rows (`app.cpp`).
+  - Dead keyboard after Ctrl+Alt+Del (2026-11-13, RP2350, DOS-128 "win 3.1"): the i8042's 1 ms
+    hold made SeaBIOS's flush read the same stale byte 16 times, so it never set the keyboard up.
+    The hold now starts only while IRQ 1 is in service (THIRD_PARTY.md). Works on the device. The
+    RP2350 heartbeat's `diag: kbd` line shows the i8042 queues, mode and the PICs; mode 43h is
+    healthy, 12h or 73h at a prompt means SeaBIOS gave up on the keyboard.
     Repro on the desktop: `popfd.ini` (FreeDOS with CTMOUSE, Prince on A:), Ctrl+Tab, arrows,
     back to Arrows, then count "mouse data" in the log.
   - Caps Lock (2026-10-19) is kept in `s_caps` and never sent to the guest. The STM32 applies
@@ -530,11 +552,13 @@ the repo root, because `PC_INI` paths are relative to the cwd.
 - `PC_KEYS=` runs a comma-separated script:
   - key names (`up`, `enter`, `esc`, `f5`, `pgup`, `ctrl`, `alt`, ...), single characters, and
     chords like `ctrl+esc`
-  - `wNNN` waits NNN ms
+  - `wNNN` waits NNN ms; `right:1500` holds a key for 1.5 s (the keyboard mouse; also via `remote.py`)
   - `shot` saves `sdcard/shotN.bmp`
   - `quit` exits
 - `PC_WAV=file` dumps the mono s16 44.1 kHz audio stream.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
+- `PC_MIPS=0.07 PC_MIPS_AT=100` caps the guest at 0.07 MIPS from 100 s of guest time on (boot
+  fast, then run at the RP2350's Windows speed).
 
 Test data in `sdcard/`. It is gitignored except what may be shared (2026-11-02, the user asked):
 `pico-386/roms/`, `pico-386/disks/` (FreeDOS floppies, `freedos-hdd-32mb.img`, empty

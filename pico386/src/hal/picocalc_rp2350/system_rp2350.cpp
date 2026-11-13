@@ -83,11 +83,14 @@ void hal_reboot_to_loader() {
 // Commands over either serial port, one per line, polled by the keyboard task:
 //   @uf2menu         back to the loader (the deploy tools send it, as on the P4)
 //   @keys <script>   type a PC_KEYS script (keyscript.h); "@keys done" when it has run
+//   @mpace <i> <s>   keyboard mouse: guest instructions between packets, largest step (tuning)
 //   @shot            the screen, as "@S" rows (rp2350Shot); "@shotraw <y>" dumps a row's raw bytes
 // tools/remote.py drives them. The answers go back to the port the command came from.
 void rp2350RemoteKeys(const char *script, Print *port);   // input_rp2350.cpp
 void rp2350Shot(Print &out, int rawRow);                  // display_rp2350.cpp
 void rp2350ShotTest(Print &out, int khz);                 // display_rp2350.cpp
+
+void pckbd_mouse_pace(uint32_t instr, int step);   // pc_keymap.cpp
 
 static void serialCommand(char *line, Print *port) {
   if (!strcmp(line, "@uf2menu")) hal_reboot_to_loader();
@@ -95,6 +98,13 @@ static void serialCommand(char *line, Print *port) {
   else if (!strcmp(line, "@shot")) rp2350Shot(*port, -1);
   else if (!strncmp(line, "@shotraw ", 9)) rp2350Shot(*port, atoi(line + 9));
   else if (!strncmp(line, "@shottest", 9)) rp2350ShotTest(*port, atoi(line + 9));
+  else if (!strncmp(line, "@mpace ", 7)) {
+    unsigned long instr = 0;
+    int step = 0;
+    sscanf(line + 7, "%lu %d", &instr, &step);
+    pckbd_mouse_pace((uint32_t)instr, step);
+    port->printf("@mpace %lu %d\n", instr, step);
+  }
 }
 
 void rp2350CheckSerialCmd() {

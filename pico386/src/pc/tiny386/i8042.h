@@ -15,8 +15,10 @@ void ps2_keyboard_set_translation(void *opaque, int mode);
 void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode);
 void ps2_mouse_event(PS2MouseState *s,
                      int dx, int dy, int dz, int buttons_state);
+int ps2_mouse_queued(PS2MouseState *s);   /* pico-386: bytes the guest has not read */
 
 typedef struct KBDState KBDState;
+void kbd_debug_info(KBDState *s, int *kq, int *mq, unsigned *bits);   /* pico-386 */
 
 uint32_t kbd_read_status(void *opaque, uint32_t addr);
 void kbd_write_command(void *opaque, uint32_t addr, uint32_t val);

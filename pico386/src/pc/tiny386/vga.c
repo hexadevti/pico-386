@@ -2013,6 +2013,11 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
             addr = ((addr & ~1) << 1) | plane;
             if (addr >= s->vga_ram_size) {
+#ifdef PICO386_LOWMEM
+                uint8_t *hi = pm_vram_hi(addr, 1);   /* pico-386: PSRAM */
+                if (hi)
+                    *hi = val;
+#endif
                 return;
             }
             s->vga_ram[addr] = val;
@@ -2099,6 +2104,12 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 //        s->plane_updated |= mask; /* only used to detect font change */
         write_mask = mask16[mask];
         if (addr * sizeof(uint32_t) >= s->vga_ram_size) {
+#ifdef PICO386_LOWMEM
+            /* pico-386: the planes above the SRAM's VRAM live in PSRAM */
+            uint32_t *hi = (uint32_t *)pm_vram_hi(addr * sizeof(uint32_t), 1);
+            if (hi)
+                *hi = (*hi & ~write_mask) | (val & write_mask);
+#endif
             return;
         }
         ((uint32_t *)s->vga_ram)[addr] =
@@ -2150,14 +2161,27 @@ uint8_t vga_mem_read(VGAState *s, uint32_t addr)
         plane = (s->gr[VGA_GFX_PLANE_READ] & 2) | (addr & 1);
         addr = ((addr & ~1) << 1) | plane;
         if (addr >= s->vga_ram_size) { // s->vram_size) {
+#ifdef PICO386_LOWMEM
+            uint8_t *hi = pm_vram_hi(addr, 0);       /* pico-386: PSRAM */
+            return hi ? *hi : 0xff;
+#else
             return 0xff;
+#endif
         }
         ret = s->vga_ram[addr];
     } else {
         /* standard VGA latched access */
         if (addr * sizeof(uint32_t) >= s->vga_ram_size) {//s->vram_size) {
+#ifdef PICO386_LOWMEM
+            /* pico-386: the planes above the SRAM's VRAM live in PSRAM */
+            uint32_t *hi = (uint32_t *)pm_vram_hi(addr * sizeof(uint32_t), 0);
+            if (!hi)
+                return 0xff;
+            s->latch = *hi;
+#else
             return 0xff;
-        }
+#endif
+        } else
         s->latch = ((uint32_t *)s->vga_ram)[addr];
 
         if (!(s->gr[VGA_GFX_MODE] & 0x08)) {

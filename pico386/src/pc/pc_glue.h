@@ -79,6 +79,11 @@ uint32_t t386_sb_starved();             // mixes in which the SB16 ran out of DM
 
 void t386_key(int down, int keycode);   // Linux input codes (1..95 = set 1, 96..111 extended)
 void t386_mouse(int dx, int dy, int buttons);   // dy > 0 = down; buttons bit 0 L, 1 R, 2 M
+int t386_mouse_busy(void);                      // the guest has not read the last packet yet
+void t386_mouse_info(int *queued, uint32_t *events);   // the heartbeat: mouse bytes unread, t386_mouse calls
+// i8042: keyboard and mouse bytes queued, status | mode<<8 | pending<<16 | hold<<24 (1 held, 2 expired);
+// pic: IMR, ISR, IRR of the master, then the slave.
+void t386_kbd_info(int *kq, int *mq, unsigned *bits, uint8_t pic[6]);
 
 // vga_refresh() into fb (size in VGAPicoInfo.gfx_*); 1 when any line of it was redrawn.
 int  t386_refresh(int full);

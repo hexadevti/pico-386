@@ -1352,12 +1352,18 @@ void sb16_audio_callback (void *opaque, uint8_t *stream, int free)
     for (int j = 0; j < free / 4; j++) {
         while (s->rs_frac >= 0x10000) {
             if (len < frame) {
-                /* starved: hold the last value, a smaller step than one to silence and back */
+                /* starved: hold the last value, a smaller step than one to silence and back,
+                 * fading to 0 (about 23 ms at 44.1 kHz) so a block that ends far from the
+                 * middle does not stay as DC once the game stops (SimCity Classic's effects) */
                 sb16_starved++;
                 for (; j < free / 4; j++) {
+                    s->rs_cur[0] = s->rs_cur[0] * 1023 / 1024;   /* rounds toward 0 */
+                    s->rs_cur[1] = s->rs_cur[1] * 1023 / 1024;
                     out[2 * j] = s->rs_cur[0];
                     out[2 * j + 1] = s->rs_cur[1];
                 }
+                s->rs_prev[0] = s->rs_cur[0];
+                s->rs_prev[1] = s->rs_cur[1];
                 goto done;
             }
             s->rs_prev[0] = s->rs_cur[0];

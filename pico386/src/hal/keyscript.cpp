@@ -41,6 +41,11 @@ bool KeyScript::step(uint32_t now, bool idle, void (*push)(uint8_t, uint8_t), ch
     rlen -= (size_t)(plus + 1 - rest);
     rest = plus + 1;
   }
+  // "key:NNN" holds the key for NNN ms (the keyboard mouse's arrows)
+  uint32_t hold = 80;
+  if (const char *colon = rlen > 2 ? (const char *)memchr(rest + 1, ':', rlen - 1) : nullptr) {
+    if (isdigit((unsigned char)colon[1])) { hold = (uint32_t)atoi(colon + 1); rlen = (size_t)(colon - rest); }
+  }
   const uint8_t c = keyCode(rest, rlen);
   if (!c) {
     if (!n) return false;
@@ -52,6 +57,6 @@ bool KeyScript::step(uint32_t now, bool idle, void (*push)(uint8_t, uint8_t), ch
   for (int i = 0; i < nm; i++) { push(m[i], KEYSTATE_PRESSED); mods[nmods++] = m[i]; }
   push(c, KEYSTATE_PRESSED);
   held = c;
-  waitUntil = now + 80;
+  waitUntil = now + hold;
   return false;
 }

@@ -54,6 +54,14 @@ struct PicState2 {
 	void *obj;
 };
 
+/* pico-386: IMR, ISR and IRR of both PICs for the RP2350's heartbeat (t386_kbd_info) */
+void i8259_debug_info(PicState2 *s, uint8_t r[6])
+{
+	for (int i = 0; i < 2; i++) {
+		r[i * 3] = s->pics[i].imr; r[i * 3 + 1] = s->pics[i].isr; r[i * 3 + 2] = s->pics[i].irr;
+	}
+}
+
 uint32_t pic_irq0_merged;  /* pico-386: IRQ0 edges that found IRQ0 still pending (t386_timer_info) */
 
 /* set irq level. If an edge is detected, then the IRR is set to 1 */
@@ -142,6 +150,12 @@ void i8259_set_irq(PicState2 *s, int irq, int level)
 int i8259_irq_pending(PicState2 *s, int irq)
 {
 	return (s->pics[irq >> 3].irr >> (irq & 7)) & 1;
+}
+
+/* pico-386: 1 while the guest's handler for 'irq' runs (its ISR bit, until the EOI) */
+int i8259_irq_in_service(PicState2 *s, int irq)
+{
+	return (s->pics[irq >> 3].isr >> (irq & 7)) & 1;
 }
 
 /* acknowledge interrupt 'irq' */

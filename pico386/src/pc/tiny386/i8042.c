@@ -36,6 +36,7 @@ static int after_eq(uint32_t a, uint32_t b)
 }
 
 #include "i8042.h"
+#include "i8259.h"   /* pico-386: i8259_irq_in_service */
 #include "snap.h"   /* pico-386 */
 
 #ifdef BUILD_ESP32
@@ -291,8 +292,15 @@ uint32_t kbd_read_data(void *opaque, uint32_t addr)
     else if (!(s->pending & KBD_PENDING_KBD))
         val = ps2_last_data(s->kbd);    /* nothing pending: upstream gives the last byte too */
     else {
-        s->kbd_hold = 1;
-        s->kbd_hold_until = get_uticks() + KBD_HOLD_US;
+        /* pico-386: the hold is for INT 9 handlers only, so it starts only while IRQ 1 is in
+           service. Code that polls (SeaBIOS's i8042_flush reads 16 bytes 50 us apart) got the
+           same byte each time: on a warm reboot the keys still queued (Ctrl+Alt+Del's
+           releases) never drained, the self-test read a stale byte instead of 55h, and the
+           keyboard was never set up. */
+        if (i8259_irq_in_service(s->pic, s->irq_kbd)) {
+            s->kbd_hold = 1;
+            s->kbd_hold_until = get_uticks() + KBD_HOLD_US;
+        }
         val = ps2_read_data(s->kbd);
     }
 #ifdef DEBUG_KBD
@@ -804,6 +812,21 @@ void ps2_mouse_event(PS2MouseState *s,
                 break;
         }
     }
+}
+
+/* pico-386: the keyboard mouse sends a packet only once the last one was read */
+int ps2_mouse_queued(PS2MouseState *s)
+{
+    return s->common.queue.count;
+}
+
+/* pico-386: the controller's state for the RP2350's heartbeat (t386_kbd_info) */
+void kbd_debug_info(KBDState *s, int *kq, int *mq, unsigned *bits)
+{
+    *kq = s->kbd->common.queue.count;
+    *mq = s->mouse->common.queue.count;
+    *bits = s->status | (unsigned)s->mode << 8 | (unsigned)s->pending << 16 |
+            (unsigned)(s->kbd_hold ? 1 + ((int32_t)(get_uticks() - s->kbd_hold_until) > 0) : 0) << 24;
 }
 
 void ps2_write_mouse(void *opaque, int val)

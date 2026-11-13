@@ -33,6 +33,7 @@ static uint8_t   s_flags[PM_MAX_FRAMES];
 #define PM_MAX_LENDS 8
 static struct { uint8_t *p; int first, n; } s_lent[PM_MAX_LENDS];
 static uint8_t  *s_lendLo, *s_lendHi;
+static uint32_t  s_vhiBase;                  // PSRAM address of VRAM byte PM_VRAM_BYTES; 0: none
 
 void pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes) {
   if (nframes > PM_MAX_FRAMES) nframes = PM_MAX_FRAMES;
@@ -57,6 +58,37 @@ void pm_shutdown(void) {
   s_frames = NULL;
   s_nframes = 0;
   s_pages = 0;
+  s_vhiBase = 0;
+}
+
+// VRAM above PM_VRAM_BYTES (pc_pagemem.h): one 256-byte line in SRAM, written back when another
+// is needed. Windows 3.0 blits from there a scan line at a time, so most accesses hit it.
+#define VHI_LINE 256u
+static uint32_t s_vhiTag = 0xffffffffu;      // the line's offset above PM_VRAM_BYTES
+static int      s_vhiDirty;
+static uint32_t s_vhiLine[VHI_LINE / 4];
+
+void pm_vram_hi_init(uint32_t psram) {
+  s_vhiBase = psram;
+  s_vhiTag = 0xffffffffu;
+  s_vhiDirty = 0;
+  if (!psram) return;
+  memset(s_vhiLine, 0, sizeof(s_vhiLine));
+  for (uint32_t o = 0; o < PM_VRAM_FULL - PM_VRAM_BYTES; o += VHI_LINE)
+    hal_psram_write(psram + o, s_vhiLine, VHI_LINE);
+}
+
+uint8_t *pm_vram_hi(uint32_t byte, int write) {
+  if (!s_vhiBase || byte < PM_VRAM_BYTES || byte >= PM_VRAM_FULL) return NULL;
+  const uint32_t off = byte - PM_VRAM_BYTES, tag = off & ~(VHI_LINE - 1);
+  if (tag != s_vhiTag) {
+    if (s_vhiDirty) hal_psram_write(s_vhiBase + s_vhiTag, s_vhiLine, VHI_LINE);
+    hal_psram_read(s_vhiBase + tag, s_vhiLine, VHI_LINE);
+    s_vhiTag = tag;
+    s_vhiDirty = 0;
+  }
+  if (write) s_vhiDirty = 1;
+  return (uint8_t *)s_vhiLine + (off & (VHI_LINE - 1));
 }
 
 uint32_t pm_faults(void)     { return s_faults; }

@@ -91,6 +91,8 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   8000 Hz played off pitch. The new one keeps its 16.16 position between calls, interpolates
   linearly, and also plays signed 8-bit, which upstream left silent. When the DMA data runs out
   it holds the last value instead of dropping to silence, and counts it in `sb16_starved`.
+  The held value fades to 0 (x1023/1024 a sample, about 23 ms; 2026-11-13): SimCity Classic's
+  sound effects ended near the bottom of the range, and the hold kept the output at -29000 of DC.
 - **The timer (2026-11-02).** Prince of Persia's 240 Hz music timer dragged and sped up on the
   RP2350. Only 140-160 IRQ0s a second got through there, and 15% of those were lost.
   - **`pc.c`:** `pc_step` calls `i8254_update_irq` every `PC_TIMER_STEP` (256) instructions
@@ -154,6 +156,22 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
     loaded) stayed queued for good. SeaBIOS's INT 9 then saw `MOUSE_OBF` after Prince's read
     and dropped every key ("ps2 keyboard irq but found mouse data?!"). Prince reads Shift from
     the BIOS's flags, so Shift+Down never picked up the sword.
+  - The hold starts only while IRQ 1 is in service (`i8259_irq_in_service`), since it exists for
+    INT 9 handlers (2026-11-13). The keyboard died after Ctrl+Alt+Del on the RP2350 (DOS-128,
+    CTMOUSE loaded). The key releases were still queued (3-10 bytes). SeaBIOS's `i8042_flush`
+    polls 16 reads 50 us apart, and the hold gave it the same byte each time. It gave up on the
+    keyboard (mode 12h or 73h at the prompt). Gating on the keyboard-disable bit fixed the in-game
+    Reset but not Ctrl+Alt+Del, where the keyboard is still enabled at the flush. A heartbeat line
+    `diag: kbd` shows the queues, status, mode, hold and both PICs' IMR/ISR/IRR
+    (`kbd_debug_info`, `i8259_debug_info`, `t386_kbd_info`).
+- **`i8042.c`: `ps2_mouse_queued` (2026-11-13).** Returns how many mouse bytes the guest has not
+  read. The keyboard mouse (`pckbd_tick`) sends a packet only when that is 0 and the guest has
+  run `s_mouseInstr` (8.5k) instructions since the last one. Movement is not added up meanwhile,
+  and a packet moves at most `s_mouseStep` (4 px on LOWMEM, 8 elsewhere). Windows 3.1 on the
+  RP2350 (0.075 MIPS) read each packet at once but took seconds to act on them, so the pointer
+  kept moving after the arrow was let go. 40k instructions with the movement added up (24 px)
+  stopped it but made the pointer jump; 8.5k/4 px glides at about 20 packets a second with no
+  drift (10k: 16), and 7.5k and 5k drifted again. `@mpace <instr> <step>` (`remote.py mpace`) tunes it live.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 
@@ -183,6 +201,10 @@ not memory-mapped, and is paged through 1 KB SRAM frames (`pc_pagemem.c`, ours).
   - There is no framebuffer: `fb_data` is one 800-pixel line.
   - Each finished graphics line goes to a sink, `vga_set_line_sink()` (new).
   - The text-mode framebuffer pass is skipped, since the frontend draws text from text RAM.
+  - VRAM above the SRAM's 160 KB, up to 256 KB, is read and written through `pm_vram_hi`
+    (PSRAM, one cached 256-byte line) in the latched and odd/even paths. Upstream dropped those
+    writes and read 0xff, which garbled Windows 3.0: its VGA driver keeps bitmaps above 40 KB
+    per plane. The screen still shows only the first 160 KB. (2026-11-13)
 - **`tiny386_port.h`, RP2350 only:** `CLOCK_MONOTONIC` is defined as `CLOCK_REALTIME`. newlib on
   arm-none-eabi has neither the constant nor `clock_gettime`; `posix_rp2350.cpp` supplies a
   `clock_gettime` that counts from boot, and `usleep`.

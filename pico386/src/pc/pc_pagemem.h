@@ -30,9 +30,12 @@
 #define PM_MAX_RAM    (4u << 20)
 #define PM_MAX_PAGES  (PM_MAX_RAM >> PM_PAGE_SHIFT)
 // The VGA's memory, at the start of the arena. 160 KB, not a real VGA's 256: mode 12h needs
-// 150 KB (4 planes of 0x9600), and the 96 KB saved holds the interpreter in SRAM. EGA/VGA games
-// that use pages above 40 KB per plane (smooth scrolling, mode X page flips) lose them.
+// 150 KB (4 planes of 0x9600), and the 96 KB saved holds the interpreter in SRAM. The rest, up to
+// PM_VRAM_FULL, lives in PSRAM (pm_vram_hi): the guest can store and read it (Windows 3.0's VGA
+// driver keeps bitmaps there), but the screen never shows it, so smooth scrolling and mode X
+// page flips above 40 KB per plane still show the wrong page.
 #define PM_VRAM_BYTES (160u * 1024)
+#define PM_VRAM_FULL  (256u * 1024)
 #define PM_WRITABLE   1u
 
 #ifdef __cplusplus
@@ -56,6 +59,11 @@ uint8_t *hal_arena(size_t *size);
 // of it reading as zero.
 void     pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes);
 void     pm_shutdown(void);
+// VRAM bytes PM_VRAM_BYTES to PM_VRAM_FULL, at PSRAM address psram (0: none), cleared.
+void     pm_vram_hi_init(uint32_t psram);
+// VRAM byte `byte` (PM_VRAM_BYTES or above) in a cached line, which it marks dirty when write is
+// set; valid until the next call. NULL past PM_VRAM_FULL. Callers stay inside one aligned dword.
+uint8_t *pm_vram_hi(uint32_t byte, int write);
 uint8_t *pm_fault(uint32_t page, int write);          // the frame, mapped; NULL past the RAM
 uint8_t  pm_slow_read8(uint32_t a);
 uint16_t pm_slow_read16(uint32_t a);

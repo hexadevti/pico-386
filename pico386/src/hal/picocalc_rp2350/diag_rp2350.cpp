@@ -106,6 +106,19 @@ static void heartbeat(void *) {
             (unsigned long)(mixUs / 1000), (unsigned long)(under - lastUnder), (unsigned long)(lowQ / 1000),
             (unsigned long)(gap / 1000), (unsigned long)(spk - lastSpk), (unsigned long)(adl - lastAdl));
     lastUnder = under; lastSpk = spk; lastAdl = adl;
+    int mq;
+    uint32_t mev;
+    t386_mouse_info(&mq, &mev);
+    static uint32_t lastMev;
+    hal_log("diag: mouse %d bytes unread, +%lu events", mq, (unsigned long)(mev - lastMev));
+    lastMev = mev;
+    int kq, kmq;
+    unsigned kb;
+    uint8_t pr[6];
+    t386_kbd_info(&kq, &kmq, &kb, pr);
+    hal_log("diag: kbd q%d mq%d st%02x mode%02x pend%x hold%u, pic m %02x/%02x/%02x s %02x/%02x/%02x",
+            kq, kmq, kb & 0xff, (kb >> 8) & 0xff, (kb >> 16) & 0xff, kb >> 24,
+            pr[0], pr[1], pr[2], pr[3], pr[4], pr[5]);
     last = ins; lastFaults = faults; lastWb = wb; lastFired = fired; lastLost = lost;
   }
 }

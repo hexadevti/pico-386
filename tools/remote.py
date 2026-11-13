@@ -6,6 +6,7 @@
 #
 #   remote.py keys "dir,enter,w2000,shot"   type a script; each "shot" in it saves a picture
 #   remote.py shot [name.png]               one screenshot
+#   remote.py mpace "<instr> <step>"         keyboard-mouse pacing, live
 #   remote.py raw <y>                       a panel row's raw RAMRD bytes (format check)
 #   remote.py log [seconds]                 just print the log
 #   remote.py --p4 prof [seconds]           sample core 1 (prof_p4.cpp) and print the hot functions
@@ -129,7 +130,7 @@ class Remote:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('cmd', choices=['keys', 'shot', 'raw', 'log', 'prof'])
+    ap.add_argument('cmd', choices=['keys', 'shot', 'raw', 'log', 'prof', 'mpace'])
     ap.add_argument('arg', nargs='?')
     ap.add_argument('--port')
     ap.add_argument('--p4', action='store_true')
@@ -150,6 +151,9 @@ def main():
         r.wait('@raw ', 5)
     elif a.cmd == 'prof':
         prof(r, a)
+    elif a.cmd == 'mpace':
+        r.send(f'@mpace {a.arg}')
+        r.wait('@mpace ', 5)
     else:
         for ln in r.lines(time.time() + float(a.arg or 10)):
             r.handle(ln)

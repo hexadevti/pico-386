@@ -15,6 +15,8 @@ static PC *s_pc;
 static int s_parked;                    // the arena's start is in PSRAM while the menu uses it
 // The menu canvas covers VRAM and, as VRAM is smaller, the first page frames too (pcmem_park).
 #define PARK_BYTES (PANEL_W * PANEL_H * 2 > PM_VRAM_BYTES ? PANEL_W * PANEL_H * 2 : PM_VRAM_BYTES)
+// VRAM above the arena's PM_VRAM_BYTES (pm_vram_hi), just below the park area.
+#define VHI_BYTES (PM_VRAM_FULL - PM_VRAM_BYTES)
 #endif
 static char s_err_file[160];
 static long s_mem_limit;                // t386_limit_mem: the next start's RAM at most (0: none)
@@ -222,6 +224,7 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
     s_parked = 0;
     pm_vram = arena;
     pm_init(arena + PM_VRAM_BYTES, nframes, (uint32_t)conf.mem_size);
+    pm_vram_hi_init((uint32_t)(hal_psram_size() - PARK_BYTES - VHI_BYTES));
     t386_log("tiny386: paging guest RAM through %d frames of SRAM", nframes);
   }
 #else
@@ -296,7 +299,7 @@ void pcmem_unpark() {
 void *pcmem_lend(size_t n) { return pm_vram ? pm_lend(n, pm_vram + PARK_BYTES) : NULL; }
 int pcmem_free(void *p) { return pm_unlend(p); }
 
-long pcmem_scratch() { return (long)hal_psram_size() - (long)PARK_BYTES - PCMEM_SCRATCH_BYTES; }
+long pcmem_scratch() { return (long)hal_psram_size() - (long)PARK_BYTES - (long)VHI_BYTES - PCMEM_SCRATCH_BYTES; }
 
 long pcmem_spare(long *bytes) {
   *bytes = PCMEM_SPARE_BYTES;
@@ -359,7 +362,23 @@ void t386_run_until(uint32_t deadline_us) {
   // The audio hook may make sound now: music written in the middle of a long frame then plays
   // near when it was written, not all at the frame's end.
   static uint32_t sound;
+#if !defined(BOARD_PICOCALC_RP2350) && !defined(BOARD_PICOCALC_P4)
+  // Desktop test hook: PC_MIPS=1.1 holds the guest to about the RP2350's speed (0.07 under
+  // Windows, which pages a lot), from PC_MIPS_AT seconds of guest time on.
+  static double mips = -1;
+  static uint32_t mipsAt;
+  if (mips < 0) {
+    const char *e = getenv("PC_MIPS"), *at = getenv("PC_MIPS_AT");
+    mips = e ? atof(e) : 0;
+    mipsAt = at ? (uint32_t)atoi(at) * 1000000u : 0;
+  }
+  const uint32_t t0 = get_uticks(), i0 = t386_instructions();
+  const double cap = t0 >= mipsAt ? mips : 0;
+#endif
   do {
+#if !defined(BOARD_PICOCALC_RP2350) && !defined(BOARD_PICOCALC_P4)
+    if (cap > 0 && (double)(t386_instructions() - i0) > cap * (double)(get_uticks() - t0)) continue;
+#endif
     pc_step(s_pc);
     vga_step(s_pc->vga);
     if (s_audio_hook) {
@@ -384,8 +403,26 @@ void t386_key(int down, int keycode) {
   if (s_pc) ps2_put_keycode(s_pc->kbd, down, keycode);
 }
 
+static uint32_t s_mouse_events;
+
 void t386_mouse(int dx, int dy, int buttons) {
   if (s_pc) ps2_mouse_event(s_pc->mouse, dx, dy, 0, buttons);
+  s_mouse_events++;
+}
+
+int t386_mouse_busy(void) {
+  return s_pc && ps2_mouse_queued(s_pc->mouse) > 0;
+}
+
+void t386_mouse_info(int *queued, uint32_t *events) {
+  *queued = s_pc ? ps2_mouse_queued(s_pc->mouse) : -1;
+  *events = s_mouse_events;
+}
+
+void t386_kbd_info(int *kq, int *mq, unsigned *bits, uint8_t pic[6]) {
+  if (!s_pc) { *kq = *mq = -1; *bits = 0; memset(pic, 0, 6); return; }
+  kbd_debug_info(s_pc->i8042, kq, mq, bits);
+  i8259_debug_info(s_pc->pic, pic);
 }
 
 static void on_redraw(void *opaque, int x, int y, int w, int h) {
