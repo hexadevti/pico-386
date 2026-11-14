@@ -281,6 +281,8 @@ void pc_runFrame(bool draw) {
   if ((int32_t)(now - s_nextUs) > 100000) {
     t386_clock_skip(now - s_nextUs);
     now = s_nextUs;
+    hal_job_wait();                            // the menu drew over the panel: a whole picture again
+    pcvid_reset();
   }
   s_nextUs += kFrameUs;
   if ((int32_t)(s_nextUs - now) > 2 * (int32_t)kFrameUs) s_nextUs = now + kFrameUs;   // ahead

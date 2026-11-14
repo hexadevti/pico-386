@@ -107,6 +107,17 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       corner counter on the device at 1.7-1.8 MIPS (33 on the desktop). About 75% of core 1 is the
       interpreter. A silent OPL took about 7% until `fmopl.c` skipped it (THIRD_PARTY.md). A full
       `-timedemo demo1` takes over 15 minutes on the device, so compare MIPS and `prof` instead.
+    - **P4 pass (2026-11-14):**
+      - The frontend skips drawing a graphics picture the guest has not written since the last one
+        (`t386_vga_gen`, THIRD_PARTY.md): FastDoom went from 1.8 to 2.1-2.2 MIPS. The RP2350
+        shares the code (on `build-lowmem`, m12/m13 draw correctly), but it is not yet tested
+        on the device.
+      - Tried and dropped:
+        - Inlining `fetch16`/`fetch32` gave 1.8 MIPS (no change). Forcing `fetch8pf` inline was
+          worse, at 1.7.
+        - The L2 cache can't grow. It is the first 256 KB of L2MEM, and our IRAM code sits after it.
+        - Drawing 1 frame in 4 gave the same MIPS, so core 0's drawing doesn't evict the cache.
+      - Readings vary between boots, so compare builds back to back with the same keys.
     - **Profiler:** `python -I tools/remote.py --p4 prof 8` samples core 1 at 2 kHz (`prof_p4.cpp`,
       `@prof`/`@profdump`) and prints hot functions and lines through addr2line on the build's .elf.
       Names are the innermost inlined function, so `pload8` or `fetch8pf` usually means code inside

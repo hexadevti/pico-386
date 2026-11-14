@@ -133,6 +133,11 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
     the OPL synthesis. sb16.c's check of the guest's own rate (`freq >= 44100`) is unchanged.
   - **`pc.c`:** `pico_spk_writes` and `pico_adlib_writes` count guest writes to port 61h and to
     the Adlib/SB FM ports. `t386_run_until` reads them to mix right after the guest plays a note.
+- **Skipping unchanged pictures (2026-11-14).** **`pc.c`:** `pico_vga_gen` (new) is bumped by every
+  guest write to VGA memory (`iomem_write*`, the three linear-framebuffer write paths) and VGA
+  ports. `pc_video` skips a graphics picture when it has not moved since the last one drawn.
+  FastDoom on the P4: 1.8 to 2.1-2.2 MIPS, since each redraw read about 400 KB of PSRAM that the
+  guest's RAM shares.
 - **Snapshots (2026-11-03).** `snap.h` (new, ours) moves each device's state through a `SnapIO`.
   Every struct is preceded by its size, so a build with another layout refuses the file.
   - **`pc.c`:** `pc_snap` saves the `PC` fields, then the CPU, PIC, PIT, CMOS, both IDE buses,

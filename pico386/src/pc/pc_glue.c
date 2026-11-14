@@ -458,6 +458,9 @@ static void on_redraw(void *opaque, int x, int y, int w, int h) {
   *(int *)opaque = 1;
 }
 
+extern volatile uint32_t pico_vga_gen;           // pc.c
+uint32_t t386_vga_gen(void) { return pico_vga_gen; }
+
 int t386_refresh(int full) {
   int drawn = 0;
   if (s_pc) vga_refresh(s_pc->vga, on_redraw, &drawn, full);
@@ -572,4 +575,4 @@ static int snap_run(FILE *f, int load) {
 }
 
 int t386_save_state(FILE *f) { return snap_run(f, 0); }
-int t386_load_state(FILE *f) { return snap_run(f, 1); }
+int t386_load_state(FILE *f) { pico_vga_gen++; return snap_run(f, 1); }
