@@ -84,6 +84,26 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   operator's envelope is off and holding (`evc >= EG_OFF`, `evs == 0`). It still advances the
   LFO counters and clears the feedback history, as the loop would. FastDoom with `-nomusic`
   spent about 7% of the P4's emulator core on a silent OPL (2026-11-10).
+- **Compact OPL tables (2026-11-14, `FMOPL_COMPACT`, set in `tiny386_port.h` for the low-memory
+  builds only):** upstream reads 128 KB of tables at random for every sample (`TL_TABLE`,
+  `SIN_TABLE`, `ENV_CURVE`). On the RP2350 they sat in flash behind the 16 KB XIP cache.
+  - `fmopl.c`'s `opl_out` builds `SIN_TABLE[wave][phase][env]` from a quarter sine of log
+    indices (`SIN_LOG`, 513 x 16 bits) and a 256-entry exponential (`TL_EXP`) shifted right once
+    per 256 steps, as the real chip does. `env_curve` computes `ENV_CURVE` (exact for all 8193
+    entries). `OP_OUT` calls `opl_out`.
+  - `fmopl.h`: `OPL_SLOT` keeps a wave number (`wave`) instead of the `wavetable` pointer; the
+    three places that set it follow.
+  - `fmopl_table.h`: `TL_TABLE`, `SIN_TABLE` and `ENV_CURVE` are left out under `FMOPL_COMPACT`.
+  - `fmopl_compact.h` is generated from `fmopl_table.h` by `tools/gen_fmopl_compact.py`; never
+    edit it.
+  - The waves and the envelope are exact. With the exact `TL_TABLE` in place of `TL_EXP` the
+    output is bit-identical to upstream's (a desktop harness of 737k samples: every wave,
+    connection and feedback, the LFOs and random register writes). Upstream halves the level every
+    6.02 dB and this every 6 dB, so levels differ by up to 0.31 dB, near -90 dB.
+  - SimCity's title music on the device: mix 680 to 335 ms per 2 s, and the user found it sounds
+    right. On the desktop the big tables
+    fit in the cache and this is about 40% slower, and the P4 has not been measured, so both keep
+    upstream's.
 - **`sb16.c`:** the six `resample_*` functions are replaced by one resampler (`sb16_read` plus
   the loop in `sb16_audio_callback`, state in `rs_frac`/`rs_prev`/`rs_cur`). Upstream's restarted
   its rate counters on every mixer call and rounded the rate ratio to a fraction with a
@@ -205,6 +225,8 @@ not memory-mapped, and is paged through 1 KB SRAM frames (`pc_pagemem.c`, ours).
       clears `ptr` and `fbase` before a frame changes hands (`PM_IF_DROP`, `pm_set_ifslot`).
     - **`translate` in real mode** returns base + offset at once, without `segcheck` or paging
       (PG needs PE); the two calls were 10% of CheckIt's CPU test. Only without `I386_FASTPATH`.
+      In protected mode with paging off (FastDoom under DOS/32A), the null-selector test is done
+      there too, and laddr returned without the calls (2026-11-14; worth little on the device).
     - **`I386_FASTPATH` is off in every `T386_PAGED` build,** so the desktop's LOWMEM build runs
       the RP2350's code. With it on there, SeaBIOS aborted on entering protected mode.
     - **Hot and cold `cpu_exec1`:** the decoder and instructions moved to `i386_exec.h`, which
@@ -224,6 +246,8 @@ not memory-mapped, and is paged through 1 KB SRAM frames (`pc_pagemem.c`, ours).
   - `pc_new` allocates no RAM (`t386_start` sets up the pages), and VRAM is the start of the
     SRAM arena (`pm_vram`).
   - The kernel command line is written with `pm_write`.
+  - `PICO_VRAM_SYNC` after VGA and VBE register writes, and `PICO_LFB_HOLD` in the linear
+    framebuffer's `iomem_write*`: they take lent VRAM back from the pager (below). (2026-11-14)
 - **`vga.c`, `vga.h`:**
   - There is no framebuffer: `fb_data` is one 800-pixel line.
   - Each finished graphics line goes to a sink, `vga_set_line_sink()` (new).
@@ -232,6 +256,11 @@ not memory-mapped, and is paged through 1 KB SRAM frames (`pc_pagemem.c`, ours).
     (PSRAM, one cached 256-byte line) in the latched and odd/even paths. Upstream dropped those
     writes and read 0xff, which garbled Windows 3.0: its VGA driver keeps bitmaps above 40 KB
     per plane. The screen still shows only the first 160 KB. (2026-11-13)
+  - `vga_pico_hi_idle()` (new): true in chain-4 mode 13h with map mode 1, no bank and no VBE,
+    where the VGA reaches only VRAM's first 64 KB. `t386_run_until` then lends the other 96 KB
+    to the pager after 1 s (`pm_vram_lend`), which doubles its frames to 192. FastDoom on the
+    device: about 12.3k to 6k page faults every 2 s, paging from 29.5% to 16% of the time.
+    (2026-11-14)
 - **`tiny386_port.h`, RP2350 only:** `CLOCK_MONOTONIC` is defined as `CLOCK_REALTIME`. newlib on
   arm-none-eabi has neither the constant nor `clock_gettime`; `posix_rp2350.cpp` supplies a
   `clock_gettime` that counts from boot, and `usleep`.

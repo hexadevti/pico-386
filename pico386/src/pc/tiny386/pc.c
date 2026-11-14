@@ -9,6 +9,17 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#ifdef PICO386_LOWMEM
+/* pico-386: VRAM past 64 KB is lent to the pager in mode 13h (pc_pagemem.h); a VGA register
+   write that lets the guest reach it again takes it back first, and so does a write to the
+   linear framebuffer up there, for good. */
+#define PICO_VRAM_SYNC(pc) do { if (pm_vram_lent && !vga_pico_hi_idle((pc)->vga)) pm_vram_reclaim(0); } while (0)
+#define PICO_LFB_HOLD(a) do { if ((a) >= PM_VRAM_LOW) pm_vram_reclaim(1); } while (0)
+#else
+#define PICO_VRAM_SYNC(pc) do {} while (0)
+#define PICO_LFB_HOLD(a) do {} while (0)
+#endif
+
 #if defined(USE_AMD64)
 static void raise_irq_amd64(void *o, PicState2 *s)
 {
@@ -407,6 +418,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x3d8: case 0x3d9: case 0x3da: case 0x3db:
 	case 0x3dc: case 0x3dd: case 0x3de: case 0x3df:
 		vga_ioport_write(pc->vga, addr, val);
+		PICO_VRAM_SYNC(pc);
 		return;
 	case 0x402:
 		putchar(val);
@@ -527,9 +539,11 @@ static void pc_io_write16(void *o, int addr, u16 val)
 	case 0x3dc: case 0x3dd: case 0x3de:
 		vga_ioport_write(pc->vga, addr, val & 0xff);
 		vga_ioport_write(pc->vga, addr + 1, (val >> 8) & 0xff);
+		PICO_VRAM_SYNC(pc);
 		return;
 	case 0x1ce: case 0x1cf:
 		vbe_write(pc->vga, addr - 0x1ce, val);
+		PICO_VRAM_SYNC(pc);
 		return;
 	case 0xcfc: case 0xcfe:
 		i440fx_write_data(pc->i440fx, addr - 0xcfc, val, 1);
@@ -673,6 +687,7 @@ static void iomem_write8(void *iomem, uword addr, u8 val)
 	uword vga_addr2 = pc->pci_vga_ram_addr;
 	if (addr >= vga_addr2) {
 		addr -= vga_addr2;
+		PICO_LFB_HOLD(addr);
 		if (addr < pc->vga_mem_size)
 			pc->vga_mem[addr] = val;
 		return;
@@ -693,6 +708,7 @@ static void iomem_write16(void *iomem, uword addr, u16 val)
 	uword vga_addr2 = pc->pci_vga_ram_addr;
 	if (addr >= vga_addr2) {
 		addr -= vga_addr2;
+		PICO_LFB_HOLD(addr);
 		if (addr + 1 < pc->vga_mem_size)
 			*(uint16_t *)&(pc->vga_mem[addr]) = val;
 		return;
@@ -714,6 +730,7 @@ static void iomem_write32(void *iomem, uword addr, u32 val)
 	if (addr >= vga_addr2) {
 		uword vga_addr2 = pc->pci_vga_ram_addr;
 		addr -= vga_addr2;
+		PICO_LFB_HOLD(addr);
 		if (addr + 3 < pc->vga_mem_size)
 			*(uint32_t *)&(pc->vga_mem[addr]) = val;
 		return;

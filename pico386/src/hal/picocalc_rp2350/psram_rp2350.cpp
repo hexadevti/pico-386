@@ -236,8 +236,38 @@ static void burstRead(uint32_t a, void *dst, uint32_t n) {
   dma_channel_wait_for_finish_blocking(s_dmaRx);
 }
 
-// The pager moves whole 4 KB pages and the menu parks 256 KB; both are word-aligned.
+// A page write the DMA is still feeding to the PIO (hal_psram_swap): its bursts' headers and data
+// in one stream, so nothing has to wait between bursts. Headers are stored byte-swapped, since the
+// TX channel swaps every word. Bursts of 64 bytes or more only (the quad chip's are 128).
+#define ASYNC_MAX   1024u
+#define ASYNC_BURST 64u
+static uint32_t s_stream[(ASYNC_MAX / ASYNC_BURST) * 3 + ASYNC_MAX / 4];
+static bool     s_txBusy = false;
+
+static inline void txIdle() {
+  if (s_txBusy) { dma_channel_wait_for_finish_blocking(s_dmaTx); s_txBusy = false; }
+}
+
+// Copies the data into the stream; returns its length in words, 0 if it can't be streamed.
+static uint32_t streamBuild(uint32_t a, const uint8_t *src, uint32_t n) {
+  if (s_burst < ASYNC_BURST || n > ASYNC_MAX) return 0;
+  uint32_t *w = s_stream;
+  while (n) {
+    uint32_t k = s_burst - (a & (s_burst - 1));
+    if (k > n) k = n;
+    if (s_quad) { w[0] = 8 + k * 2 - 1; w[2] = 0x38000000u | a; }
+    else        { w[0] = 32 + k * 8 - 1; w[2] = 0x02000000u | a; }
+    w[0] = __builtin_bswap32(w[0]); w[1] = 0; w[2] = __builtin_bswap32(w[2]);
+    memcpy(w + 3, src, k);
+    w += 3 + k / 4;
+    a += k; src += k; n -= k;
+  }
+  return (uint32_t)(w - s_stream);
+}
+
+// The pager moves whole 1 KB pages and the menu parks 256 KB; both are word-aligned.
 static void rawWrite(uint32_t a, const uint8_t *src, size_t n) {
+  txIdle();
   while (n) {
     uint32_t k = s_burst - (a & (s_burst - 1));
     if (k > n) k = (uint32_t)n;
@@ -247,6 +277,7 @@ static void rawWrite(uint32_t a, const uint8_t *src, size_t n) {
 }
 
 static void rawRead(uint32_t a, uint8_t *dst, size_t n) {
+  txIdle();
   while (n) {
     uint32_t k = s_burst - (a & (s_burst - 1));
     if (k > n) k = (uint32_t)n;
@@ -288,6 +319,22 @@ extern "C" void hal_psram_write(uint32_t a, const void *src, size_t n) {
   }
 }
 
+extern "C" void hal_psram_swap(uint32_t wr, uint32_t rd, void *buf, size_t n) {
+  if (!s_size || wr + n > s_size || ((wr | n | (uintptr_t)buf) & 3)) {
+    hal_psram_write(wr, buf, n);
+    if (rd != HAL_PSRAM_NONE) hal_psram_read(rd, buf, n);
+    return;
+  }
+  txIdle();
+  const uint32_t words = streamBuild(wr, (const uint8_t *)buf, (uint32_t)n);
+  if (!words) rawWrite(wr, (const uint8_t *)buf, n);
+  if (rd != HAL_PSRAM_NONE) hal_psram_read(rd, buf, n);  // buf is free: the stream has a copy
+  if (words) {
+    dma_channel_transfer_from_buffer_now(s_dmaTx, s_stream, words);
+    s_txBusy = true;
+  }
+}
+
 // A pattern at both ends of the chip and across a page boundary, written then read back.
 static bool selfTest() {
   static uint32_t w[64], r[64];         // 256 bytes: two of the longest bursts
@@ -316,6 +363,10 @@ static bool calibrate(bool quad) {
   for (int d = 0; d < nd; d++) {
     const float div = kDiv[d];
     if (div < g_psramMinDiv && d < nd - 1) continue;
+    // 50 MHz at most: at 360 MHz, divider 3 (60 MHz) passed this test and then corrupted guest
+    // RAM within a minute of FastDoom (a GPF in FDOOM13H, 2026-11-14). 300 MHz / 3 is the speed
+    // that has always held.
+    if (clock_get_hz(clk_sys) / (2.0f * div) > 50.5e6f && d < nd - 1) continue;
     for (int w = 0; w < nw; w++) {
       smStart(div, waits[w], quad);
       s_size = PSRAM_BYTES;                 // selfTest goes through the raw paths

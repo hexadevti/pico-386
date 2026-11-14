@@ -7,6 +7,7 @@
 
 #define NONE 0xffffu
 #define LENT 0xfffeu                         // s_pageOf of a frame lent out (pm_lend)
+#define VRES 0xfffdu                         // s_pageOf of a VRAM frame the VGA has back (pm_vram_*)
 #define F_REF   1
 #define F_DIRTY 2
 
@@ -31,18 +32,33 @@ static uint32_t  s_faults, s_writebacks;
 // Per frame: its page (NONE when free) and F_* flags. There is no page -> frame table: a
 // soft-unmapped page is found again by searching these, which costs about a microsecond against
 // the few hundred of a real fault, and saves 2 bytes per guest page.
-#define PM_MAX_FRAMES 128
+#define PM_MAX_FRAMES 192
 static uint16_t  s_pageOf[PM_MAX_FRAMES];
 static uint8_t   s_flags[PM_MAX_FRAMES];
+// Which pages are in a frame (a bit each), and where each page was last put, by its low bits: a
+// fault on a page that is not resident skips the search, and one that is checks the hint first.
+// With 192 frames the search was 2% of FastDoom's time on the device (2026-11-14).
+#define PM_HINTS 512
+static uint8_t   s_res[PM_MAX_PAGES / 8];
+static uint8_t   s_hint[PM_HINTS];
+#define RES_SET(pg) (s_res[(pg) >> 3] |= (uint8_t)(1u << ((pg) & 7)))
+#define RES_CLR(pg) (s_res[(pg) >> 3] &= (uint8_t)~(1u << ((pg) & 7)))
 // Runs of frames lent out (pm_lend). The arena's bounds outlive pm_shutdown, so a buffer freed
 // after it is still known for an arena one.
 #define PM_MAX_LENDS 8
 static struct { uint8_t *p; int first, n; } s_lent[PM_MAX_LENDS];
 static uint8_t  *s_lendLo, *s_lendHi;
 static uint32_t  s_vhiBase;                  // PSRAM address of VRAM byte PM_VRAM_BYTES; 0: none
+// The first s_vres frames are VRAM PM_VRAM_LOW to PM_VRAM_BYTES (pm_vram_lend): VRES while the
+// VGA has them, paged while lent. Their VRAM waits at s_vstash in the PSRAM meanwhile.
+static int       s_vres;
+static uint32_t  s_vstash;
+static int       s_vhold;
+int pm_vram_lent;
 
-void pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes) {
+void pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes, int nvram) {
   if (nframes > PM_MAX_FRAMES) nframes = PM_MAX_FRAMES;
+  if (nvram > nframes - PM_MIN_FRAMES) nvram = 0;
   s_frames = frames;
   pm_frame0 = frames - PM_PAGE_SIZE;
   s_nframes = nframes;
@@ -50,7 +66,12 @@ void pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes) {
   if (s_pages > PM_MAX_PAGES) s_pages = PM_MAX_PAGES;
   memset(pm_map, 0, sizeof(pm_map));
   memset(s_valid, 0, sizeof(s_valid));
-  for (int f = 0; f < nframes; f++) { s_pageOf[f] = NONE; s_flags[f] = 0; }
+  memset(s_res, 0, sizeof(s_res));
+  for (int f = 0; f < nframes; f++) { s_pageOf[f] = f < nvram ? VRES : NONE; s_flags[f] = 0; }
+  s_vres = nvram;
+  s_vstash = 0;
+  s_vhold = 0;
+  pm_vram_lent = 0;
   s_hand = 0;
   s_faults = s_writebacks = 0;
   pm_ifslot = s_ifdummy;
@@ -67,6 +88,8 @@ void pm_shutdown(void) {
   s_nframes = 0;
   s_pages = 0;
   s_vhiBase = 0;
+  s_vres = 0;
+  pm_vram_lent = 0;
 }
 
 // VRAM above PM_VRAM_BYTES (pc_pagemem.h): one 256-byte line in SRAM, written back when another
@@ -109,8 +132,8 @@ static int pickVictim(void) {
     const int f = s_hand;
     if (++s_hand == s_nframes) s_hand = 0;
     const uint16_t pg = s_pageOf[f];
-    if (pg == LENT) continue;
     if (pg == NONE) return f;
+    if (pg >= VRES) continue;                 // lent out, or VRAM
     if (s_flags[f] & F_REF) {
       s_flags[f] &= ~F_REF;
       pm_map[pg] = 0;
@@ -121,8 +144,14 @@ static int pickVictim(void) {
 }
 
 static int frameOf(uint32_t page) {
+  if (!(s_res[page >> 3] & (1u << (page & 7)))) return -1;
+  const int h = s_hint[page & (PM_HINTS - 1)];
+  if (h < s_nframes && s_pageOf[h] == page) return h;
   for (int f = 0; f < s_nframes; f++)
-    if (s_pageOf[f] == page) return f;
+    if (s_pageOf[f] == page) {
+      s_hint[page & (PM_HINTS - 1)] = (uint8_t)f;
+      return f;
+    }
   return -1;
 }
 
@@ -136,20 +165,29 @@ uint8_t *pm_fault(uint32_t page, int write) {
     f = pickVictim();
     fr = s_frames + ((size_t)f << PM_PAGE_SHIFT);
     const uint16_t old = s_pageOf[f];
+    const int valid = (s_valid[page >> 3] >> (page & 7)) & 1;
+    int loaded = 0;
     if (old != NONE) {
       pm_map[old] = 0;
+      RES_CLR(old);
       if (s_flags[f] & F_DIRTY) {
-        hal_psram_write((uint32_t)old << PM_PAGE_SHIFT, fr, PM_PAGE_SIZE);
+        // The new page comes in first and the old one goes out behind it, while the guest runs
+        // on (hal_psram_swap): a write-back no longer stalls the fault (2026-11-14).
+        hal_psram_swap((uint32_t)old << PM_PAGE_SHIFT,
+                       valid ? page << PM_PAGE_SHIFT : HAL_PSRAM_NONE, fr, PM_PAGE_SIZE);
         s_valid[old >> 3] |= (uint8_t)(1u << (old & 7));
         s_writebacks++;
+        loaded = valid;
       }
     }
-    if (s_valid[page >> 3] & (1u << (page & 7)))
-      hal_psram_read(page << PM_PAGE_SHIFT, fr, PM_PAGE_SIZE);
-    else
-      memset(fr, 0, PM_PAGE_SIZE);
+    if (!loaded) {
+      if (valid) hal_psram_read(page << PM_PAGE_SHIFT, fr, PM_PAGE_SIZE);
+      else memset(fr, 0, PM_PAGE_SIZE);
+    }
     s_pageOf[f] = (uint16_t)page;
     s_flags[f] = 0;
+    RES_SET(page);
+    s_hint[page & (PM_HINTS - 1)] = (uint8_t)f;
   } else {
     fr = s_frames + ((size_t)f << PM_PAGE_SHIFT);
   }
@@ -162,9 +200,10 @@ uint8_t *pm_fault(uint32_t page, int write) {
 // Empties frame f, writing its page back if it was written.
 static void evict(int f) {
   const uint16_t old = s_pageOf[f];
-  if (old == NONE || old == LENT) return;
+  if (old >= VRES) return;
   PM_IF_DROP();
   pm_map[old] = 0;
+  RES_CLR(old);
   if (s_flags[f] & F_DIRTY) {
     hal_psram_write((uint32_t)old << PM_PAGE_SHIFT, s_frames + ((size_t)f << PM_PAGE_SHIFT), PM_PAGE_SIZE);
     s_valid[old >> 3] |= (uint8_t)(1u << (old & 7));
@@ -210,12 +249,12 @@ void *pm_lend(size_t bytes, const uint8_t *above) {
   while (slot < PM_MAX_LENDS && s_lent[slot].p) slot++;
   if (slot == PM_MAX_LENDS) return NULL;
   int paging = 0;
-  for (int f = 0; f < s_nframes; f++) paging += s_pageOf[f] != LENT;
+  for (int f = 0; f < s_nframes; f++) paging += s_pageOf[f] < VRES || s_pageOf[f] == NONE;
   if (paging - n < PM_MIN_FRAMES) return NULL;
   const int lo = above > s_frames ? (int)((above - s_frames + PM_PAGE_SIZE - 1) >> PM_PAGE_SHIFT) : 0;
   for (int f0 = s_nframes - n; f0 >= lo; f0--) {       // the highest free run
     int k = 0;
-    while (k < n && s_pageOf[f0 + k] != LENT) k++;
+    while (k < n && (s_pageOf[f0 + k] < VRES || s_pageOf[f0 + k] == NONE)) k++;
     if (k < n) continue;
     for (k = 0; k < n; k++) {
       evict(f0 + k);
@@ -239,6 +278,26 @@ int pm_unlend(void *p) {
     break;
   }
   return 1;                                  // an arena buffer either way, never the heap's
+}
+
+void pm_vram_stash(uint32_t psram) { s_vstash = psram; }
+
+void pm_vram_lend(void) {
+  if (pm_vram_lent || !s_vres || !s_vstash || s_vhold) return;
+  hal_psram_write(s_vstash, s_frames, (size_t)s_vres << PM_PAGE_SHIFT);
+  for (int f = 0; f < s_vres; f++) { s_pageOf[f] = NONE; s_flags[f] = 0; }
+  pm_vram_lent = 1;
+}
+
+void pm_vram_reclaim(int hold) {
+  if (hold) s_vhold = 1;
+  if (!pm_vram_lent) return;
+  for (int f = 0; f < s_vres; f++) {
+    evict(f);
+    s_pageOf[f] = VRES;
+  }
+  hal_psram_read(s_vstash, s_frames, (size_t)s_vres << PM_PAGE_SHIFT);
+  pm_vram_lent = 0;
 }
 
 uint8_t pm_slow_read8(uint32_t a) {

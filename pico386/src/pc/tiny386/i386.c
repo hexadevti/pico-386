@@ -784,6 +784,13 @@ static bool IRAM_ATTR SLOW_ATTR SLOW(translate)(CPUI386 *cpu, OptAddr *res, int 
 		res->addr1 = laddr;
 		return true;
 	}
+	/* pico-386 (RP2350): protected mode without paging (FastDoom's DOS/32A): segcheck's null
+	 * selector test here, not two calls */
+	if (likely(!(cpu->cr0 & CR0_PG) && (cpu->seg[seg].limit != 0 || (cpu->seg[seg].sel & ~0x3) != 0))) {
+		res->res = ADDR_OK1;
+		res->addr1 = laddr;
+		return true;
+	}
 #endif
 	TRYL(segcheck(cpu, rwm, seg, addr, size));
 

@@ -70,8 +70,11 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     card, which has no `games`). DOS-128 left 23 KB too little conventional memory. The game's
     AIL drivers ignore `BLASTER` and default to IRQ 7, so the digital driver failed its check
     ("Sound hardware not found") until `CLASSIC.CFG` named the port, IRQ and DMA (lines after each
-    .ADV: 220, 5, 1, *). Runs on the RP2350 with music; the OPL takes about 35% (690 ms of mix
-    per 2 s).
+    .ADV: 220, 5, 1, *). Runs on the RP2350 with music; the OPL took about 35% (690 ms of mix
+    per 2 s) and, with the compact tables (`FMOPL_COMPACT`, 2026-11-14, THIRD_PARTY.md), about
+    16% (335 ms). The profiler shows it as `opl_out`/`OPL_CALC_CH`, inlined into
+    `YM3812UpdateOne` (4.3 KB, in flash; in SRAM it would cost 4 KB of the 10 KB of heap).
+    Launch: home menu SimCity, Start, then `d:`, `cd simcity`, `simcity`.
   - VBE modes and Windows
   - writes to a hard-disk image
   - a D: folder disk above 504 MB (FAT16 LBA, type 0Eh), and D: with Windows 95 long names
@@ -158,6 +161,32 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       replacement beat the clock at 80 frames and lost badly at 64 and 96, so the clock stays.
       On the device idle Program Manager now runs at 0.29 MIPS (it was about 0.075), still with
       about 19k faults every 2 s. The user asked to leave the pager there (2026-11-14).
+    - **FastDoom (2026-11-14, startup "doom", `C:\DOOM\DOOM.BAT` = FDOOM13H -low):** about 1 fps
+      at 1.0-1.1 MIPS (DOOMF, potato, shows 2-4). The user wants it faster without shrinking the
+      view or the detail. Done so far:
+      - In mode 13h the 96 KB of VRAM above 64 KB are lent to the pager (`pm_vram_lend`,
+        THIRD_PARTY.md), so 192 frames: faults per 2 s from about 12.3k to 6k. Their contents wait
+        in PSRAM below `pm_vram_hi`'s area (`VLEND_BYTES`), and come back on a mode change.
+      - `frameOf` checks a resident-page bitmap and a hint before searching (it was 2%).
+      - A dirty victim goes out behind the new page's read (`hal_psram_swap`): the DMA streams a
+        prebuilt list of burst headers and data while the guest runs, so `rawWrite` (about 5%)
+        is gone. Left: about 16% waiting for page reads, about 55% the interpreter.
+      - Overclock (`rp2350.ini` `mhz` up to 400): `hal_init` raises the flash's QMI divider to keep
+        it at 100 MHz or less (div 4 at 360 and 400) with the other core idled. The device's ini
+        now has `mhz = 400`, `vreg = 1.30`: FastDoom about 1.4 MIPS (1.28 at 360/1.25, 1.0-1.1 at
+        300), 6 min of demos without a fault. The PSRAM at 60 MHz (360/3) passed the boot test but
+        corrupted guest RAM (a GPF in FDOOM13H), so `calibrate` never takes a divider above
+        50 MHz: 45 MHz at 360, 50 at 400.
+      - **Doom quitting to `C:\DOOM>` after 1-4 min of demos was not the overclock:** it was out of
+        memory ("Failed on allocation of 35120 bytes", shown on the desktop; the device's screen
+        lost the text). The 4 MB guest (`PM_MAX_RAM`) left too little after DOS-128's
+        `SMARTDRV.EXE`, which takes a 1 MB XMS cache by default. The device's DOS-128.img now has
+        `C:\WINDOWS\SMARTDRV 256` (2026-11-14, typed in through `remote.py`; the original is
+        `C:\AUTOEXEC.OLD`). The desktop's copy of DOS-128.img still has the old line.
+      - Profile at 360 (2026-11-14): PSRAM page reads about 21% (`dma_channel_is_busy`, `rawRead`),
+        the interpreter about 60% (`cpu_exec1` 20%, `fetch8pf` 7.5%, `translate` 6%, `fetch8` 5%,
+        `modsib*` 7%, the `__GE_helper`s 5%). 2 KB and 512 B pages were both worse than 1 KB
+        (pc_pagemem.h).
     - Ideas not tried yet: hot non-i386 code in SRAM (`pc_step`, the PIC/PIT, port I/O).
   - `PICO386_LOWMEM` (board.h): guest RAM lives in the mainboard's 8 MB PSRAM, which hangs off
     a PIO and is not memory-mapped. It is paged through 1 KB SRAM frames (`pc_pagemem.c`).

@@ -21,6 +21,7 @@
 #include <hardware/clocks.h>
 #include <hardware/vreg.h>
 #include <hardware/structs/systick.h>
+#include <hardware/structs/qmi.h>
 #include "../hal.h"
 
 bool picocalcWaitForMainboard();   // input_rp2350.cpp
@@ -217,7 +218,7 @@ static void sdInit() {
 // Every Pico 2 runs at 300 MHz (the build's freq=300), and arduino-pico leaves the RP2350's core
 // at its power-on 1.10 V (it raises it only on the RP2040). Ours copes; a user's AliExpress RP2350
 // froze within seconds of boot (2026-11-10). So an optional /pico-386/rp2350.ini can set
-//   mhz       = 250    clk_sys, 100-300 (default 300)
+//   mhz       = 250    clk_sys, 100-400 (default 300; above it is an overclock)
 //   vreg      = 1.20   the core's volts, 1.10-1.30 (default: left at 1.10)
 //   psram_div = 3      the fastest PSRAM clock divider tried, 2-10 (default 2: SCK = clk_sys / 4)
 //   psram_quad = 0     keep the PSRAM in plain SPI (default 1: quad when its self-test passes)
@@ -273,6 +274,15 @@ static Tune readTune() {
 
 static char s_tuneLog[120] = "";
 
+// The flash's clock is clk_sys / CLKDIV (QMI window 0); at boot that is 3, so above 300 MHz it
+// would pass the chip's 133 MHz. Changed from SRAM, with the other core idle and no interrupts here,
+// since nothing may fetch from flash while the timing changes.
+static void __no_inline_not_in_flash_func(setFlashDiv)(uint32_t div) {
+  const uint32_t t = qmi_hw->m[0].timing;
+  qmi_hw->m[0].timing = (t & ~QMI_M0_TIMING_CLKDIV_BITS) | (div << QMI_M0_TIMING_CLKDIV_LSB);
+  (void)qmi_hw->m[0].timing;
+}
+
 static void applyTune() {
   const Tune t = readTune();
   char *o = s_tuneLog;
@@ -289,15 +299,29 @@ static void applyTune() {
   int vsel = -1;
   if (t.mv >= 1100 && t.mv <= 1300) vsel = VREG_VOLTAGE_1_10 + (t.mv - 1100 + 25) / 50;
   else if (t.mv) o += snprintf(o, end - o, " vreg %d mV ignored (1.10-1.30)", t.mv);
-  const uint32_t khz = (t.mhz >= 100 && t.mhz <= 300) ? (uint32_t)t.mhz * 1000 : 0;
-  if (t.mhz && !khz) o += snprintf(o, end - o, " mhz %d ignored (100-300)", t.mhz);
+  const uint32_t khz = (t.mhz >= 100 && t.mhz <= 400) ? (uint32_t)t.mhz * 1000 : 0;
+  if (t.mhz && !khz) o += snprintf(o, end - o, " mhz %d ignored (100-400)", t.mhz);
   if (vsel < 0 && (!khz || khz * 1000 == clock_get_hz(clk_sys))) return;
 
   // Raise the voltage before a faster clock; lower clocks are safe at any voltage, so it goes after.
   rp2350LogLock(true);
   Serial1.flush();
   if (vsel >= 0 && vsel > (int)vreg_get_voltage()) { vreg_set_voltage((vreg_voltage)vsel); busy_wait_us_32(1000); }
-  if (khz && khz * 1000 != clock_get_hz(clk_sys) && !set_sys_clock_khz(khz, false)) o += snprintf(o, end - o, " %lu MHz not reachable", (unsigned long)(khz / 1000));
+  if (khz && khz * 1000 != clock_get_hz(clk_sys)) {
+    // The flash at 100 MHz or less: the slower divider before a faster clock, the faster after.
+    const uint32_t oldDiv = (qmi_hw->m[0].timing & QMI_M0_TIMING_CLKDIV_BITS) >> QMI_M0_TIMING_CLKDIV_LSB;
+    const uint32_t div = (khz + 99999) / 100000 < 3 ? 3 : (khz + 99999) / 100000;
+    rp2040.idleOtherCore();
+    noInterrupts();
+    if (div > oldDiv) setFlashDiv(div);
+    const bool ok = set_sys_clock_khz(khz, false);
+    if (ok && div < oldDiv) setFlashDiv(div);
+    if (!ok && div > oldDiv) setFlashDiv(oldDiv);
+    interrupts();
+    rp2040.resumeOtherCore();
+    if (!ok) o += snprintf(o, end - o, " %lu MHz not reachable", (unsigned long)(khz / 1000));
+    else if (div != oldDiv) o += snprintf(o, end - o, " flash div %lu", (unsigned long)div);
+  }
   if (vsel >= 0 && vsel < (int)vreg_get_voltage()) vreg_set_voltage((vreg_voltage)vsel);
   tickReload();
   Serial1.end();

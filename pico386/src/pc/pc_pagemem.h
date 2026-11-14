@@ -8,7 +8,9 @@
 // Pages are 1 KB, not the x86's 4 KB: DOS's hot data (vectors, BIOS data, stacks, bits of the
 // kernel and BIOS) is spread thinly, and 64 KB of frames held far more of it. Booting FreeDOS on
 // the desktop (2026-10-28), 64 KB of frames took 313k faults as 4 KB pages, 276k as 2 KB, 49k as
-// 1 KB and 41k as 512 B, and a 1 KB fault moves a quarter of the data.
+// 1 KB and 41k as 512 B, and a 1 KB fault moves a quarter of the data. FastDoom (2026-11-14,
+// desktop, 192 frames' worth): about 1800 faults per million instructions as 1 KB, 2000 as 2 KB
+// and 4500 as 512 B, so 1 KB moves the fewest bytes there too. -DPM_PAGE_SHIFT tries others.
 //
 // pm_map[page] is (frame number + 1) << 1 of a resident page, or 0 to take the slow path; bit 0
 // set means it may be written too. 2 bytes, not a pointer: the 8 KB saved keeps i386.c in SRAM. The slow path faults the page in (clock replacement, dirty frames written
@@ -22,7 +24,9 @@
 #include <stddef.h>
 #include <string.h>
 
+#ifndef PM_PAGE_SHIFT
 #define PM_PAGE_SHIFT 10
+#endif
 #define PM_PAGE_SIZE  (1u << PM_PAGE_SHIFT)
 #define PM_PAGE_MASK  (PM_PAGE_SIZE - 1)
 // 4 MB of guest RAM: the map costs 4 bytes a page in SRAM, and at this speed nothing that wants
@@ -36,6 +40,10 @@
 // page flips above 40 KB per plane still show the wrong page.
 #define PM_VRAM_BYTES (160u * 1024)
 #define PM_VRAM_FULL  (256u * 1024)
+// In chain-4 mode 13h the VGA reaches only VRAM's first 64 KB, so the 96 KB above it are lent to
+// the pager (pm_vram_lend). FastDoom's working set is about 1.2 MB; 192 frames instead of 96 took
+// 2.7 times fewer faults per instruction on the desktop (2026-11-14).
+#define PM_VRAM_LOW   (64u * 1024)
 #define PM_WRITABLE   1u
 
 #ifdef __cplusplus
@@ -61,12 +69,18 @@ void pm_set_ifslot(uint8_t **slot);
 size_t hal_psram_size(void);
 void   hal_psram_read(uint32_t addr, void *dst, size_t n);
 void   hal_psram_write(uint32_t addr, const void *src, size_t n);
+// Writes buf (n bytes, word-aligned, at most 1 KB) to wr, then reads rd into buf; rd
+// HAL_PSRAM_NONE only writes. The write may still be running when it returns (the RP2350's DMA
+// finishes it while the guest runs on), and every later PSRAM call waits for it first.
+#define HAL_PSRAM_NONE 0xffffffffu
+void   hal_psram_swap(uint32_t wr, uint32_t rd, void *buf, size_t n);
 // The SRAM arena: VRAM (PM_VRAM_BYTES), then the page frames. The menu canvas reuses its start.
 uint8_t *hal_arena(size_t *size);
 
 // frames: nframes * PM_PAGE_SIZE of SRAM, at least 2-byte aligned. mem_bytes of guest RAM, all
 // of it reading as zero.
-void     pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes);
+// The first nvram frames are VRAM (PM_VRAM_LOW to PM_VRAM_BYTES), only paged while lent.
+void     pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes, int nvram);
 void     pm_shutdown(void);
 // VRAM bytes PM_VRAM_BYTES to PM_VRAM_FULL, at PSRAM address psram (0: none), cleared.
 void     pm_vram_hi_init(uint32_t psram);
@@ -98,6 +112,16 @@ int      pm_unlend(void *p);
 // as zeros. pm_put_page with buf NULL makes the page zeros again.
 int      pm_get_page(uint32_t page, void *buf);
 void     pm_put_page(uint32_t page, const void *buf);
+// Lending the VGA's idle VRAM (PM_VRAM_LOW up). pm_vram_stash names 96 KB of PSRAM that keeps it
+// meanwhile. pm_vram_lend is called between steps once the VGA has been in a mode that leaves it
+// idle for a while. pm_vram_reclaim gives it back: write-backs, then the VRAM restored, before the
+// VGA uses it (a register write that changes the mode, a snapshot). hold keeps it from being lent
+// again until the next pm_init (the guest wrote the linear framebuffer). pm_vram_lent is set while
+// it is out.
+extern int pm_vram_lent;
+void     pm_vram_stash(uint32_t psram);
+void     pm_vram_lend(void);
+void     pm_vram_reclaim(int hold);
 // Fault and write-back counts since pm_init, for the FPS line.
 uint32_t pm_faults(void);
 uint32_t pm_writebacks(void);
