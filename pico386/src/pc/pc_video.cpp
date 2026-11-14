@@ -33,6 +33,7 @@ int s_lastMode = -1, s_lastW, s_lastH;
 int s_lastFontSize = -1;
 int s_clearFrames;                             // both video buffers need their borders cleared
 bool s_gfxFull = true;
+uint32_t s_gfxGen;                             // t386_vga_gen() of the last picture drawn
 
 // ---- graphics ----------------------------------------------------------------------------------
 inline uint16_t avg2(uint16_t a, uint16_t b) {
@@ -390,6 +391,15 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
   bool changed = in.mode != s_lastMode || g_settings.fontSize != s_lastFontSize;
   s_lastFontSize = g_settings.fontSize;
   if (in.mode == 2) {
+    // Nothing written to the VGA since the last picture: skip it. FastDoom draws each frame
+    // elsewhere and copies it to VRAM a few times a second; redrawing it every 1/60 s anyway cost
+    // the P4 a sixth of its speed (1.8 MIPS, 2.1-2.2 with the skip, 2026-11-14): each redraw moves
+    // about 400 KB through the PSRAM, which the guest's RAM shares.
+    const uint32_t gen = t386_vga_gen();
+    if (!s_gfxFull && !changed && !s_clearFrames && gen == s_gfxGen && in.gfx_w == s_lastW &&
+        in.gfx_h == s_lastH)
+      return false;
+    s_gfxGen = gen;
 #if defined(PICO386_LOWMEM)
     // A new picture size: clear the panel first, or this frame's rows would be wiped after it.
     if (changed || in.gfx_w != s_lastW || in.gfx_h != s_lastH)
@@ -412,7 +422,10 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
 #if defined(PICO386_LOWMEM)
     // The refresh found a new size and drew it over the old picture's borders: clear them now,
     // the next frame draws the picture again.
-    if (in.gfx_w != preW || in.gfx_h != preH) hal_panel_fill(0, SCREEN_Y0, SCREEN_W, SCREEN_H - 10, 0);
+    if (in.gfx_w != preW || in.gfx_h != preH) {
+      hal_panel_fill(0, SCREEN_Y0, SCREEN_W, SCREEN_H - 10, 0);
+      s_gfxFull = true;                          // nothing new may be written: draw it anyway
+    }
 #endif
   } else {
     s_gfxFull = true;

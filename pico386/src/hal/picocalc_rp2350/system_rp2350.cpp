@@ -21,6 +21,7 @@
 #include <hardware/clocks.h>
 #include <hardware/vreg.h>
 #include <hardware/structs/systick.h>
+#include <hardware/structs/qmi.h>
 #include "../hal.h"
 
 bool picocalcWaitForMainboard();   // input_rp2350.cpp
@@ -85,10 +86,13 @@ void hal_reboot_to_loader() {
 //   @keys <script>   type a PC_KEYS script (keyscript.h); "@keys done" when it has run
 //   @mpace <i> <s>   keyboard mouse: guest instructions between packets, largest step (tuning)
 //   @shot            the screen, as "@S" rows (rp2350Shot); "@shotraw <y>" dumps a row's raw bytes
+//   @prof <hz> <n>   sample core 0's PC (prof_rp2350.cpp); "@profdump" prints the samples
 // tools/remote.py drives them. The answers go back to the port the command came from.
 void rp2350RemoteKeys(const char *script, Print *port);   // input_rp2350.cpp
 void rp2350Shot(Print &out, int rawRow);                  // display_rp2350.cpp
 void rp2350ShotTest(Print &out, int khz);                 // display_rp2350.cpp
+void rp2350ProfStart(const char *args);                   // prof_rp2350.cpp
+void rp2350ProfDump();                                    // prof_rp2350.cpp
 
 void pckbd_mouse_pace(uint32_t instr, int step);   // pc_keymap.cpp
 
@@ -98,6 +102,8 @@ static void serialCommand(char *line, Print *port) {
   else if (!strcmp(line, "@shot")) rp2350Shot(*port, -1);
   else if (!strncmp(line, "@shotraw ", 9)) rp2350Shot(*port, atoi(line + 9));
   else if (!strncmp(line, "@shottest", 9)) rp2350ShotTest(*port, atoi(line + 9));
+  else if (!strncmp(line, "@prof ", 6)) rp2350ProfStart(line + 6);
+  else if (!strcmp(line, "@profdump")) rp2350ProfDump();
   else if (!strncmp(line, "@mpace ", 7)) {
     unsigned long instr = 0;
     int step = 0;
@@ -212,12 +218,14 @@ static void sdInit() {
 // Every Pico 2 runs at 300 MHz (the build's freq=300), and arduino-pico leaves the RP2350's core
 // at its power-on 1.10 V (it raises it only on the RP2040). Ours copes; a user's AliExpress RP2350
 // froze within seconds of boot (2026-11-10). So an optional /pico-386/rp2350.ini can set
-//   mhz       = 250    clk_sys, 100-300 (default 300)
+//   mhz       = 250    clk_sys, 100-400 (default 300; above it is an overclock)
 //   vreg      = 1.20   the core's volts, 1.10-1.30 (default: left at 1.10)
 //   psram_div = 3      the fastest PSRAM clock divider tried, 2-10 (default 2: SCK = clk_sys / 4)
+//   psram_quad = 0     keep the PSRAM in plain SPI (default 1: quad when its self-test passes)
 // Without the file nothing changes. It is read before anything but the serial ports depends on the
 // clock (the panel, the SD's SPI, the PSRAM's PIO, the audio PWM are set up after it).
 uint8_t g_psramMinDiv = 2;                 // psram_rp2350.cpp
+uint8_t g_psramQuad = 1;                   // psram_rp2350.cpp
 
 void rp2350KbdReclock();                   // input_rp2350.cpp
 
@@ -228,7 +236,7 @@ static void tickCore1(void *) {
   vTaskDelete(nullptr);
 }
 
-struct Tune { int mhz = 0, mv = 0, psramDiv = 0; };
+struct Tune { int mhz = 0, mv = 0, psramDiv = 0, psramQuad = -1; };
 
 // "key = value" lines; [sections], ';' and '#' comments are ignored.
 static Tune readTune() {
@@ -256,6 +264,7 @@ static Tune readTune() {
       if (!strcmp(k, "mhz")) t.mhz = atoi(v);
       else if (!strcmp(k, "vreg")) t.mv = (int)(atof(v) * 1000.0 + 0.5);
       else if (!strcmp(k, "psram_div")) t.psramDiv = atoi(v);
+      else if (!strcmp(k, "psram_quad")) t.psramQuad = atoi(v) ? 1 : 0;
     }
     f.close();
   }
@@ -265,6 +274,15 @@ static Tune readTune() {
 
 static char s_tuneLog[120] = "";
 
+// The flash's clock is clk_sys / CLKDIV (QMI window 0); at boot that is 3, so above 300 MHz it
+// would pass the chip's 133 MHz. Changed from SRAM, with the other core idle and no interrupts here,
+// since nothing may fetch from flash while the timing changes.
+static void __no_inline_not_in_flash_func(setFlashDiv)(uint32_t div) {
+  const uint32_t t = qmi_hw->m[0].timing;
+  qmi_hw->m[0].timing = (t & ~QMI_M0_TIMING_CLKDIV_BITS) | (div << QMI_M0_TIMING_CLKDIV_LSB);
+  (void)qmi_hw->m[0].timing;
+}
+
 static void applyTune() {
   const Tune t = readTune();
   char *o = s_tuneLog;
@@ -273,19 +291,37 @@ static void applyTune() {
     g_psramMinDiv = (uint8_t)t.psramDiv;
     o += snprintf(o, end - o, " psram_div %d", t.psramDiv);
   }
+  if (t.psramQuad == 0) {
+    g_psramQuad = 0;
+    o += snprintf(o, end - o, " psram_quad 0");
+  }
   // 1.10-1.30 V in 50 mV steps (VREG_VOLTAGE_1_10 .. _1_30 are consecutive); above needs unlocking.
   int vsel = -1;
   if (t.mv >= 1100 && t.mv <= 1300) vsel = VREG_VOLTAGE_1_10 + (t.mv - 1100 + 25) / 50;
   else if (t.mv) o += snprintf(o, end - o, " vreg %d mV ignored (1.10-1.30)", t.mv);
-  const uint32_t khz = (t.mhz >= 100 && t.mhz <= 300) ? (uint32_t)t.mhz * 1000 : 0;
-  if (t.mhz && !khz) o += snprintf(o, end - o, " mhz %d ignored (100-300)", t.mhz);
+  const uint32_t khz = (t.mhz >= 100 && t.mhz <= 400) ? (uint32_t)t.mhz * 1000 : 0;
+  if (t.mhz && !khz) o += snprintf(o, end - o, " mhz %d ignored (100-400)", t.mhz);
   if (vsel < 0 && (!khz || khz * 1000 == clock_get_hz(clk_sys))) return;
 
   // Raise the voltage before a faster clock; lower clocks are safe at any voltage, so it goes after.
   rp2350LogLock(true);
   Serial1.flush();
   if (vsel >= 0 && vsel > (int)vreg_get_voltage()) { vreg_set_voltage((vreg_voltage)vsel); busy_wait_us_32(1000); }
-  if (khz && khz * 1000 != clock_get_hz(clk_sys) && !set_sys_clock_khz(khz, false)) o += snprintf(o, end - o, " %lu MHz not reachable", (unsigned long)(khz / 1000));
+  if (khz && khz * 1000 != clock_get_hz(clk_sys)) {
+    // The flash at 100 MHz or less: the slower divider before a faster clock, the faster after.
+    const uint32_t oldDiv = (qmi_hw->m[0].timing & QMI_M0_TIMING_CLKDIV_BITS) >> QMI_M0_TIMING_CLKDIV_LSB;
+    const uint32_t div = (khz + 99999) / 100000 < 3 ? 3 : (khz + 99999) / 100000;
+    rp2040.idleOtherCore();
+    noInterrupts();
+    if (div > oldDiv) setFlashDiv(div);
+    const bool ok = set_sys_clock_khz(khz, false);
+    if (ok && div < oldDiv) setFlashDiv(div);
+    if (!ok && div > oldDiv) setFlashDiv(oldDiv);
+    interrupts();
+    rp2040.resumeOtherCore();
+    if (!ok) o += snprintf(o, end - o, " %lu MHz not reachable", (unsigned long)(khz / 1000));
+    else if (div != oldDiv) o += snprintf(o, end - o, " flash div %lu", (unsigned long)div);
+  }
   if (vsel >= 0 && vsel < (int)vreg_get_voltage()) vreg_set_voltage((vreg_voltage)vsel);
   tickReload();
   Serial1.end();

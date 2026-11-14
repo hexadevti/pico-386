@@ -106,6 +106,11 @@ extern "C" {
 size_t   hal_psram_size(void);
 void     hal_psram_read(uint32_t addr, void *dst, size_t n);
 void     hal_psram_write(uint32_t addr, const void *src, size_t n);
+// Writes buf (n bytes, word-aligned, at most 1 KB) to wr, then reads rd into buf; rd
+// HAL_PSRAM_NONE only writes. The write may still be running when it returns (the RP2350's DMA
+// finishes it while the guest runs on), and every later PSRAM call waits for it first.
+#define HAL_PSRAM_NONE 0xffffffffu
+void     hal_psram_swap(uint32_t wr, uint32_t rd, void *buf, size_t n);
 uint8_t *hal_arena(size_t *size);
 }
 #endif

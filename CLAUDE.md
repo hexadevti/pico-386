@@ -70,8 +70,11 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     card, which has no `games`). DOS-128 left 23 KB too little conventional memory. The game's
     AIL drivers ignore `BLASTER` and default to IRQ 7, so the digital driver failed its check
     ("Sound hardware not found") until `CLASSIC.CFG` named the port, IRQ and DMA (lines after each
-    .ADV: 220, 5, 1, *). Runs on the RP2350 with music; the OPL takes about 35% (690 ms of mix
-    per 2 s).
+    .ADV: 220, 5, 1, *). Runs on the RP2350 with music; the OPL took about 35% (690 ms of mix
+    per 2 s) and, with the compact tables (`FMOPL_COMPACT`, 2026-11-14, THIRD_PARTY.md), about
+    16% (335 ms). The profiler shows it as `opl_out`/`OPL_CALC_CH`, inlined into
+    `YM3812UpdateOne` (4.3 KB, in flash; in SRAM it would cost 4 KB of the 10 KB of heap).
+    Launch: home menu SimCity, Start, then `d:`, `cd simcity`, `simcity`.
   - VBE modes and Windows
   - writes to a hard-disk image
   - a D: folder disk above 504 MB (FAT16 LBA, type 0Eh), and D: with Windows 95 long names
@@ -104,6 +107,17 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       corner counter on the device at 1.7-1.8 MIPS (33 on the desktop). About 75% of core 1 is the
       interpreter. A silent OPL took about 7% until `fmopl.c` skipped it (THIRD_PARTY.md). A full
       `-timedemo demo1` takes over 15 minutes on the device, so compare MIPS and `prof` instead.
+    - **P4 pass (2026-11-14):**
+      - The frontend skips drawing a graphics picture the guest has not written since the last one
+        (`t386_vga_gen`, THIRD_PARTY.md): FastDoom went from 1.8 to 2.1-2.2 MIPS. The RP2350
+        shares the code (on `build-lowmem`, m12/m13 draw correctly), but it is not yet tested
+        on the device.
+      - Tried and dropped:
+        - Inlining `fetch16`/`fetch32` gave 1.8 MIPS (no change). Forcing `fetch8pf` inline was
+          worse, at 1.7.
+        - The L2 cache can't grow. It is the first 256 KB of L2MEM, and our IRAM code sits after it.
+        - Drawing 1 frame in 4 gave the same MIPS, so core 0's drawing doesn't evict the cache.
+      - Readings vary between boots, so compare builds back to back with the same keys.
     - **Profiler:** `python -I tools/remote.py --p4 prof 8` samples core 1 at 2 kHz (`prof_p4.cpp`,
       `@prof`/`@profdump`) and prints hot functions and lines through addr2line on the build's .elf.
       Names are the innermost inlined function, so `pload8` or `fetch8pf` usually means code inside
@@ -144,10 +158,50 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       and was garbled without it (Win 3.1's isn't). The screen shows only the first 160 KB, so
       page flips above 40 KB per plane still show the wrong page. Fixed on `build-lowmem` with
       `ms5.ini` (MS-DOS 5.0 + Windows 3.0 on `msdos5-hdd-32mb.img`). Works on the device.
+    - **Branch `fast-cpu` (2026-11-13/14):** CheckIt **6.72x** (2310 Dhrystones), from the inline
+      ifetch through the code's frame, the real-mode `translate` exit and a hot/cold split of
+      `cpu_exec1` (`i386_exec.h` compiled twice; `I386_COLD` lists the opcodes left in flash).
+      All in THIRD_PARTY.md. Count opcodes with a desktop build configured with
+      `-DT386_OPSTATS` (it was `build-opstats`) before moving any to the cold list.
+      The split freed 23 KB of SRAM, and the app stack went from 24 to 16 KB (it uses about 3 KB),
+      which pay for 96 frames instead of 64 (see the pager below). Static RAM 433 KB; with a PC
+      running 14.6 KB of heap and 13 KB of app stack are free.
+    - **Windows 3.1 is bound by page faults, not the interpreter.** On the desktop at a fixed
+      3 MIPS (`PC_MIPS=3 PC_MIPS_AT=0`, `opst.ini`), a minute of Windows faulted 5.4M times with
+      64 frames and about 0.3-0.45M with 96; its working set fits in 96 and not in 92. Random
+      replacement beat the clock at 80 frames and lost badly at 64 and 96, so the clock stays.
+      On the device idle Program Manager now runs at 0.29 MIPS (it was about 0.075), still with
+      about 19k faults every 2 s. The user asked to leave the pager there (2026-11-14).
+    - **FastDoom (2026-11-14, startup "doom", `C:\DOOM\DOOM.BAT` = FDOOM13H -low):** about 1 fps
+      at 1.0-1.1 MIPS (DOOMF, potato, shows 2-4). The user wants it faster without shrinking the
+      view or the detail. Done so far:
+      - In mode 13h the 96 KB of VRAM above 64 KB are lent to the pager (`pm_vram_lend`,
+        THIRD_PARTY.md), so 192 frames: faults per 2 s from about 12.3k to 6k. Their contents wait
+        in PSRAM below `pm_vram_hi`'s area (`VLEND_BYTES`), and come back on a mode change.
+      - `frameOf` checks a resident-page bitmap and a hint before searching (it was 2%).
+      - A dirty victim goes out behind the new page's read (`hal_psram_swap`): the DMA streams a
+        prebuilt list of burst headers and data while the guest runs, so `rawWrite` (about 5%)
+        is gone. Left: about 16% waiting for page reads, about 55% the interpreter.
+      - Overclock (`rp2350.ini` `mhz` up to 400): `hal_init` raises the flash's QMI divider to keep
+        it at 100 MHz or less (div 4 at 360 and 400) with the other core idled. The device's ini
+        now has `mhz = 400`, `vreg = 1.30`: FastDoom about 1.4 MIPS (1.28 at 360/1.25, 1.0-1.1 at
+        300), 6 min of demos without a fault. The PSRAM at 60 MHz (360/3) passed the boot test but
+        corrupted guest RAM (a GPF in FDOOM13H), so `calibrate` never takes a divider above
+        50 MHz: 45 MHz at 360, 50 at 400.
+      - **Doom quitting to `C:\DOOM>` after 1-4 min of demos was not the overclock:** it was out of
+        memory ("Failed on allocation of 35120 bytes", shown on the desktop; the device's screen
+        lost the text). The 4 MB guest (`PM_MAX_RAM`) left too little after DOS-128's
+        `SMARTDRV.EXE`, which takes a 1 MB XMS cache by default. The device's DOS-128.img now has
+        `C:\WINDOWS\SMARTDRV 256` (2026-11-14, typed in through `remote.py`; the original is
+        `C:\AUTOEXEC.OLD`). The desktop's copy of DOS-128.img still has the old line.
+      - Profile at 360 (2026-11-14): PSRAM page reads about 21% (`dma_channel_is_busy`, `rawRead`),
+        the interpreter about 60% (`cpu_exec1` 20%, `fetch8pf` 7.5%, `translate` 6%, `fetch8` 5%,
+        `modsib*` 7%, the `__GE_helper`s 5%). 2 KB and 512 B pages were both worse than 1 KB
+        (pc_pagemem.h).
     - Ideas not tried yet: hot non-i386 code in SRAM (`pc_step`, the PIC/PIT, port I/O).
   - `PICO386_LOWMEM` (board.h): guest RAM lives in the mainboard's 8 MB PSRAM, which hangs off
     a PIO and is not memory-mapped. It is paged through 1 KB SRAM frames (`pc_pagemem.c`).
-    - `hal_arena` holds VRAM (160 KB), then 64 KB of frames. The menu canvas (200 KB) borrows the
+    - `hal_arena` holds VRAM (160 KB), then 96 KB of frames (64 until 2026-11-14). The menu canvas (200 KB) borrows the
       start of it, so `app.cpp` parks that much (`PARK_BYTES`, the first frames too) in PSRAM
       around the menus.
     - Pages were 4 KB at first (16 frames), and DOS crawled: about 40k guest instructions a
@@ -195,7 +249,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     - tiny386 itself takes 43 KB of heap. 26 frames left too little heap, and on the
       device (2026-10-28) 18 ran out at the PC's first frame, when FreeRTOS (whose heap is malloc's,
       `heap_3a`) made the draw task. The draw task is now static and made at boot. That is
-      why the frames stay at 64 KB.
+      why the frames stayed at 64 KB until the interpreter's split freed SRAM.
     - A zip chosen for A: in-game hung the device (2026-11-01). With a PC running, only about
       10 KB of heap is free, and the unzip wanted 64 KB for the zip's tail plus a 32 KB window.
       The folder floppy then needed 12 KB for its FAT and root directory. Now:
@@ -263,11 +317,20 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     keyboard firmware, which went away with ClockworkPi's official 1.7.
   - Test it on the desktop with the `build-lowmem` CMake dir (`-DEMU_LOWMEM=ON`), which simulates
     the PSRAM. Prince of Persia and MS-DOS 6 run there.
-  - `psram_rp2350.cpp` drives the PSRAM as plain SPI from pio1 (CS 20, SCK 21, SIO0 2, SIO1 3).
-    It calibrates itself at boot over clock dividers and read-delay clocks, and logs
-    `psram: ... KB, SCK ... kHz, N wait clocks, N-byte bursts`. Ask for that line first.
+  - `psram_rp2350.cpp` drives the PSRAM from pio1 (CS 20, SCK 21, SIO0-3 on GP2-5). Since
+    2026-11-13 (branch `fast-cpu`) it enters QPI (0x35; 0xEB reads, 0x38 writes) and falls back to
+    plain SPI if quad fails its self-test; `psram_quad = 0` in rp2350.ini forces SPI. It calibrates
+    itself at boot over clock dividers and read-delay clocks, and logs
+    `psram: ... KB, quad|SPI, SCK ... kHz, N wait clocks, N-byte bursts`. Ask for that line first.
+    The user's device: quad at 50 MHz (75 MHz fails), 128-byte bursts. Paging went from about 22%
+    of the time to about 6% in Prince's intro.
+  - **Profiler (2026-11-13):** `python -I tools/remote.py --hz 1000 prof 8` samples core 0
+    (`prof_rp2350.cpp`, `@prof`/`@profdump`, rounds of 1024); `--raw f.txt` saves, `--from f.txt`
+    reports again. Prince's intro is mostly a halted guest: `pit_ticks`, `i8254_update_irq`,
+    `pc_step`, `cpui386_step` and `get_uticks` there are the idle loop, not cost. After the PIT and
+    quad fixes the real work is the OPL (about 25%), the interpreter (about 12%) and paging (6%).
   - Cores: arduino-pico's FreeRTOS SMP runs setup/loop on core 0 with a 4 KB stack. So
-    `pico386.ino` starts an "app" task (24 KB static stack) on core 0, and the draw job and
+    `pico386.ino` starts an "app" task (16 KB static stack) on core 0, and the draw job and
     keyboard poll run on core 1. The panel has a mutex, because both cores push to it.
   - The POSIX gaps are filled in `posix_rp2350.cpp` and `include/dirent.h`: mkdir, rmdir,
     rename, readdir over SDFS, clock_gettime and usleep. `VFS.map("/sd", SDFS)` covers the

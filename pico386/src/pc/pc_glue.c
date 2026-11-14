@@ -17,6 +17,9 @@ static int s_parked;                    // the arena's start is in PSRAM while t
 #define PARK_BYTES (PANEL_W * PANEL_H * 2 > PM_VRAM_BYTES ? PANEL_W * PANEL_H * 2 : PM_VRAM_BYTES)
 // VRAM above the arena's PM_VRAM_BYTES (pm_vram_hi), just below the park area.
 #define VHI_BYTES (PM_VRAM_FULL - PM_VRAM_BYTES)
+// The VRAM lent to the pager in mode 13h (pm_vram_lend) waits just below that.
+#define VLEND_BYTES (PM_VRAM_BYTES - PM_VRAM_LOW)
+static uint32_t s_idleSince;                      // when the VGA's high VRAM went idle; 0: busy
 #endif
 static char s_err_file[160];
 static long s_mem_limit;                // t386_limit_mem: the next start's RAM at most (0: none)
@@ -212,6 +215,7 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
     uint8_t *arena = hal_arena(&arena_n);
     const long room = pcmem_scratch() & ~0xfffffL;
     const int nframes = arena && arena_n > PM_VRAM_BYTES ? (int)((arena_n - PM_VRAM_BYTES) >> PM_PAGE_SHIFT) : 0;
+    const int nvram = (int)(VLEND_BYTES >> PM_PAGE_SHIFT);
     conf.vga_mem_size = PM_VRAM_BYTES;
     if (conf.mem_size > room) conf.mem_size = room;
     if (conf.mem_size > (long)PM_MAX_RAM) conf.mem_size = PM_MAX_RAM;
@@ -223,8 +227,11 @@ int t386_start(const char *ini_path, const char *sd_root, const char *bios_dir, 
     }
     s_parked = 0;
     pm_vram = arena;
-    pm_init(arena + PM_VRAM_BYTES, nframes, (uint32_t)conf.mem_size);
+    // The frames start at PM_VRAM_LOW: the first nvram of them are VRAM until lent (pm_vram_lend).
+    pm_init(arena + PM_VRAM_LOW, nvram + nframes, (uint32_t)conf.mem_size, nvram);
     pm_vram_hi_init((uint32_t)(hal_psram_size() - PARK_BYTES - VHI_BYTES));
+    pm_vram_stash((uint32_t)(hal_psram_size() - PARK_BYTES - VHI_BYTES - VLEND_BYTES));
+    s_idleSince = 0;
     t386_log("tiny386: paging guest RAM through %d frames of SRAM", nframes);
   }
 #else
@@ -299,7 +306,9 @@ void pcmem_unpark() {
 void *pcmem_lend(size_t n) { return pm_vram ? pm_lend(n, pm_vram + PARK_BYTES) : NULL; }
 int pcmem_free(void *p) { return pm_unlend(p); }
 
-long pcmem_scratch() { return (long)hal_psram_size() - (long)PARK_BYTES - (long)VHI_BYTES - PCMEM_SCRATCH_BYTES; }
+long pcmem_scratch() {
+  return (long)hal_psram_size() - (long)PARK_BYTES - (long)VHI_BYTES - (long)VLEND_BYTES - PCMEM_SCRATCH_BYTES;
+}
 
 long pcmem_spare(long *bytes) {
   *bytes = PCMEM_SPARE_BYTES;
@@ -387,6 +396,25 @@ void t386_run_until(uint32_t deadline_us) {
       sound = now;
     }
   } while ((int32_t)(deadline_us - get_uticks()) > 0);
+#if defined(PICO386_LOWMEM)
+  // The VGA's idle VRAM goes to the pager once it has stayed idle for a second, so a program
+  // that flips modes does not copy 96 KB each way every time. pc.c takes it back on the register
+  // write that needs it.
+  static int lent;
+  if (lent != pm_vram_lent) {                     // given back by pc.c since the last frame
+    lent = pm_vram_lent;
+    t386_log("vram: %u KB back to the VGA", (unsigned)(VLEND_BYTES >> 10));
+  }
+  if (!pm_vram_lent) {
+    const uint32_t now = get_uticks();
+    if (!vga_pico_hi_idle(s_pc->vga)) s_idleSince = 0;
+    else if (!s_idleSince) s_idleSince = now | 1;
+    else if (now - s_idleSince > 1000000u) {
+      pm_vram_lend();
+      if ((lent = pm_vram_lent)) t386_log("vram: %u KB lent to the pager", (unsigned)(VLEND_BYTES >> 10));
+    }
+  }
+#endif
 }
 
 extern uint32_t sb16_starved;
@@ -429,6 +457,9 @@ static void on_redraw(void *opaque, int x, int y, int w, int h) {
   (void)x; (void)y; (void)w; (void)h;
   *(int *)opaque = 1;
 }
+
+extern volatile uint32_t pico_vga_gen;           // pc.c
+uint32_t t386_vga_gen(void) { return pico_vga_gen; }
 
 int t386_refresh(int full) {
   int drawn = 0;
@@ -511,6 +542,9 @@ static void snap_mem(SnapIO *io, uint8_t *mem, uint32_t bytes) {
 static int snap_run(FILE *f, int load) {
   if (!s_pc) return T386_SNAP_FORMAT;
   SnapIO io = { f, load, 0, 0, 0, 0 };
+#if defined(PICO386_LOWMEM)
+  pm_vram_reclaim(0);                             // VRAM is saved and loaded whole
+#endif
   t386_log("snapshot: %s, %u KB RAM, %u KB VRAM", load ? "loading" : "saving",
           (unsigned)(s_pc->phys_mem_size >> 10), (unsigned)(s_pc->vga_mem_size >> 10));
   uint32_t now = get_uticks();
@@ -541,4 +575,4 @@ static int snap_run(FILE *f, int load) {
 }
 
 int t386_save_state(FILE *f) { return snap_run(f, 0); }
-int t386_load_state(FILE *f) { return snap_run(f, 1); }
+int t386_load_state(FILE *f) { pico_vga_gen++; return snap_run(f, 1); }

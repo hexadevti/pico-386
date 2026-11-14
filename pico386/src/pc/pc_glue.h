@@ -92,6 +92,9 @@ int  t386_refresh(int full);
 typedef void T386LineFunc(void *opaque, int y, const uint16_t *line, int w, int h);
 void t386_set_line_sink(T386LineFunc *f, void *opaque);
 void t386_info(VGAPicoInfo *info);
+// Changes with every guest write to the VGA's memory or registers: the same value means the
+// picture has not changed since.
+uint32_t t386_vga_gen(void);
 
 // Puts an image, a folder or a zip (as a 1.44 MB floppy) in A: (0) or B: (1); NULL or "" ejects.
 // 0 on success, else a T386_FD_* code. A folder floppy taken out is written back to its folder.
