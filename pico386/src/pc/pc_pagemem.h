@@ -47,6 +47,15 @@ extern uint16_t pm_map[PM_MAX_PAGES];
 extern uint8_t *pm_frame0;
 // The VGA's memory: the start of the SRAM arena, set by t386_start before pc_new takes it.
 extern uint8_t *pm_vram;
+// i386.c keeps two pointers into the frame holding the running code (cpu->ifetch.ptr, the next
+// instruction byte, and .fbase, the frame itself), so fetching skips pm_entry and pm_read8 for
+// every byte (40% of the time in CheckIt's CPU test on the device, 2026-11-13). The pager clears
+// both through this slot whenever a frame changes hands, so an instruction whose data access
+// faults goes back to the slow fetch. pm_set_ifslot(NULL) points it at a dummy again (pm_init
+// does, and t386_release_all before freeing the CPU).
+extern uint8_t **pm_ifslot;
+void pm_set_ifslot(uint8_t **slot);
+#define PM_IF_DROP() (pm_ifslot[0] = pm_ifslot[1] = NULL)
 
 // The HAL's PSRAM (hal.h; a malloc'd buffer on the desktop).
 size_t hal_psram_size(void);

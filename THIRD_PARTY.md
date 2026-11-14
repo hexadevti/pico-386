@@ -103,6 +103,10 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   - **Counters for the RP2350 heartbeat:** `pit_irq0_fired`, `pic_irq0_merged` and
     `i8254_info`, read through `t386_timer_info`.
   - **Result on the device:** 450-495 IRQ0s every 2 s of the 480 due, and none lost.
+  - **`i8254.c`, the tick count (2026-11-13):** `(uint64_t) us * PIT_FREQ / 1000000` was a libgcc
+    call (`__udivmoddi4`) on the RP2350: 15% of the time with Prince of Persia's intro, and two
+    thirds of it with the guest halted. `pit_ticks` gives the same result exactly (checked over 6M
+    values) with 32-bit divisions.
 - **The sound rate and the run loop (2026-11-02).**
   - **`adlib.c`, `pcspk.c`, `sb16.c`:** the fixed 44100 Hz output rate became `T386_AUDIO_RATE`
     (`tiny386_port.h`, the board's `AUDIO_OUT_RATE`). The RP2350 mixes at 22050 Hz, which halves
@@ -192,6 +196,29 @@ not memory-mapped, and is paged through 1 KB SRAM frames (`pc_pagemem.c`, ours).
   - The TLB uses the non-pointer form that upstream keeps for `BUILD_ESP32`.
   - It keeps the physical address of the PTE (`ppte`) instead of a host pointer, so setting the
     accessed and dirty bits is a paged store.
+  - **Speed (2026-11-13/14, branch `fast-cpu`).** CheckIt on the device went from 5.21x to 6.72x
+    PC-XT (1792 to 2310 Dhrystones):
+    - **Instruction fetch:** `ifetch` gained `ptr`, `fbase` and `fladdr`: the frame holding the
+      running code and the linear address of its first byte. `fetch8pf` is one subtraction and a
+      load while the instruction (15 bytes, plus `try_jcc8`'s peek at two more) fits in the
+      frame, and `fetch8` reads through `ptr` inline, with `fetch8_slow` behind it. The pager
+      clears `ptr` and `fbase` before a frame changes hands (`PM_IF_DROP`, `pm_set_ifslot`).
+    - **`translate` in real mode** returns base + offset at once, without `segcheck` or paging
+      (PG needs PE); the two calls were 10% of CheckIt's CPU test. Only without `I386_FASTPATH`.
+    - **`I386_FASTPATH` is off in every `T386_PAGED` build,** so the desktop's LOWMEM build runs
+      the RP2350's code. With it on there, SeaBIOS aborted on entering protected mode.
+    - **Hot and cold `cpu_exec1`:** the decoder and instructions moved to `i386_exec.h`, which
+      `i386.c` includes twice. `cpu_exec1_full` (noinline, in flash) has every instruction;
+      `cpu_exec1` (in SRAM) sends the 70 opcodes named in `I386_COLD` (BCD, string I/O,
+      descriptor-table and control-register instructions, CMPXCHG, BSF/BSR, SHLD/SHRD, RCR, BTC,
+      CMPS, SCAS, LOOPE and others that DOS and Windows 3.x hardly run, counted with
+      `T386_OPSTATS`) to its `punt` label, which runs the instruction again in `cpu_exec1_full`
+      from its first prefix. GCC folds the name compares, so a cold body is dead code. HLT, STI,
+      POPF, IRET and loads of SS must stay hot, since `cpu_exec1_full` runs only one instruction.
+      `cpu_exec1` went from 90 KB of SRAM to 66.5 KB. `fetch8pf` is `always_inline` there,
+      because with two callers GCC no longer inlined it (CheckIt fell to 6.18x).
+    - **`T386_OPSTATS`** (desktop only): prints on stderr at exit how often each opcode ran in
+      the hot copy.
 - **`i8257.c`:** DMA reads and writes go through `DMA_LOAD`/`DMA_STORE` (`pm_read8`/`pm_write8`).
 - **`pc.c`:**
   - `pc_new` allocates no RAM (`t386_start` sets up the pages), and VRAM is the start of the

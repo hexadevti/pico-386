@@ -85,10 +85,13 @@ void hal_reboot_to_loader() {
 //   @keys <script>   type a PC_KEYS script (keyscript.h); "@keys done" when it has run
 //   @mpace <i> <s>   keyboard mouse: guest instructions between packets, largest step (tuning)
 //   @shot            the screen, as "@S" rows (rp2350Shot); "@shotraw <y>" dumps a row's raw bytes
+//   @prof <hz> <n>   sample core 0's PC (prof_rp2350.cpp); "@profdump" prints the samples
 // tools/remote.py drives them. The answers go back to the port the command came from.
 void rp2350RemoteKeys(const char *script, Print *port);   // input_rp2350.cpp
 void rp2350Shot(Print &out, int rawRow);                  // display_rp2350.cpp
 void rp2350ShotTest(Print &out, int khz);                 // display_rp2350.cpp
+void rp2350ProfStart(const char *args);                   // prof_rp2350.cpp
+void rp2350ProfDump();                                    // prof_rp2350.cpp
 
 void pckbd_mouse_pace(uint32_t instr, int step);   // pc_keymap.cpp
 
@@ -98,6 +101,8 @@ static void serialCommand(char *line, Print *port) {
   else if (!strcmp(line, "@shot")) rp2350Shot(*port, -1);
   else if (!strncmp(line, "@shotraw ", 9)) rp2350Shot(*port, atoi(line + 9));
   else if (!strncmp(line, "@shottest", 9)) rp2350ShotTest(*port, atoi(line + 9));
+  else if (!strncmp(line, "@prof ", 6)) rp2350ProfStart(line + 6);
+  else if (!strcmp(line, "@profdump")) rp2350ProfDump();
   else if (!strncmp(line, "@mpace ", 7)) {
     unsigned long instr = 0;
     int step = 0;
@@ -215,9 +220,11 @@ static void sdInit() {
 //   mhz       = 250    clk_sys, 100-300 (default 300)
 //   vreg      = 1.20   the core's volts, 1.10-1.30 (default: left at 1.10)
 //   psram_div = 3      the fastest PSRAM clock divider tried, 2-10 (default 2: SCK = clk_sys / 4)
+//   psram_quad = 0     keep the PSRAM in plain SPI (default 1: quad when its self-test passes)
 // Without the file nothing changes. It is read before anything but the serial ports depends on the
 // clock (the panel, the SD's SPI, the PSRAM's PIO, the audio PWM are set up after it).
 uint8_t g_psramMinDiv = 2;                 // psram_rp2350.cpp
+uint8_t g_psramQuad = 1;                   // psram_rp2350.cpp
 
 void rp2350KbdReclock();                   // input_rp2350.cpp
 
@@ -228,7 +235,7 @@ static void tickCore1(void *) {
   vTaskDelete(nullptr);
 }
 
-struct Tune { int mhz = 0, mv = 0, psramDiv = 0; };
+struct Tune { int mhz = 0, mv = 0, psramDiv = 0, psramQuad = -1; };
 
 // "key = value" lines; [sections], ';' and '#' comments are ignored.
 static Tune readTune() {
@@ -256,6 +263,7 @@ static Tune readTune() {
       if (!strcmp(k, "mhz")) t.mhz = atoi(v);
       else if (!strcmp(k, "vreg")) t.mv = (int)(atof(v) * 1000.0 + 0.5);
       else if (!strcmp(k, "psram_div")) t.psramDiv = atoi(v);
+      else if (!strcmp(k, "psram_quad")) t.psramQuad = atoi(v) ? 1 : 0;
     }
     f.close();
   }
@@ -272,6 +280,10 @@ static void applyTune() {
   if (t.psramDiv >= 2 && t.psramDiv <= 10) {
     g_psramMinDiv = (uint8_t)t.psramDiv;
     o += snprintf(o, end - o, " psram_div %d", t.psramDiv);
+  }
+  if (t.psramQuad == 0) {
+    g_psramQuad = 0;
+    o += snprintf(o, end - o, " psram_quad 0");
   }
   // 1.10-1.30 V in 50 mV steps (VREG_VOLTAGE_1_10 .. _1_30 are consecutive); above needs unlocking.
   int vsel = -1;

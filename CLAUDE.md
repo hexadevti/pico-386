@@ -144,10 +144,24 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       and was garbled without it (Win 3.1's isn't). The screen shows only the first 160 KB, so
       page flips above 40 KB per plane still show the wrong page. Fixed on `build-lowmem` with
       `ms5.ini` (MS-DOS 5.0 + Windows 3.0 on `msdos5-hdd-32mb.img`). Works on the device.
+    - **Branch `fast-cpu` (2026-11-13/14):** CheckIt **6.72x** (2310 Dhrystones), from the inline
+      ifetch through the code's frame, the real-mode `translate` exit and a hot/cold split of
+      `cpu_exec1` (`i386_exec.h` compiled twice; `I386_COLD` lists the opcodes left in flash).
+      All in THIRD_PARTY.md. Count opcodes with a desktop build configured with
+      `-DT386_OPSTATS` (it was `build-opstats`) before moving any to the cold list.
+      The split freed 23 KB of SRAM, and the app stack went from 24 to 16 KB (it uses about 3 KB),
+      which pay for 96 frames instead of 64 (see the pager below). Static RAM 433 KB; with a PC
+      running 14.6 KB of heap and 13 KB of app stack are free.
+    - **Windows 3.1 is bound by page faults, not the interpreter.** On the desktop at a fixed
+      3 MIPS (`PC_MIPS=3 PC_MIPS_AT=0`, `opst.ini`), a minute of Windows faulted 5.4M times with
+      64 frames and about 0.3-0.45M with 96; its working set fits in 96 and not in 92. Random
+      replacement beat the clock at 80 frames and lost badly at 64 and 96, so the clock stays.
+      On the device idle Program Manager now runs at 0.29 MIPS (it was about 0.075), still with
+      about 19k faults every 2 s. The user asked to leave the pager there (2026-11-14).
     - Ideas not tried yet: hot non-i386 code in SRAM (`pc_step`, the PIC/PIT, port I/O).
   - `PICO386_LOWMEM` (board.h): guest RAM lives in the mainboard's 8 MB PSRAM, which hangs off
     a PIO and is not memory-mapped. It is paged through 1 KB SRAM frames (`pc_pagemem.c`).
-    - `hal_arena` holds VRAM (160 KB), then 64 KB of frames. The menu canvas (200 KB) borrows the
+    - `hal_arena` holds VRAM (160 KB), then 96 KB of frames (64 until 2026-11-14). The menu canvas (200 KB) borrows the
       start of it, so `app.cpp` parks that much (`PARK_BYTES`, the first frames too) in PSRAM
       around the menus.
     - Pages were 4 KB at first (16 frames), and DOS crawled: about 40k guest instructions a
@@ -195,7 +209,7 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     - tiny386 itself takes 43 KB of heap. 26 frames left too little heap, and on the
       device (2026-10-28) 18 ran out at the PC's first frame, when FreeRTOS (whose heap is malloc's,
       `heap_3a`) made the draw task. The draw task is now static and made at boot. That is
-      why the frames stay at 64 KB.
+      why the frames stayed at 64 KB until the interpreter's split freed SRAM.
     - A zip chosen for A: in-game hung the device (2026-11-01). With a PC running, only about
       10 KB of heap is free, and the unzip wanted 64 KB for the zip's tail plus a 32 KB window.
       The folder floppy then needed 12 KB for its FAT and root directory. Now:
@@ -263,11 +277,20 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     keyboard firmware, which went away with ClockworkPi's official 1.7.
   - Test it on the desktop with the `build-lowmem` CMake dir (`-DEMU_LOWMEM=ON`), which simulates
     the PSRAM. Prince of Persia and MS-DOS 6 run there.
-  - `psram_rp2350.cpp` drives the PSRAM as plain SPI from pio1 (CS 20, SCK 21, SIO0 2, SIO1 3).
-    It calibrates itself at boot over clock dividers and read-delay clocks, and logs
-    `psram: ... KB, SCK ... kHz, N wait clocks, N-byte bursts`. Ask for that line first.
+  - `psram_rp2350.cpp` drives the PSRAM from pio1 (CS 20, SCK 21, SIO0-3 on GP2-5). Since
+    2026-11-13 (branch `fast-cpu`) it enters QPI (0x35; 0xEB reads, 0x38 writes) and falls back to
+    plain SPI if quad fails its self-test; `psram_quad = 0` in rp2350.ini forces SPI. It calibrates
+    itself at boot over clock dividers and read-delay clocks, and logs
+    `psram: ... KB, quad|SPI, SCK ... kHz, N wait clocks, N-byte bursts`. Ask for that line first.
+    The user's device: quad at 50 MHz (75 MHz fails), 128-byte bursts. Paging went from about 22%
+    of the time to about 6% in Prince's intro.
+  - **Profiler (2026-11-13):** `python -I tools/remote.py --hz 1000 prof 8` samples core 0
+    (`prof_rp2350.cpp`, `@prof`/`@profdump`, rounds of 1024); `--raw f.txt` saves, `--from f.txt`
+    reports again. Prince's intro is mostly a halted guest: `pit_ticks`, `i8254_update_irq`,
+    `pc_step`, `cpui386_step` and `get_uticks` there are the idle loop, not cost. After the PIT and
+    quad fixes the real work is the OPL (about 25%), the interpreter (about 12%) and paging (6%).
   - Cores: arduino-pico's FreeRTOS SMP runs setup/loop on core 0 with a 4 KB stack. So
-    `pico386.ino` starts an "app" task (24 KB static stack) on core 0, and the draw job and
+    `pico386.ino` starts an "app" task (16 KB static stack) on core 0, and the draw job and
     keyboard poll run on core 1. The panel has a mutex, because both cores push to it.
   - The POSIX gaps are filled in `posix_rp2350.cpp` and `include/dirent.h`: mkdir, rmdir,
     rename, readdir over SDFS, clock_gettime and usleep. `VFS.map("/sd", SDFS)` covers the

@@ -170,6 +170,9 @@ void t386_log(const char *fmt, ...) {
 }
 
 void t386_release_all() {
+#if defined(PICO386_LOWMEM)
+  pm_set_ifslot(NULL);                  // the CPU's fetch pointer goes with its block
+#endif
   for (int i = 0; i < kMaxFiles; i++)
     if (s_files[i]) { fclose(s_files[i]); forgetFile(i); }
   if (s_count) hal_log("tiny386: releasing %u blocks, %u KB", (unsigned)s_count, (unsigned)(s_bytes >> 10));

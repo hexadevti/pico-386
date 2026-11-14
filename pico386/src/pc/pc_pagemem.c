@@ -13,6 +13,12 @@
 uint16_t pm_map[PM_MAX_PAGES];
 uint8_t *pm_frame0;
 uint8_t *pm_vram;
+static uint8_t *s_ifdummy[2];
+uint8_t **pm_ifslot = s_ifdummy;
+
+void pm_set_ifslot(uint8_t **slot) {
+  pm_ifslot = slot ? slot : s_ifdummy;
+}
 
 static uint8_t  *s_frames;
 static int       s_nframes;
@@ -47,12 +53,14 @@ void pm_init(uint8_t *frames, int nframes, uint32_t mem_bytes) {
   for (int f = 0; f < nframes; f++) { s_pageOf[f] = NONE; s_flags[f] = 0; }
   s_hand = 0;
   s_faults = s_writebacks = 0;
+  pm_ifslot = s_ifdummy;
   memset(s_lent, 0, sizeof(s_lent));
   s_lendLo = frames;
   s_lendHi = frames + ((size_t)nframes << PM_PAGE_SHIFT);
 }
 
 void pm_shutdown(void) {
+  pm_ifslot = s_ifdummy;
   memset(pm_map, 0, sizeof(pm_map));
   memset(s_lent, 0, sizeof(s_lent));
   s_frames = NULL;
@@ -124,6 +132,7 @@ uint8_t *pm_fault(uint32_t page, int write) {
   uint8_t *fr;
   if (f < 0) {
     s_faults++;
+    PM_IF_DROP();                             // the victim may hold the running code
     f = pickVictim();
     fr = s_frames + ((size_t)f << PM_PAGE_SHIFT);
     const uint16_t old = s_pageOf[f];
@@ -154,6 +163,7 @@ uint8_t *pm_fault(uint32_t page, int write) {
 static void evict(int f) {
   const uint16_t old = s_pageOf[f];
   if (old == NONE || old == LENT) return;
+  PM_IF_DROP();
   pm_map[old] = 0;
   if (s_flags[f] & F_DIRTY) {
     hal_psram_write((uint32_t)old << PM_PAGE_SHIFT, s_frames + ((size_t)f << PM_PAGE_SHIFT), PM_PAGE_SIZE);
@@ -184,6 +194,7 @@ void pm_put_page(uint32_t page, const void *buf) {
     else memset(fr, 0, PM_PAGE_SIZE);
     s_flags[f] |= F_DIRTY;
     pm_map[page] = 0;                         // the next access maps it again, writable
+    PM_IF_DROP();
   } else if (buf) {
     hal_psram_write(page << PM_PAGE_SHIFT, buf, PM_PAGE_SIZE);
     s_valid[page >> 3] |= (uint8_t)(1u << (page & 7));

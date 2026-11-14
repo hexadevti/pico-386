@@ -92,6 +92,14 @@ struct CPUI386 {
 		unsigned long laddr;
 		uword xaddr;
 		uword paddr;
+#ifdef T386_PAGED
+		/* pico-386: the next byte in its frame (fetch8pf), or NULL; then the frame holding
+		 * the running code (NULL: none) and the linear address of its first byte. The pager
+		 * clears ptr and fbase together (PM_IF_DROP), so they stay side by side. */
+		u8 *ptr;
+		u8 *fbase;
+		uword fladdr;
+#endif
 	} ifetch;
 
 	struct {
@@ -591,6 +599,10 @@ static void tlb_clear(CPUI386 *cpu)
 	}
 	cpu->ifetch.laddr = -1;
 	cpu->ifetch.paddr = 0;
+#ifdef T386_PAGED
+	cpu->ifetch.ptr = NULL;
+	cpu->ifetch.fbase = NULL;
+#endif
 }
 
 static int pte_lookup[2][4][2][2] = { //[wp != 0][(pte >> 1) & 3][cpl > 0][rwm > 1]
@@ -748,8 +760,9 @@ static bool IRAM_ATTR segcheck(CPUI386 *cpu, int rwm, int seg, uword addr, int s
 /* pico-386: translate, the loads and stores and fetch8 get an inline fast path for the common
    case (real mode; a plain RAM access within one page; the next byte of the fetch run), with
    upstream's code behind it as the slow path. The P4 spent over a third of its time in the calls
-   (sampled with prof_p4.cpp). Not on the RP2350, whose SRAM has no room for the larger code. */
-#if !defined(BOARD_PICOCALC_RP2350)
+   (sampled with prof_p4.cpp). Not on the RP2350, whose SRAM has no room for the larger code, nor
+   in the desktop's LOWMEM build, which runs the RP2350's code (its fetch path is ifetch.ptr). */
+#if !defined(BOARD_PICOCALC_RP2350) && !defined(T386_PAGED)
 #define I386_FASTPATH 1
 #define SLOW(name) name ## _slow
 #define SLOW_ATTR noinline
@@ -763,6 +776,15 @@ static bool IRAM_ATTR SLOW_ATTR SLOW(translate)(CPUI386 *cpu, OptAddr *res, int 
 	assert(seg != -1);
 	uword laddr = cpu->seg[seg].base + addr;
 
+#ifndef I386_FASTPATH
+	/* pico-386 (RP2350): real mode needs neither segcheck nor paging (PG needs PE), and the
+	 * two calls were 10% of CheckIt's CPU test */
+	if (likely(!(cpu->cr0 & 1))) {
+		res->res = ADDR_OK1;
+		res->addr1 = laddr;
+		return true;
+	}
+#endif
 	TRYL(segcheck(cpu, rwm, seg, addr, size));
 
 	return translate_laddr(cpu, res, rwm, laddr, size, cpl);
@@ -1056,6 +1078,12 @@ static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
 
 static bool IRAM_ATTR peek8a(CPUI386 *cpu, u8 *val)
 {
+#ifdef T386_PAGED
+	if (likely(cpu->ifetch.ptr)) {
+		*val = *cpu->ifetch.ptr;
+		return true;
+	}
+#endif
 	if (likely(cpu->ifetch.paddr)) {
 		*val = pload8(cpu, cpu->ifetch.paddr);
 		return true;
@@ -1082,6 +1110,32 @@ static inline bool fetch8(CPUI386 *cpu, u8 *val)
 	}
 	return fetch8_slow(cpu, val);
 }
+#elif defined(T386_PAGED)
+/* pico-386: a byte through cpu->ifetch.ptr inline at each call, the rest out of line */
+static bool IRAM_ATTR noinline fetch8_slow(CPUI386 *cpu, u8 *val)
+{
+	if (likely(cpu->ifetch.paddr)) {
+		*val = pload8(cpu, cpu->ifetch.paddr);
+		cpu->ifetch.paddr++;
+		cpu->next_ip++;
+		return true;
+	}
+	TRY(peek8(cpu, val));
+	cpu->next_ip++;
+	return true;
+}
+
+static bool IRAM_ATTR noinline fetch8(CPUI386 *cpu, u8 *val)
+{
+	u8 *p = cpu->ifetch.ptr;
+	if (likely(p)) {
+		*val = *p;
+		cpu->ifetch.ptr = p + 1;
+		cpu->next_ip++;
+		return true;
+	}
+	return fetch8_slow(cpu, val);
+}
 #else
 static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
 {
@@ -1097,22 +1151,82 @@ static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
 }
 #endif
 
+#ifdef T386_PAGED
+/* pico-386: inline, as it was when cpu_exec1 was its only caller (cpu_exec1_full is the other) */
+static inline __attribute__((always_inline)) bool fetch8pf(CPUI386 *cpu, u8 *val)
+#else
 static bool IRAM_ATTR fetch8pf(CPUI386 *cpu, u8 *val)
+#endif
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
+#ifdef T386_PAGED
+	/* pico-386: still inside the code's frame: one subtraction. ptr is used when the longest
+	 * instruction (15 bytes) and try_jcc8's peek at the next two fit in the frame; paddr is
+	 * then unused (0). */
+	{
+		u8 *fb = cpu->ifetch.fbase;
+		uword off = laddr - cpu->ifetch.fladdr;
+		if (likely(fb && off <= PM_PAGE_SIZE - 17)) {
+			u8 *p = fb + off;
+			*val = *p;
+			cpu->ifetch.ptr = p + 1;
+			cpu->ifetch.paddr = 0;
+			cpu->next_ip++;
+			return true;
+		}
+	}
+#endif
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4096 - 16)) {
 		uword paddr = cpu->ifetch.xaddr ^ laddr;
+#ifdef T386_PAGED
+		uint32_t e = pm_entry(paddr);
+		if (likely(e)) {
+			u8 *p = PM_FRAME(e) + (paddr & PM_PAGE_MASK);
+			*val = *p;
+			cpu->ifetch.fbase = PM_FRAME(e);
+			cpu->ifetch.fladdr = laddr - (paddr & PM_PAGE_MASK);
+			if (likely((paddr & PM_PAGE_MASK) <= PM_PAGE_SIZE - 17)) {
+				cpu->ifetch.ptr = p + 1;
+				cpu->ifetch.paddr = 0;
+				cpu->next_ip++;
+				return true;
+			}
+		} else {
+			*val = pm_slow_read8(paddr);
+		}
+		cpu->ifetch.ptr = NULL;
+#else
 		*val = pload8(cpu, paddr);
+#endif
 		cpu->ifetch.paddr = paddr + 1;
 		cpu->next_ip++;
 		return true;
 	}
 	cpu->ifetch.paddr = 0;
+#ifdef T386_PAGED
+	cpu->ifetch.ptr = NULL;
+#endif
 	TRY(peek8(cpu, val));
 	cpu->next_ip++;
 	return true;
 }
 
+#ifdef T386_PAGED
+/* pico-386: fetch16 below is fetch16_slow; the decoder calls fetch16_fast */
+#define fetch16 fetch16_slow
+static bool IRAM_ATTR noinline fetch16_slow(CPUI386 *cpu, u16 *val);
+static bool IRAM_ATTR noinline fetch16_fast(CPUI386 *cpu, u16 *val)
+{
+	u8 *p = cpu->ifetch.ptr;
+	if (likely(p)) {
+		*val = ((const pm_u16_t *) p)->v;
+		cpu->ifetch.ptr = p + 2;
+		cpu->next_ip += 2;
+		return true;
+	}
+	return fetch16_slow(cpu, val);
+}
+#endif
 static bool IRAM_ATTR fetch16(CPUI386 *cpu, u16 *val)
 {
 	if (likely(cpu->ifetch.paddr)) {
@@ -1133,6 +1247,22 @@ static bool IRAM_ATTR fetch16(CPUI386 *cpu, u16 *val)
 	return true;
 }
 
+#ifdef T386_PAGED
+/* pico-386: fetch32 below is fetch32_slow; the decoder calls fetch32_fast */
+#define fetch32 fetch32_slow
+static bool IRAM_ATTR noinline fetch32_slow(CPUI386 *cpu, u32 *val);
+static bool IRAM_ATTR noinline fetch32_fast(CPUI386 *cpu, u32 *val)
+{
+	u8 *p = cpu->ifetch.ptr;
+	if (likely(p)) {
+		*val = ((const pm_u32_t *) p)->v;
+		cpu->ifetch.ptr = p + 4;
+		cpu->next_ip += 4;
+		return true;
+	}
+	return fetch32_slow(cpu, val);
+}
+#endif
 static bool IRAM_ATTR fetch32(CPUI386 *cpu, u32 *val)
 {
 	if (likely(cpu->ifetch.paddr)) {
@@ -1152,6 +1282,13 @@ static bool IRAM_ATTR fetch32(CPUI386 *cpu, u32 *val)
 	cpu->next_ip += 4;
 	return true;
 }
+
+#ifdef T386_PAGED
+#undef fetch16
+#undef fetch32
+#define fetch16 fetch16_fast
+#define fetch32 fetch32_fast
+#endif
 
 /* insts decode && execute */
 static inline bool modsib32(CPUI386 *cpu, int mod, int rm, uword *addr, int *seg)
@@ -1929,6 +2066,19 @@ GEN___GE_helper(32)
 
 noinline void IRAM_ATTR try_jcc8(CPUI386 *cpu)
 {
+#ifdef T386_PAGED
+	u8 *p = cpu->ifetch.ptr;
+	if (likely(p)) {
+		u8 op = p[0];
+		if ((op & ~1) == 0x74) {
+			if ((cpu->cc.dst == 0) ^ (op & 1)) {
+				cpu->next_ip += sext8(p[1]) + 2;
+				if (cpu->code16) cpu->next_ip &= 0xffff;
+			}
+		}
+		return;
+	}
+#endif
 	if (likely(cpu->ifetch.paddr)) {
 		u8 op = pload8(cpu, cpu->ifetch.paddr);
 		// catches ~60%
@@ -4118,310 +4268,67 @@ static bool verbose;
 #define C_16(_1, ...) CX(_1) C_15(__VA_ARGS__)
 #define C(...) PASTE(C_, ARGCOUNT(__VA_ARGS__))(__VA_ARGS__)
 
-static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
+/* pico-386: build the desktop with -DT386_OPSTATS to count, on stderr at exit, how often each
+ * instruction (by its name in i386ins_def.h) runs in cpu_exec1; that is how I386_COLD was picked */
+#ifdef T386_OPSTATS
+struct opstat { const char *name; unsigned long long n; struct opstat *next; };
+static struct opstat *opstat_head;
+static void opstat_dump(void)
 {
-#ifndef I386_OPT2
-#define eswitch(b) switch(b)
-#define ecase(a)   case a
-#define ebreak     break
-#define edefault   default
-#define default_ud cpu_debug(cpu); THROW0(EX_UD)
-#undef CX
-#define CX(_1) case _1:
-#else
-#define eswitch(b)
-#define ecase(a)   f ## a
-#define ebreak     continue
-#define edefault   f0xf1
-#define default_ud THROW0(EX_UD)
-#undef CX
-#define CX(_1) f ## _1:
-#endif
-
-	u8 b1;
-	u8 modrm;
-	OptAddr meml;
-	uword addr;
-	for (; stepcount > 0; stepcount--) {
-	bool code16 = cpu->code16;
-	uword sp_mask = cpu->sp_mask;
-
-	cpu->ip = cpu->next_ip;
-	TRY(fetch8pf(cpu, &b1));
-	cpu->cycle++;
-
-#ifndef I386_OPT1
-	if (verbose) {
-		cpu_debug(cpu);
-	}
-#endif
-	// prefix
-	bool opsz16 = code16;
-	bool adsz16 = code16;
-	int rep = 0;
-	/*bool lock = false;*/
-	int curr_seg = -1;
-#ifndef I386_OPT2
-	for (;;) {
-#define HANDLE_PREFIX(C, STMT) \
-		if (b1 == C) { \
-			STMT; \
-			TRY(fetch8(cpu, &b1)); \
-			continue; \
-		}
-		HANDLE_PREFIX(0x26, curr_seg = SEG_ES)
-		HANDLE_PREFIX(0x2e, curr_seg = SEG_CS)
-		HANDLE_PREFIX(0x36, curr_seg = SEG_SS)
-		HANDLE_PREFIX(0x3e, curr_seg = SEG_DS)
-		HANDLE_PREFIX(0x64, curr_seg = SEG_FS)
-		HANDLE_PREFIX(0x65, curr_seg = SEG_GS)
-		HANDLE_PREFIX(0x66, opsz16 = !code16)
-		HANDLE_PREFIX(0x67, adsz16 = !code16)
-		HANDLE_PREFIX(0xf3, rep = 1) // REP
-		HANDLE_PREFIX(0xf2, rep = 2) // REPNE
-		HANDLE_PREFIX(0xf0, /*lock = true*/)
-#undef HANDLE_PREFIX
-		break;
-	}
-#else
-	static const DRAM_ATTR void *pfxlabel[] = {
-/* 0x00 */	&&f0x00, &&f0x01, &&f0x02, &&f0x03, &&f0x04, &&f0x05, &&f0x06, &&f0x07,
-/* 0x08 */	&&f0x08, &&f0x09, &&f0x0a, &&f0x0b, &&f0x0c, &&f0x0d, &&f0x0e, &&f0x0f,
-/* 0x10 */	&&f0x10, &&f0x11, &&f0x12, &&f0x13, &&f0x14, &&f0x15, &&f0x16, &&f0x17,
-/* 0x18 */	&&f0x18, &&f0x19, &&f0x1a, &&f0x1b, &&f0x1c, &&f0x1d, &&f0x1e, &&f0x1f,
-/* 0x20 */	&&f0x20, &&f0x21, &&f0x22, &&f0x23, &&f0x24, &&f0x25, &&pfx26, &&f0x27,
-/* 0x28 */	&&f0x28, &&f0x29, &&f0x2a, &&f0x2b, &&f0x2c, &&f0x2d, &&pfx2e, &&f0x2f,
-/* 0x30 */	&&f0x30, &&f0x31, &&f0x32, &&f0x33, &&f0x34, &&f0x35, &&pfx36, &&f0x37,
-/* 0x38 */	&&f0x38, &&f0x39, &&f0x3a, &&f0x3b, &&f0x3c, &&f0x3d, &&pfx3e, &&f0x3f,
-/* 0x40 */	&&f0x40, &&f0x41, &&f0x42, &&f0x43, &&f0x44, &&f0x45, &&f0x46, &&f0x47,
-/* 0x48 */	&&f0x48, &&f0x49, &&f0x4a, &&f0x4b, &&f0x4c, &&f0x4d, &&f0x4e, &&f0x4f,
-/* 0x50 */	&&f0x50, &&f0x51, &&f0x52, &&f0x53, &&f0x54, &&f0x55, &&f0x56, &&f0x57,
-/* 0x58 */	&&f0x58, &&f0x59, &&f0x5a, &&f0x5b, &&f0x5c, &&f0x5d, &&f0x5e, &&f0x5f,
-/* 0x60 */	&&f0x60, &&f0x61, &&f0x62, &&f0x63, &&pfx64, &&pfx65, &&pfx66, &&pfx67,
-/* 0x68 */	&&f0x68, &&f0x69, &&f0x6a, &&f0x6b, &&f0x6c, &&f0x6d, &&f0x6e, &&f0x6f,
-/* 0x70 */	&&f0x70, &&f0x71, &&f0x72, &&f0x73, &&f0x74, &&f0x75, &&f0x76, &&f0x77,
-/* 0x78 */	&&f0x78, &&f0x79, &&f0x7a, &&f0x7b, &&f0x7c, &&f0x7d, &&f0x7e, &&f0x7f,
-/* 0x80 */	&&f0x80, &&f0x81, &&f0x82, &&f0x83, &&f0x84, &&f0x85, &&f0x86, &&f0x87,
-/* 0x88 */	&&f0x88, &&f0x89, &&f0x8a, &&f0x8b, &&f0x8c, &&f0x8d, &&f0x8e, &&f0x8f,
-/* 0x90 */	&&f0x90, &&f0x91, &&f0x92, &&f0x93, &&f0x94, &&f0x95, &&f0x96, &&f0x97,
-/* 0x98 */	&&f0x98, &&f0x99, &&f0x9a, &&f0x9b, &&f0x9c, &&f0x9d, &&f0x9e, &&f0x9f,
-/* 0xa0 */	&&f0xa0, &&f0xa1, &&f0xa2, &&f0xa3, &&f0xa4, &&f0xa5, &&f0xa6, &&f0xa7,
-/* 0xa8 */	&&f0xa8, &&f0xa9, &&f0xaa, &&f0xab, &&f0xac, &&f0xad, &&f0xae, &&f0xaf,
-/* 0xb0 */	&&f0xb0, &&f0xb1, &&f0xb2, &&f0xb3, &&f0xb4, &&f0xb5, &&f0xb6, &&f0xb7,
-/* 0xb8 */	&&f0xb8, &&f0xb9, &&f0xba, &&f0xbb, &&f0xbc, &&f0xbd, &&f0xbe, &&f0xbf,
-/* 0xc0 */	&&f0xc0, &&f0xc1, &&f0xc2, &&f0xc3, &&f0xc4, &&f0xc5, &&f0xc6, &&f0xc7,
-/* 0xc8 */	&&f0xc8, &&f0xc9, &&f0xca, &&f0xcb, &&f0xcc, &&f0xcd, &&f0xce, &&f0xcf,
-/* 0xd0 */	&&f0xd0, &&f0xd1, &&f0xd2, &&f0xd3, &&f0xd4, &&f0xd5, &&f0xd6, &&f0xd7,
-/* 0xd8 */	&&f0xd8, &&f0xd9, &&f0xda, &&f0xdb, &&f0xdc, &&f0xdd, &&f0xde, &&f0xdf,
-/* 0xe0 */	&&f0xe0, &&f0xe1, &&f0xe2, &&f0xe3, &&f0xe4, &&f0xe5, &&f0xe6, &&f0xe7,
-/* 0xe8 */	&&f0xe8, &&f0xe9, &&f0xea, &&f0xeb, &&f0xec, &&f0xed, &&f0xee, &&f0xef,
-/* 0xf0 */	&&pfxf0, &&f0xf1, &&pfxf2, &&pfxf3, &&f0xf4, &&f0xf5, &&f0xf6, &&f0xf7,
-/* 0xf8 */	&&f0xf8, &&f0xf9, &&f0xfa, &&f0xfb, &&f0xfc, &&f0xfd, &&f0xfe, &&f0xff,
-	};
-	goto *pfxlabel[b1];
-#define HANDLE_PREFIX(C, STMT) \
-		pfx ## C: { \
-			STMT; \
-			TRY(fetch8(cpu, &b1)); \
-			goto *pfxlabel[b1]; \
-		}
-		HANDLE_PREFIX(26, curr_seg = SEG_ES)
-		HANDLE_PREFIX(2e, curr_seg = SEG_CS)
-		HANDLE_PREFIX(36, curr_seg = SEG_SS)
-		HANDLE_PREFIX(3e, curr_seg = SEG_DS)
-		HANDLE_PREFIX(64, curr_seg = SEG_FS)
-		HANDLE_PREFIX(65, curr_seg = SEG_GS)
-		HANDLE_PREFIX(66, opsz16 = !code16)
-		HANDLE_PREFIX(67, adsz16 = !code16)
-		HANDLE_PREFIX(f3, rep = 1) // REP
-		HANDLE_PREFIX(f2, rep = 2) // REPNE
-		HANDLE_PREFIX(f0, /*lock = true*/)
-#undef HANDLE_PREFIX
-#endif
-	eswitch(b1) {
-#define I(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#include "i386ins_def.h"
-#undef I
-
-#undef CX
-#define CX(_1) case _1:
-#define GRPBEG TRY(peek8a(cpu, &modrm)); switch((modrm >> 3) & 7) {
-#define GRPCASE(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#define GRPEND default: default_ud; } ebreak;
-
-	ecase(0x80): ecase(0x82): { // G1b
-GRPBEG
-#define IG1b GRPCASE
-#include "i386ins_def.h"
-#undef IG1b
-GRPEND
-	}
-
-	ecase(0x81): { // G1v
-GRPBEG
-#define IG1v GRPCASE
-#include "i386ins_def.h"
-#undef IG1v
-GRPEND
-	}
-
-	ecase(0x83): { // G1vIb
-GRPBEG
-#define IG1vIb GRPCASE
-#include "i386ins_def.h"
-#undef IG1vIb
-GRPEND
-	}
-
-	ecase(0xc0): { // G2b
-GRPBEG
-#define IG2b GRPCASE
-#include "i386ins_def.h"
-#undef IG2b
-GRPEND
-	}
-
-	ecase(0xc1): { // G2v
-GRPBEG
-#define IG2v GRPCASE
-#include "i386ins_def.h"
-#undef IG2v
-GRPEND
-	}
-
-	ecase(0xd0): { // G2b1
-GRPBEG
-#define IG2b1 GRPCASE
-#include "i386ins_def.h"
-#undef IG2b1
-GRPEND
-	}
-
-	ecase(0xd1): { // G2v1
-GRPBEG
-#define IG2v1 GRPCASE
-#include "i386ins_def.h"
-#undef IG2v1
-GRPEND
-	}
-
-	ecase(0xd2): { // G2bC
-GRPBEG
-#define IG2bC GRPCASE
-#include "i386ins_def.h"
-#undef IG2bC
-GRPEND
-	}
-
-	ecase(0xd3): { // G2v1
-GRPBEG
-#define IG2vC GRPCASE
-#include "i386ins_def.h"
-#undef IG2vC
-GRPEND
-	}
-
-	ecase(0xf6): { // G3b
-GRPBEG
-#define IG3b GRPCASE
-#include "i386ins_def.h"
-#undef IG3b
-GRPEND
-	}
-
-	ecase(0xf7): { // G3v
-GRPBEG
-#define IG3v GRPCASE
-#include "i386ins_def.h"
-#undef IG3v
-GRPEND
-	}
-
-	ecase(0xfe): { // G4
-GRPBEG
-#define IG4 GRPCASE
-#include "i386ins_def.h"
-#undef IG4
-GRPEND
-	}
-
-	ecase(0xff): { // G5
-GRPBEG
-#define IG5 GRPCASE
-#include "i386ins_def.h"
-#undef IG5
-GRPEND
-	}
-
-	ecase(0x0f): { // two byte
-		TRY(fetch8(cpu, &b1));
-		switch(b1) {
-#define I2(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#include "i386ins_def.h"
-#undef I2
-
-		case 0x00: { // G6
-GRPBEG
-#define IG6 GRPCASE
-#include "i386ins_def.h"
-#undef IG6
-GRPEND
-		}
-
-		case 0x01: { // G7
-GRPBEG
-#define IG7 GRPCASE
-#include "i386ins_def.h"
-#undef IG7
-GRPEND
-		}
-
-		case 0xba: { // G8
-GRPBEG
-#define IG8 GRPCASE
-#include "i386ins_def.h"
-#undef IG8
-GRPEND
-		}
-
-		case 0xc7: { // G9
-GRPBEG
-#define IG9 GRPCASE
-#include "i386ins_def.h"
-#undef IG9
-GRPEND
-		}
-		// three byte
-		case 0x38: {
-			TRY(fetch8(cpu, &b1));
-			switch(b1) {
-#define I3_38(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#include "i386ins_def.h"
-#undef I3_38
-			default: default_ud;
-			}
-			ebreak;
-		}
-		case 0x3a: {
-			TRY(fetch8(cpu, &b1));
-			switch(b1) {
-#define I3_3a(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#include "i386ins_def.h"
-#undef I3_3a
-			default: default_ud;
-			}
-			ebreak;
-		}
-		default: default_ud;
-		}
-		ebreak;
-	}
-
-	edefault: default_ud;
-	}
-	}
-	return true;
+	for (struct opstat *o = opstat_head; o; o = o->next)
+		fprintf(stderr, "opstat %s %llu\n", o->name, o->n);
 }
+#define OPSTAT(name) if (EXEC_HOT || !defined_T386_PAGED) { static struct opstat o = { name }; \
+	if (!o.n++) { if (!opstat_head) atexit(opstat_dump); o.next = opstat_head; opstat_head = &o; } }
+#ifdef T386_PAGED
+#define defined_T386_PAGED 1
+#else
+#define defined_T386_PAGED 0
+#endif
+#else
+#define OPSTAT(name)
+#endif
+
+#ifdef T386_PAGED
+/* pico-386 (RP2350, and the desktop's LOWMEM build): cpu_exec1 is 90 KB of SRAM, most of it
+ * instructions DOS and Windows 3.x hardly run. So it is compiled twice: cpu_exec1_full in flash
+ * has every instruction, and cpu_exec1 in SRAM has the rest, with the opcodes named in
+ * I386_COLD jumping to its punt label, which runs the instruction again in cpu_exec1_full. GCC
+ * folds the string compares, so a cold body is dead code. An instruction that ends the batch
+ * (HLT, STI, POPF, IRET, a load of SS) must stay hot: cpu_exec1_full runs only one. */
+#define I386_COLD(s) (!__builtin_strcmp(s, "DAA") || !__builtin_strcmp(s, "DAS") || !__builtin_strcmp(s, "AAA") || !__builtin_strcmp(s, "AAS") || !__builtin_strcmp(s, "BOUND") || !__builtin_strcmp(s, "ARPL") || \
+	!__builtin_strcmp(s, "INSb") || !__builtin_strcmp(s, "INS") || !__builtin_strcmp(s, "OUTSb") || !__builtin_strcmp(s, "OUTS") || !__builtin_strcmp(s, "ENTER") || !__builtin_strcmp(s, "INT3") || \
+	!__builtin_strcmp(s, "INTO") || !__builtin_strcmp(s, "AAM") || !__builtin_strcmp(s, "AAD") || !__builtin_strcmp(s, "SALC") || !__builtin_strcmp(s, "LAR") || !__builtin_strcmp(s, "LSL") || \
+	!__builtin_strcmp(s, "CLTS") || !__builtin_strcmp(s, "MOVFC") || !__builtin_strcmp(s, "MOVFD") || !__builtin_strcmp(s, "MOVTC") || !__builtin_strcmp(s, "MOVTD") || !__builtin_strcmp(s, "MOVFT") || \
+	!__builtin_strcmp(s, "MOVTT") || !__builtin_strcmp(s, "PUSH_FS") || !__builtin_strcmp(s, "POP_FS") || !__builtin_strcmp(s, "PUSH_GS") || !__builtin_strcmp(s, "POP_GS") || !__builtin_strcmp(s, "LSS") || \
+	!__builtin_strcmp(s, "LFS") || !__builtin_strcmp(s, "LGS") || !__builtin_strcmp(s, "BSF") || !__builtin_strcmp(s, "BSR") || !__builtin_strcmp(s, "SLDT") || !__builtin_strcmp(s, "STR") || \
+	!__builtin_strcmp(s, "LLDT") || !__builtin_strcmp(s, "LTR") || !__builtin_strcmp(s, "VERR") || !__builtin_strcmp(s, "VERW") || !__builtin_strcmp(s, "SGDT") || !__builtin_strcmp(s, "SIDT") || \
+	!__builtin_strcmp(s, "LGDT") || !__builtin_strcmp(s, "LIDT") || !__builtin_strcmp(s, "SMSW") || !__builtin_strcmp(s, "LMSW") || !__builtin_strcmp(s, "INVLPG") || !__builtin_strcmp(s, "UD0") || \
+	!__builtin_strcmp(s, "CMPXCHb") || !__builtin_strcmp(s, "CMPXCH") || !__builtin_strcmp(s, "XADDb") || !__builtin_strcmp(s, "XADD") || !__builtin_strcmp(s, "BSWAP") || !__builtin_strcmp(s, "WBINVD") || \
+	!__builtin_strcmp(s, "CPUID") || !__builtin_strcmp(s, "CMPXCH8B") || !__builtin_strcmp(s, "CMOV") || !__builtin_strcmp(s, "RDTSC") || !__builtin_strcmp(s, "WRMSR") || !__builtin_strcmp(s, "RDMSR") || \
+	!__builtin_strcmp(s, "SYSENTER") || !__builtin_strcmp(s, "SYSEXIT") || !__builtin_strcmp(s, "RCR") || !__builtin_strcmp(s, "RCRb") || !__builtin_strcmp(s, "SHLD") || !__builtin_strcmp(s, "SHRD") || \
+	!__builtin_strcmp(s, "BTC") || !__builtin_strcmp(s, "CMPS") || !__builtin_strcmp(s, "SCAS") || !__builtin_strcmp(s, "LOOPEb"))
+#define EXEC_NAME cpu_exec1_full
+#define EXEC_ATTR noinline
+#define EXEC_COLD(s) 0
+#define EXEC_HOT 0
+#include "i386_exec.h"
+#undef EXEC_NAME
+#undef EXEC_ATTR
+#undef EXEC_COLD
+#undef EXEC_HOT
+#define EXEC_NAME cpu_exec1
+#define EXEC_ATTR IRAM_ATTR_CPU_EXEC1
+#define EXEC_COLD(s) I386_COLD(s)
+#define EXEC_HOT 1
+#include "i386_exec.h"
+#else
+#define EXEC_NAME cpu_exec1
+#define EXEC_ATTR IRAM_ATTR_CPU_EXEC1
+#define EXEC_COLD(s) 0
+#define EXEC_HOT 0
+#include "i386_exec.h"
+#endif
 
 // XXX: incomplete
 enum { TS_JMP, TS_CALL, TS_IRET };
@@ -5291,6 +5198,9 @@ void IRAM_ATTR cpui386_step(CPUI386 *cpu, int stepcount)
 
 	int ret = cpu_exec1(cpu, stepcount);
 	cpu->ifetch.paddr = 0;
+#ifdef T386_PAGED
+	cpu->ifetch.ptr = NULL;
+#endif
 	if (!ret) {
 #ifdef AMD64_ENABLE_LEG32
 		if (cpu->excno == 0x8664)
@@ -5465,6 +5375,9 @@ CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)
 		*cb = &(cpu->cb);
+#ifdef T386_PAGED
+	pm_set_ifslot(&cpu->ifetch.ptr);	/* pico-386: the pager drops it when frames move */
+#endif
 	return cpu;
 }
 

@@ -9,8 +9,10 @@
 #   remote.py mpace "<instr> <step>"         keyboard-mouse pacing, live
 #   remote.py raw <y>                       a panel row's raw RAMRD bytes (format check)
 #   remote.py log [seconds]                 just print the log
-#   remote.py --p4 prof [seconds]           sample core 1 (prof_p4.cpp) and print the hot functions
-#                                           and lines (addr2line on --elf)
+#   remote.py [--p4] prof [seconds]         sample the emulator's core (prof_rp2350.cpp: core 0, in
+#                                           rounds of 1024; prof_p4.cpp: core 1) and print the hot
+#                                           functions and lines (addr2line on --elf). --raw f.txt
+#                                           also saves the samples; --from f.txt reports saved ones.
 #
 # Options: --port COM6, --p4 (COM9 unless --port), --out <prefix> (shots go to <prefix>N.png, default sdcard/rshot).
 # Everything else the device prints is passed through, so the log stays visible.
@@ -136,8 +138,17 @@ def main():
     ap.add_argument('--p4', action='store_true')
     ap.add_argument('--out', default='sdcard/rshot')
     ap.add_argument('--hz', type=int, default=2000)
-    ap.add_argument('--elf', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build-p4', 'pico386.ino.elf'))
+    ap.add_argument('--elf')
+    ap.add_argument('--raw')
+    ap.add_argument('--from', dest='src')
     a = ap.parse_args()
+    if not a.elf:
+        a.elf = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
+                             'build-p4' if a.p4 else 'build-rp2350', 'pico386.ino.elf')
+    if a.cmd == 'prof' and a.src:
+        with open(a.src) as f:
+            report([int(x, 16) for x in f.read().split()], a)
+        return
     port = a.port or ('COM9' if a.p4 else 'COM6')
     r = Remote(port, a.arg if a.cmd == 'shot' and a.arg else a.out, a.p4)
     if a.cmd == 'keys':
@@ -159,13 +170,11 @@ def main():
             r.handle(ln)
 
 
-def prof(r, a):
-    secs = float(a.arg or 5)
-    n = min(16384, int(secs * a.hz))
-    r.send(f'@prof {a.hz} {n}')
+def prof_round(r, hz, n):
+    r.send(f'@prof {hz} {n}')
     if not r.wait('@prof started', 5):
         sys.exit('remote: the profiler did not start')
-    time.sleep(secs + 0.5)
+    time.sleep(n / hz + 0.3)
     r.send('@profdump')
     pcs = []
     for ln in r.lines(time.time() + 60):
@@ -175,10 +184,36 @@ def prof(r, a):
             break
         else:
             r.handle(ln)
+    return pcs
+
+
+def prof(r, a):
+    secs = float(a.arg or 5)
+    total = int(secs * a.hz)
+    pcs = []
+    if a.p4:
+        pcs = prof_round(r, a.hz, min(16384, total))
+    else:
+        # the RP2350's heap holds about 1024 samples at a time
+        while len(pcs) < total:
+            pcs += prof_round(r, a.hz, min(1024, total - len(pcs)))
     if not pcs:
         sys.exit('remote: no samples')
+    if a.raw:
+        with open(a.raw, 'w') as f:
+            f.write(' '.join(f'{x:x}' for x in pcs) + '\n')
+    report(pcs, a)
+
+
+def report(pcs, a):
     import collections, glob, subprocess
-    tool = glob.glob(os.path.expanduser('~/.emu6502-p4/data/packages/esp32/tools/esp-rv32/*/bin/riscv32-esp-elf-addr2line*'))[0]
+    if a.p4:
+        pat = '~/.emu6502-p4/data/packages/esp32/tools/esp-rv32/*/bin/riscv32-esp-elf-addr2line*'
+    else:
+        pat = '~/AppData/Local/Arduino15/packages/rp2040/tools/pqt-gcc/*/bin/arm-none-eabi-addr2line*'
+    tool = glob.glob(os.path.expanduser(pat))[0]
+    isr = pcs.count(1)
+    pcs = [x for x in pcs if x != 1]
     uniq = sorted(set(pcs))
     out = subprocess.run([tool, '-f', '-C', '-e', a.elf], input='\n'.join(f'{x:x}' for x in uniq),
                          capture_output=True, text=True).stdout.splitlines()
@@ -188,8 +223,8 @@ def prof(r, a):
         f, l = where[pc]
         funcs[f] += 1
         lines[f'{l} ({f})'] += 1
-    total = len(pcs)
-    print(f'{total} samples')
+    total = len(pcs) + isr
+    print(f'{total} samples, {100 * isr / total:.1f}% inside another interrupt')
     print('-- functions')
     for f, c in funcs.most_common(30):
         print(f'{100 * c / total:5.1f}%  {f}')
