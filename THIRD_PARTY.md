@@ -137,7 +137,8 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   guest write to VGA memory (`iomem_write*`, the three linear-framebuffer write paths) and VGA
   ports. `pc_video` skips a graphics picture when it has not moved since the last one drawn.
   FastDoom on the P4: 1.8 to 2.1-2.2 MIPS, since each redraw read about 400 KB of PSRAM that the
-  guest's RAM shares.
+  guest's RAM shares. The P4 no longer skips (2026-11-15): Prince of Persia's Adlib music crackled
+  there with it, and was clean without it. The cause is not known yet.
 - **Snapshots (2026-11-03).** `snap.h` (new, ours) moves each device's state through a `SnapIO`.
   Every struct is preceded by its size, so a build with another layout refuses the file.
   - **`pc.c`:** `pc_snap` saves the `PC` fields, then the CPU, PIC, PIT, CMOS, both IDE buses,

@@ -395,10 +395,15 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
     // elsewhere and copies it to VRAM a few times a second; redrawing it every 1/60 s anyway cost
     // the P4 a sixth of its speed (1.8 MIPS, 2.1-2.2 with the skip, 2026-11-14): each redraw moves
     // about 400 KB through the PSRAM, which the guest's RAM shares.
+    // Not on the P4: with it, Prince of Persia's Adlib music crackled there (2026-11-14; heard on
+    // the device, gone with the skip off, the desktop clean either way). The cause is not known
+    // yet, so the P4 redraws every frame, as before v0.3.0.
     const uint32_t gen = t386_vga_gen();
+#if !defined(BOARD_PICOCALC_P4)
     if (!s_gfxFull && !changed && !s_clearFrames && gen == s_gfxGen && in.gfx_w == s_lastW &&
         in.gfx_h == s_lastH)
       return false;
+#endif
     s_gfxGen = gen;
 #if defined(PICO386_LOWMEM)
     // A new picture size: clear the panel first, or this frame's rows would be wiped after it.

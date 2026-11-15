@@ -112,6 +112,11 @@ started from on 2026-10-18, and **emu16** and **emu8**.
         (`t386_vga_gen`, THIRD_PARTY.md): FastDoom went from 1.8 to 2.1-2.2 MIPS. The RP2350
         shares the code (on `build-lowmem`, m12/m13 draw correctly), but it is not yet tested
         on the device.
+      - **The skip is off on the P4 (2026-11-15).** With it, Prince's intro music crackled on the
+        device (v0.2.2 clean, v0.3.0 crackled, v0.3.0 without the skip clean; the desktop always
+        clean). The cause is not known yet: maybe the panel's irregular SPI bursts reaching the PDM
+        output, or core 0's timing. Read `g`/`s`/gap on the FPS line in Prince's intro with the skip
+        back on before guessing. The v0.3.0 release's P4 files were replaced with this build.
       - Tried and dropped:
         - Inlining `fetch16`/`fetch32` gave 1.8 MIPS (no change). Forcing `fetch8pf` inline was
           worse, at 1.7.
