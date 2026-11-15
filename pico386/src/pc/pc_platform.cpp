@@ -203,15 +203,31 @@ void *pcmalloc(long size) { return track((size_t)size, false); }
 int t386_reserve_big(size_t bytes, size_t margin) {
   s_poolUsed = 0;
   if (s_pool && s_poolSize >= bytes) return 1;
-  // A bigger machine than the block holds: let it go and look for room, with margin bytes to
-  // spare beside it (the probe is freed, so the block lands where it was).
+  // A bigger machine than the block holds: let it go and look for room, with margin bytes still
+  // free beside it. The margin need not be in one piece with the block: asking for bytes + margin
+  // in one block refused a 24 MB snapshot when the PSRAM had the room, split by a few small
+  // allocations (it got 20 MB). It is probed in 1 MB pieces, the size of the largest thing
+  // allocated beside the machine (the 800x600 framebuffer, 960 KB).
   if (s_pool) hal_free(s_pool);
   s_pool = nullptr;
   s_poolSize = 0;
-  void *probe = hal_alloc_big(bytes + margin);
-  if (!probe) return 0;
-  hal_free(probe);
   if (!(s_pool = (uint8_t *)hal_alloc_big(bytes))) return 0;
+  constexpr size_t kPiece = 1024 * 1024;
+  void *probe[16];
+  size_t n = 0;
+  bool ok = true;
+  for (size_t left = margin; left && ok; n++) {
+    const size_t k = left < kPiece ? left : kPiece;
+    ok = n < 16 && (probe[n] = hal_alloc_big(k)) != nullptr;
+    if (!ok) break;
+    left -= k;
+  }
+  for (size_t i = 0; i < n; i++) hal_free(probe[i]);
+  if (!ok) {
+    hal_free(s_pool);
+    s_pool = nullptr;
+    return 0;
+  }
   s_poolSize = bytes;
   return 1;
 }

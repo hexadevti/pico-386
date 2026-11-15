@@ -18,6 +18,7 @@
 bool picocalcWaitForMainboard();   // input_p4.cpp
 void p4DisplayInit();              // display_p4.cpp
 void p4InputInit();                // input_p4.cpp
+void p4AudioInit();                // audio_p4.cpp
 
 #define ESP32LOADER_MAGIC 0x10ADE125u   // esp32loader main/loader_api.h: boot the loader once
 
@@ -100,7 +101,13 @@ void p4CheckSerialCmd() {
 
 void *hal_alloc_big(size_t n) {
   void *p = heap_caps_calloc(1, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  return p ? p : calloc(1, n);
+  if (!p) p = calloc(1, n);
+  // A refused machine-sized block: how split the PSRAM is (t386_reserve_big steps the RAM down).
+  if (!p && n >= (1u << 20))
+    hal_log("psram: no %u KB block (%u KB free, largest %u KB)", (unsigned)(n >> 10),
+            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10),
+            (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >> 10));
+  return p;
 }
 void *hal_alloc_fast(size_t n) {
   void *p = heap_caps_calloc(1, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -174,6 +181,7 @@ void hal_init() {
   hal_log("pico-386 on " BOARD_NAME ", PSRAM %u KB free, internal %u KB free",
           (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10),
           (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10));
+  p4AudioInit();                     // first: its DMA buffers need internal RAM
   const bool board = picocalcWaitForMainboard();
   p4DisplayInit();
   if (board) sdInit();

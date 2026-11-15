@@ -81,9 +81,11 @@ void hal_audio_volume(int v) {
   s_gain = kVolume[v];
 }
 
-void hal_audio_start(uint32_t rate) {
-  s_step = (uint32_t)(((uint64_t)rate << 16) / AUDIO_OUT_RATE);
-  s_phase = 0; s_prev = 0; s_outN = 0;
+// The channel is made at boot (hal_init), while the internal RAM is free: its DMA buffers must be
+// internal, and a PC takes most of what is left for its fast blocks (CPU state, TLB). Made at the
+// PC's first sound, the buffers failed with ESP_ERR_NO_MEM once the flat path's code had grown the
+// IRAM (2026-11-15), and every game was silent.
+void p4AudioInit() {
   if (s_tx) return;
 
   i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -117,8 +119,13 @@ void hal_audio_start(uint32_t rate) {
     if (s_tx) { i2s_del_channel(s_tx); s_tx = nullptr; }
     return;
   }
-  hal_log("audio: PDM on GPIO%d/%d at %d Hz (from %u)", AUDIO_L_PIN, AUDIO_R_PIN, AUDIO_OUT_RATE,
-          (unsigned)rate);
+  hal_log("audio: PDM on GPIO%d/%d at %d Hz", AUDIO_L_PIN, AUDIO_R_PIN, AUDIO_OUT_RATE);
+}
+
+void hal_audio_start(uint32_t rate) {
+  s_step = (uint32_t)(((uint64_t)rate << 16) / AUDIO_OUT_RATE);
+  s_phase = 0; s_prev = 0; s_outN = 0;
+  p4AudioInit();                          // no-op unless it failed at boot
 }
 
 static void flushOut() {

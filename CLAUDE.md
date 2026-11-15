@@ -149,6 +149,11 @@ started from on 2026-10-18, and **emu16** and **emu8**.
         The desktop's unzipped doom folder has an `fdoom.cfg` with SB effects. With `PC_WAV`, sound
         is the same with and without the fast path, also at `PC_MIPS=4`.
       - On the P4, start Doom from the home menu with keys `d,w300,enter,...`: "d" jumps to the
+      - **Silent on the device (2026-11-15):** the flat path's IRAM left too little internal RAM, and
+        the I2S channel, made at the PC's first sound, failed (`PDM TX init failed (ESP_ERR_NO_MEM)`
+        in the log; `g` stays 0, as nothing is queued). `p4AudioInit` now makes it in `hal_init`,
+        before anything else. `t386_reserve_big` probes its 2 MB margin in 1 MB pieces, not as one
+        block with the RAM, and the P4 logs `psram: no N KB block (free, largest)` on a refusal.
         "doom" startup. `down` is wrong, since the menu remembers the last startup ("PC").
     - **Profiler:** `python -I tools/remote.py --p4 prof 8` samples core 1 at 2 kHz (`prof_p4.cpp`,
       `@prof`/`@profdump`) and prints hot functions and lines through addr2line on the build's .elf.
