@@ -169,6 +169,16 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   CheckIt on the P4: 9.40x to 10.95x PC-XT under MS-DOS 6.22, and 7.65x to 8.68x under FreeDOS with
   JEMMEX (V86 mode). `cpu_exec1` grew by 8 KB of IRAM. The RP2350 keeps the original code
   (`SLOW(name)` = `name`), because its SRAM has no room for it.
+- **Flat 32-bit fast path (2026-11-15, P4, `i386_flat.h`, new).** While CS/DS/SS have base 0,
+  paging is off and the code is 32-bit (FastDoom under DOS/32A), `cpu_exec_flat` runs the common
+  instructions with the registers in a local array and host pointers into guest RAM: the ALU ops
+  (8/16/32-bit), MOV, LEA, PUSH/POP, Jcc, JMP/CALL/RET, the shifts, SHLD/SHRD, MOVZX/MOVSX, IMUL,
+  the F6/F7/FE/FF groups, SETcc, CWDE/CDQ. The lazy flags are set exactly as `i386.c`'s helpers
+  set them. Anything else (prefixes, the VGA window, a #DE) leaves with nothing changed and runs in
+  `cpu_exec1`, hooked in `i386_exec.h`. Checked on the desktop with `-DT386_FLATCHECK` (each
+  instruction run again by `cpu_exec1` and compared): 587M instructions in FastDoom, 0 differences.
+  FastDoom on the P4: 1.75-2.1 to 3.7-4.1 MIPS, 215 to about 100 cycles per guest instruction,
+  4-5 to about 10 fps.
 - **`i8042.c`: one keyboard byte at a time (2026-11-06).** In Prince of Persia, keys piled up and
   the prince kept moving on his own. Upstream took the next queued byte on every read of port
   60h. A real 8042 keeps the byte it holds until the keyboard sends another, about 1 ms later. So

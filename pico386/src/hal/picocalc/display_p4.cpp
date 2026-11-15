@@ -193,9 +193,15 @@ static const uint8_t kInit[] = {
 };
 
 // ---- a copy of the panel, for the serial remote's screenshots (p4Shot) ------------------------
-// The RP2350 reads its panel back over MISO; here PSRAM is plentiful, so every write to the panel
-// also goes to this copy, under s_lock like the write itself.
+// The RP2350 reads its panel back over MISO; here PSRAM is plentiful, so the UI's writes to the
+// panel also go to this copy, under s_lock like the write itself. The PC's frames go to it only
+// when a shot asks (s_shotWant): copying all 60 a second cost core 1 about 8% (2026-11-15,
+// FastDoom 213 -> 197 cycles per guest instruction), since both cores share the PSRAM.
 static uint16_t *s_shadow = nullptr;     // PANEL_W x PANEL_H
+static volatile bool s_shotWant = false;
+static SemaphoreHandle_t s_shotFrame = nullptr;   // given by the video task once it has copied
+static bool s_uiOverVideo = false;       // the UI drew over the PC's last frame (under s_lock)
+static void noteUi(int y, int h);        // below, beside the video task's state
 
 static void shadowRect(int x, int y, int w, int h, const uint16_t *px, int stride) {
   if (!s_shadow) return;
@@ -212,6 +218,7 @@ static void shadowFill(int x, int y, int w, int h, uint16_t c) {
 
 static void panelFillRawLocked(int x, int y, int w, int h, uint16_t c) {
   if (w <= 0 || h <= 0) return;
+  noteUi(y, h);
   shadowFill(x, y, w, h, c);
   panelWindow(x, y, x + w - 1, y + h - 1);
   txSolid(c, (uint32_t)w * (uint32_t)h);
@@ -226,6 +233,10 @@ static uint8_t   s_back = 0;
 static int       s_vy = 0, s_vh = 0;
 static SemaphoreHandle_t s_vGo = nullptr, s_vIdle = nullptr;
 
+static void noteUi(int y, int h) {
+  if (y < SCREEN_Y0 + s_vy + s_vh && y + h > SCREEN_Y0 + s_vy) s_uiOverVideo = true;
+}
+
 static void videoTask(void *) {
   for (;;) {
     xSemaphoreTake(s_vGo, portMAX_DELAY);
@@ -233,8 +244,11 @@ static void videoTask(void *) {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     panelWindow(0, SCREEN_Y0 + s_vy, SCREEN_W - 1, SCREEN_Y0 + s_vy + s_vh - 1);
     txRect(src, SCREEN_W, s_vh, SCREEN_W);
-    shadowRect(0, SCREEN_Y0 + s_vy, SCREEN_W, s_vh, src, SCREEN_W);   // while the DMA runs
+    const bool shot = s_shotWant;
+    if (shot) shadowRect(0, SCREEN_Y0 + s_vy, SCREEN_W, s_vh, src, SCREEN_W);   // while the DMA runs
     txWait();
+    s_uiOverVideo = false;
+    if (shot) { s_shotWant = false; xSemaphoreGive(s_shotFrame); }
     xSemaphoreGive(s_lock);
     xSemaphoreGive(s_vIdle);
   }
@@ -291,6 +305,7 @@ void hal_panel_push(int x, int y, int w, int h, const uint16_t *px, int stride) 
   xSemaphoreTake(s_lock, portMAX_DELAY);
   panelWindow(x, y, x + w - 1, y + h - 1);
   txRect(px, w, h, stride);
+  noteUi(y, h);
   shadowRect(x, y, w, h, px, stride);
   txWait();
   xSemaphoreGive(s_lock);
@@ -315,7 +330,17 @@ static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 void p4Shot() {
   uint16_t *pic = s_shadow ? (uint16_t *)hal_alloc_big(PANEL_W * PANEL_H * 2) : nullptr;
   if (!pic) { Serial.println("@shot no memory"); return; }
+  // Have the next PC frame copied too. With no PC running (menus), nothing comes, and the
+  // shadow already holds what the UI drew.
+  xSemaphoreTake(s_shotFrame, 0);
+  s_shotWant = true;
+  const bool fresh = xSemaphoreTake(s_shotFrame, pdMS_TO_TICKS(200)) == pdTRUE;
+  s_shotWant = false;
   xSemaphoreTake(s_lock, portMAX_DELAY);
+  // No frame came (a text screen that has not changed, or a menu is up): unless the UI has drawn
+  // over it since, the panel still shows the front buffer's last band.
+  if (!fresh && s_vh > 0 && !s_uiOverVideo && hal_video_ready())
+    shadowRect(0, SCREEN_Y0 + s_vy, SCREEN_W, s_vh, s_vbuf[s_back ^ 1] + s_vy * SCREEN_W, SCREEN_W);
   memcpy(pic, s_shadow, PANEL_W * PANEL_H * 2);
   xSemaphoreGive(s_lock);
   char line[80];
@@ -353,6 +378,7 @@ void p4Shot() {
 void p4DisplayInit() {
   s_lock = xSemaphoreCreateMutex();
   s_shadow = (uint16_t *)hal_alloc_big(PANEL_W * PANEL_H * 2);
+  s_shotFrame = xSemaphoreCreateBinary();
   lcdHwInit();
   for (size_t i = 0; i < sizeof(kInit);) {
     const uint8_t cmd = kInit[i], n = kInit[i + 1];

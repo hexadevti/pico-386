@@ -123,6 +123,33 @@ started from on 2026-10-18, and **emu16** and **emu8**.
         - The L2 cache can't grow. It is the first 256 KB of L2MEM, and our IRAM code sits after it.
         - Drawing 1 frame in 4 gave the same MIPS, so core 0's drawing doesn't evict the cache.
       - Readings vary between boots, so compare builds back to back with the same keys.
+    - **Core counters (2026-11-15):** the P4's FPS line ends with `ipc0.60 131i 215c` (`pc_core.cpp`,
+      the `cycle`/`instret` CSRs read around `t386_run_until`): IPC, then host instructions and
+      cycles per guest instruction. FastDoom's demo: `1.75 MIPS ipc0.60 131i 215c`; with the
+      unchanged-frame skip back on, `2.1 MIPS ipc0.71 130i 182c`. The same instruction count with
+      fewer cycles means core 0's redraw (about 400 KB through the PSRAM per frame) stalls core 1's
+      memory accesses. `prof` then: fetch and decode (`fetch8pf`, `fetch8`, `fetch32`, `peek*`,
+      `modsib*`, part of `pload8`) about 35% of core 1.
+      Each part of the drawing, cut out at run time (a TEMP switch, since removed), in cycles per guest
+      instruction during the demo: all of it 213 (1.8 MIPS); no PSRAM shadow for shots 197 (1.9); only
+      `vga_refresh` into the 800x600 fb 186 (2.05); no drawing at all 177 (2.2), the ceiling (+20%).
+      Rendering without the push gave 205: the parts overlap, so their costs do not add up. The
+      shadow is now written only when a shot asks (`s_shotWant`, display_p4.cpp).
+    - **Flat fast path (2026-11-15, branch `exp-p4-draw`, THIRD_PARTY.md):** `i386_flat.h` runs flat
+      32-bit code (FastDoom's DOS/32A: bases 0, paging off) with the registers in a local array.
+      FastDoom: 1.75-2.1 to **3.7-4.1 MIPS**, about 100 cycles per guest instruction, 4-5 to about
+      10 fps; batches average about 177 instructions. Left as misses: `REP MOVS` (f3), ADC/SBB (83
+      /2 /3), port I/O and segment loads.
+      - Any change to it must pass the desktop lockstep: configure a build dir with
+        `-DT386_FLATCHECK -DT386_OPSTATS` (it was `build-fchk`), run `doomt8.ini` with
+        `PC_KEYS='w20000,d,:,enter,d,o,o,m,enter,w60000,quit'`, and read `flatcheck N checked, 0 bad`
+        and the `flatstat` misses on stderr. TEMP: `PC_NOFLAT=1` turns it off on the desktop.
+      - The desktop's `doomt8.ini` (DOS-128) has no `BLASTER`: type
+        `set BLASTER=A220 I5 D1 H5 T6` before `doom`, or it quits with "Error setup sound device".
+        The desktop's unzipped doom folder has an `fdoom.cfg` with SB effects. With `PC_WAV`, sound
+        is the same with and without the fast path, also at `PC_MIPS=4`.
+      - On the P4, start Doom from the home menu with keys `d,w300,enter,...`: "d" jumps to the
+        "doom" startup. `down` is wrong, since the menu remembers the last startup ("PC").
     - **Profiler:** `python -I tools/remote.py --p4 prof 8` samples core 1 at 2 kHz (`prof_p4.cpp`,
       `@prof`/`@profdump`) and prints hot functions and lines through addr2line on the build's .elf.
       Names are the innermost inlined function, so `pload8` or `fetch8pf` usually means code inside

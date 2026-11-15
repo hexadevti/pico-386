@@ -4330,6 +4330,10 @@ static void opstat_dump(void)
 #define EXEC_HOT 1
 #include "i386_exec.h"
 #else
+#ifdef I386_FASTPATH
+#define I386_FLAT 1
+#include "i386_flat.h"
+#endif
 #define EXEC_NAME cpu_exec1
 #define EXEC_ATTR IRAM_ATTR_CPU_EXEC1
 #define EXEC_COLD(s) 0
