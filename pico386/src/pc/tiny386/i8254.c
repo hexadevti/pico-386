@@ -63,12 +63,25 @@ struct PITState {
 };
 
 uint32_t get_uticks();
+
+/* pico-386: PIT ticks in us microseconds, (uint64_t) us * PIT_FREQ / 1000000 truncated to 32 bits,
+   exactly, in 32-bit arithmetic. The 64-bit division was a libgcc call (__udivmoddi4) on the
+   RP2350 and took 15% of the time with Prince of Persia running, and two thirds of it with the
+   guest halted, because i8254_update_irq runs every PC_TIMER_STEP instructions. With r < 10^6 split
+   as 1000a + b, r * 193182 / 10^6 is a * 193 + (a * 182000 + b * 193182) / 10^6, which fits. */
+static inline uint32_t pit_ticks(uint32_t us)
+{
+	uint32_t q = us / 1000000, r = us % 1000000;
+	uint32_t a = r / 1000, b = r % 1000;
+	return q * PIT_FREQ + r + a * 193 + (a * 182000 + b * 193182) / 1000000;
+}
+
 static int pit_get_count(PITChannelState *s)
 {
 	uint32_t d;
 	int counter;
 
-	d = ((uint64_t) (get_uticks() - s->count_load_time)) * PIT_FREQ / 1000000;
+	d = pit_ticks(get_uticks() - s->count_load_time);
 	switch(s->mode) {
 	case 0:
 	case 1:
@@ -93,7 +106,7 @@ static int pit_get_out1(PITChannelState *s, uint32_t current_time)
 	uint32_t d;
 	int out;
 
-	d = ((uint64_t) (current_time - s->count_load_time)) * PIT_FREQ / 1000000;
+	d = pit_ticks(current_time - s->count_load_time);
 	switch(s->mode) {
 	default:
 	case 0:
@@ -274,7 +287,7 @@ uint32_t pit_irq0_fired;   /* pico-386: diagnostics (t386_timer_info) */
 void i8254_info(PITState *pit, uint32_t *count, uint32_t *behind)
 {
 	PITChannelState *s = pit->channels;
-	uint32_t d = ((uint64_t) (get_uticks() - s->count_load_time)) * PIT_FREQ / 1000000;
+	uint32_t d = pit_ticks(get_uticks() - s->count_load_time);
 	*count = s->count;
 	*behind = s->count && (int32_t)(d - s->last_irq_count) > 0 ? (d - s->last_irq_count) / s->count : 0;
 }
@@ -283,7 +296,7 @@ void i8254_update_irq(PITState *pit)
 {
 	uint32_t uticks = get_uticks();
 	PITChannelState *s = pit->channels;
-	uint32_t d = ((uint64_t) (uticks - s->count_load_time)) * PIT_FREQ / 1000000;
+	uint32_t d = pit_ticks(uticks - s->count_load_time);
 	switch(s->mode) {
 	case 2:
 	case 3:

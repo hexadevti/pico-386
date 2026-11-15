@@ -38,7 +38,11 @@ typedef struct fm_opl_slot {
 	uint8_t ams;		/* ams flag                            */
 	uint8_t vib;		/* vibrate flag                        */
 	/* wave selector */
+#ifdef FMOPL_COMPACT
+	uint8_t wave;		/* pico-386: 0-3 (fmopl.c, opl_out) */
+#else
 	const int32_t * const *wavetable;
+#endif
 }OPL_SLOT;
 
 /* ---------- OPL one of channel  ---------- */

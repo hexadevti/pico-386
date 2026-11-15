@@ -41,6 +41,11 @@
 
 #if defined(PICO386_LOWMEM)
 #define T386_PAGED 1
+// fmopl.c synthesises from 2 KB of tables (fmopl_compact.h) instead of 128 KB, which sat in flash
+// behind the 16 KB XIP cache. SimCity's mix went from about 680 to 335 ms per 2 s on the device.
+// On the desktop the big tables fit in the cache and the compact code is about 40% slower; the P4
+// has not been measured, so it keeps upstream's.
+#define FMOPL_COMPACT 1
 #include "../pc_pagemem.h"
 #endif
 

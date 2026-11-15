@@ -120,6 +120,10 @@ extern "C" void hal_psram_write(uint32_t a, const void *src, size_t n) {
   if (!s_psram) s_psram = (uint8_t *)calloc(1, PSRAM_BYTES);
   if (a < PSRAM_BYTES && n <= PSRAM_BYTES - a) memcpy(s_psram + a, src, n);
 }
+extern "C" void hal_psram_swap(uint32_t wr, uint32_t rd, void *buf, size_t n) {
+  hal_psram_write(wr, buf, n);
+  if (rd != HAL_PSRAM_NONE) hal_psram_read(rd, buf, n);
+}
 extern "C" uint8_t *hal_arena(size_t *size) { *size = sizeof s_arenaBuf; return s_arenaBuf; }
 #endif
 bool  hal_job_start(void (*job)(void *), void *arg) { job(arg); return true; }

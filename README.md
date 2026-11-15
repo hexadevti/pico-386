@@ -42,16 +42,17 @@ PicoCalc.
 - **A mouse from the keyboard:** the arrows can move a PS/2 mouse pointer, for Windows and mouse games.
 
 **What runs:** MS-DOS 6.22 and FreeDOS 1.3, Windows 3.11, and DOS games. On the P4, CheckIt rates
-the PC at about 9x a PC-XT (2 MIPS), which is a slow 386: Prince of Persia and most 1980s-1990
-games play well, and Doom runs but slowly. The RP2350 rates about 5x a PC-XT (1.1 MIPS) and slows
-down further when a program uses more memory than its 64 KB of fast RAM holds.
+the PC at about 11x a PC-XT (2 MIPS), which is a slow 386: Prince of Persia and most 1980s-1990
+games play well, and Doom runs but slowly. The RP2350 rates about 6.7x a PC-XT (1.4 MIPS) and slows
+down further when a program uses more memory than its 96 KB of fast RAM holds (192 KB in 320x200
+games). An optional overclock to 400 MHz makes it about 20% faster again (see below).
 
 | | ESP32-P4 | Pico 2 (RP2350) |
 |---|---|---|
 | CPU | 386 + FPU | 386 + FPU |
 | Guest RAM | as much as fits, up to 32 MB | 4 MB, paged from the mainboard's 8 MB PSRAM |
 | Video RAM | 1 MB (SVGA/VBE) | 160 KB (VGA up to 640x480x16) |
-| Speed (CheckIt) | about 9x PC-XT | about 5x PC-XT |
+| Speed (CheckIt) | about 11x PC-XT | about 6.7x PC-XT (300 MHz) |
 | Sound | 44.1 kHz, I2S | 22 kHz, PWM |
 
 ## Installing
@@ -268,12 +269,19 @@ relative to the card root. Our keys are under `[pico]`:
 
 The RP2350 build runs the chip at 300 MHz, twice its rated clock, on its default core voltage.
 Most Pico 2 boards cope, but some RP2350 boards freeze at random within seconds. `pico-386/rp2350.ini`
-(read at power-on, ignored by the P4) has three settings, all commented out. Uncomment one at a time
+(read at power-on, ignored by the P4) has four settings, all commented out. Uncomment one at a time
 by removing the `;`:
 
 - `vreg = 1.20`: a little more core voltage (1.10-1.30), keeps the speed
-- `mhz = 250`: a lower clock (100-300), slower but steadier
+- `mhz = 250`: a lower clock (100-400), slower but steadier
 - `psram_div = 3`: a slower clock for the RAM chip (2-10)
+- `psram_quad = 0`: talk to the RAM chip over one data line instead of four (slower)
+
+### Overclocking the Pico 2
+
+`mhz` also goes above 300, with more voltage: `mhz = 360` with `vreg = 1.25`, or `mhz = 400` with
+`vreg = 1.30`. FastDoom runs about 10% faster at 360 and about 20% faster at 400 than at 300. Not
+every chip runs it: if the PicoCalc freezes or a game crashes, go back a step.
 
 The serial log on the USB-C port (115200 baud) shows what was applied (`rp2350.ini: ...`) and
 the clock and voltage in use. Also make sure the keyboard runs ClockworkPi's official firmware

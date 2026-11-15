@@ -203,8 +203,45 @@ static int32_t *VIB_TABLE;
 /* envelope output curve table */
 /* attack + decay + OFF */
 static int32_t *ENV_CURVE;
-#else
+#elif !defined(FMOPL_COMPACT)
 const static int32_t ENV_CURVE[];
+#endif
+
+#ifdef FMOPL_COMPACT
+/* pico-386: upstream's tables are 128 KB (TL_TABLE 64 KB, SIN_TABLE 32 KB, ENV_CURVE 32 KB), read
+ * at random every sample. On the RP2350 they sit in flash behind a 16 KB cache, and the OPL took
+ * about a third of the time in SimCity. These give the same samples from 2 KB, as the real chip
+ * does (a log-sine and an exponential): the waves and the envelope exactly, the level within
+ * 0.32 dB (the shift halves every 256 steps, which TL_TABLE does every 6.02 dB, not 6). */
+#include "fmopl_compact.h"
+
+/* ENV_CURVE[i]: the attack curve ((4095 - i) / 4096)^8 * 4096, then decay, then off */
+static inline uint32_t env_curve(uint32_t i)
+{
+	if (i >= EG_ENT)
+		return i < 2 * EG_ENT ? i - EG_ENT : EG_ENT - 1;
+	uint32_t x = EG_ENT - 1 - i, x2 = x * x;		/* two 32x32->64 multiplies */
+	uint32_t y = (uint32_t)(((uint64_t)x2 * x2) >> 24);
+	return (uint32_t)(((uint64_t)y * y) >> 36);
+}
+
+/* SIN_TABLE[wave * SIN_ENT + phase][env] */
+static inline int32_t opl_out(unsigned wave, uint32_t phase, uint32_t env)
+{
+	uint32_t p = phase & (SIN_ENT - 1);
+	switch (wave) {
+	case 1: if (p >= SIN_ENT / 2) return 0; break;		/* half sine */
+	case 2: p &= SIN_ENT / 2 - 1; break;			/* abs sine */
+	case 3: if (p & (SIN_ENT / 4)) return 0;		/* quarter pulses */
+		p &= SIN_ENT / 4 - 1; break;
+	}
+	const uint32_t q = p & (SIN_ENT / 4 - 1);
+	const uint32_t t = SIN_LOG[p & (SIN_ENT / 4) ? SIN_ENT / 4 - q : q] + env;
+	if (t >= EG_ENT - 1)
+		return 0;
+	const int32_t v = TL_EXP[t & 255] >> (t >> 8);
+	return p & (SIN_ENT / 2) ? -v : v;
+}
 #endif
 
 /* multiple table */
@@ -363,7 +400,11 @@ static inline uint32_t OPL_CALC_SLOT( OPL_SLOT *SLOT )
 		}
 	}
 	/* calcrate envelope */
+#ifdef FMOPL_COMPACT
+	return SLOT->TLL+env_curve(SLOT->evc>>ENV_BITS)+(SLOT->ams ? ams : 0);
+#else
 	return SLOT->TLL+ENV_CURVE[SLOT->evc>>ENV_BITS]+(SLOT->ams ? ams : 0);
+#endif
 }
 
 /* set algorithm connection */
@@ -457,7 +498,11 @@ static inline void set_sl_rr(FM_OPL *OPL,int slot,int v)
 }
 
 /* operator output calcrator */
+#ifdef FMOPL_COMPACT
+#define OP_OUT(slot,env,con)   opl_out(slot->wave, (slot->Cnt+con)/(0x1000000/SIN_ENT), env)
+#else
 #define OP_OUT(slot,env,con)   slot->wavetable[((slot->Cnt+con)/(0x1000000/SIN_ENT))&(SIN_ENT-1)][env]
+#endif
 /* ---------- calcrate one of channel ---------- */
 static inline void OPL_CALC_CH( OPL_CH *CH )
 {
@@ -791,8 +836,13 @@ static void OPLWriteReg(FM_OPL *OPL, int r, int v)
 				int c;
 				for(c=0;c<OPL->max_ch;c++)
 				{
+#ifdef FMOPL_COMPACT
+					OPL->P_CH[c].SLOT[SLOT1].wave = 0;
+					OPL->P_CH[c].SLOT[SLOT2].wave = 0;
+#else
 					OPL->P_CH[c].SLOT[SLOT1].wavetable = &SIN_TABLE[0];
 					OPL->P_CH[c].SLOT[SLOT2].wavetable = &SIN_TABLE[0];
+#endif
 				}
 			}
 			return;
@@ -972,7 +1022,11 @@ static void OPLWriteReg(FM_OPL *OPL, int r, int v)
 		if(OPL->wavesel)
 		{
 			/* LOG(LOG_INF,("OPL SLOT %d wave select %d\n",slot,v&3)); */
+#ifdef FMOPL_COMPACT
+			CH->SLOT[slot&1].wave = v&0x03;
+#else
 			CH->SLOT[slot&1].wavetable = &SIN_TABLE[(v&0x03)*SIN_ENT];
+#endif
 		}
 		return;
 	}
@@ -1109,7 +1163,11 @@ static void OPLResetChip(FM_OPL *OPL)
 		for(s = 0 ; s < 2 ; s++ )
 		{
 			/* wave table */
+#ifdef FMOPL_COMPACT
+			CH->SLOT[s].wave = 0;
+#else
 			CH->SLOT[s].wavetable = &SIN_TABLE[0];
+#endif
 			/* CH->SLOT[s].evm = ENV_MOD_RR; */
 			CH->SLOT[s].evc = EG_OFF;
 			CH->SLOT[s].eve = EG_OFF+1;

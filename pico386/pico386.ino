@@ -17,7 +17,7 @@ void loop()  { app_loop(); }
 #include <task.h>
 
 // arduino-pico's loop task has a fixed 4 KB stack, so the app gets its own task on core 0.
-#define APP_STACK_WORDS (24 * 1024 / sizeof(StackType_t))
+#define APP_STACK_WORDS (16 * 1024 / sizeof(StackType_t))
 static StackType_t s_appStack[APP_STACK_WORDS];
 static StaticTask_t s_appTcb;
 

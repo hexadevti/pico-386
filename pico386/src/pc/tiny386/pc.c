@@ -9,6 +9,21 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#ifdef PICO386_LOWMEM
+/* pico-386: VRAM past 64 KB is lent to the pager in mode 13h (pc_pagemem.h); a VGA register
+   write that lets the guest reach it again takes it back first, and so does a write to the
+   linear framebuffer up there, for good. */
+#define PICO_VRAM_SYNC(pc) do { if (pm_vram_lent && !vga_pico_hi_idle((pc)->vga)) pm_vram_reclaim(0); } while (0)
+#define PICO_LFB_HOLD(a) do { if ((a) >= PM_VRAM_LOW) pm_vram_reclaim(1); } while (0)
+#else
+#define PICO_VRAM_SYNC(pc) do {} while (0)
+#define PICO_LFB_HOLD(a) do {} while (0)
+#endif
+/* pico-386: bumped by every guest write to the VGA's memory or registers, so the frontend can
+   skip drawing a picture that has not changed (t386_vga_gen in pc_glue.c). */
+volatile uint32_t pico_vga_gen;
+#define PICO_VGA_DIRTY() (pico_vga_gen++)
+
 #if defined(USE_AMD64)
 static void raise_irq_amd64(void *o, PicState2 *s)
 {
@@ -407,6 +422,8 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x3d8: case 0x3d9: case 0x3da: case 0x3db:
 	case 0x3dc: case 0x3dd: case 0x3de: case 0x3df:
 		vga_ioport_write(pc->vga, addr, val);
+		PICO_VRAM_SYNC(pc);
+		PICO_VGA_DIRTY();
 		return;
 	case 0x402:
 		putchar(val);
@@ -527,9 +544,13 @@ static void pc_io_write16(void *o, int addr, u16 val)
 	case 0x3dc: case 0x3dd: case 0x3de:
 		vga_ioport_write(pc->vga, addr, val & 0xff);
 		vga_ioport_write(pc->vga, addr + 1, (val >> 8) & 0xff);
+		PICO_VRAM_SYNC(pc);
+		PICO_VGA_DIRTY();
 		return;
 	case 0x1ce: case 0x1cf:
 		vbe_write(pc->vga, addr - 0x1ce, val);
+		PICO_VRAM_SYNC(pc);
+		PICO_VGA_DIRTY();
 		return;
 	case 0xcfc: case 0xcfe:
 		i440fx_write_data(pc->i440fx, addr - 0xcfc, val, 1);
@@ -670,9 +691,11 @@ static u8 iomem_read8(void *iomem, uword addr)
 static void iomem_write8(void *iomem, uword addr, u8 val)
 {
 	PC *pc = iomem;
+	PICO_VGA_DIRTY();
 	uword vga_addr2 = pc->pci_vga_ram_addr;
 	if (addr >= vga_addr2) {
 		addr -= vga_addr2;
+		PICO_LFB_HOLD(addr);
 		if (addr < pc->vga_mem_size)
 			pc->vga_mem[addr] = val;
 		return;
@@ -689,10 +712,12 @@ static u16 iomem_read16(void *iomem, uword addr)
 static void iomem_write16(void *iomem, uword addr, u16 val)
 {
 	PC *pc = iomem;
+	PICO_VGA_DIRTY();
 	// fast path for vga ram
 	uword vga_addr2 = pc->pci_vga_ram_addr;
 	if (addr >= vga_addr2) {
 		addr -= vga_addr2;
+		PICO_LFB_HOLD(addr);
 		if (addr + 1 < pc->vga_mem_size)
 			*(uint16_t *)&(pc->vga_mem[addr]) = val;
 		return;
@@ -709,11 +734,13 @@ static u32 iomem_read32(void *iomem, uword addr)
 static void iomem_write32(void *iomem, uword addr, u32 val)
 {
 	PC *pc = iomem;
+	PICO_VGA_DIRTY();
 	// fast path for vga ram
 	uword vga_addr2 = pc->pci_vga_ram_addr;
 	if (addr >= vga_addr2) {
 		uword vga_addr2 = pc->pci_vga_ram_addr;
 		addr -= vga_addr2;
+		PICO_LFB_HOLD(addr);
 		if (addr + 3 < pc->vga_mem_size)
 			*(uint32_t *)&(pc->vga_mem[addr]) = val;
 		return;
@@ -731,6 +758,7 @@ static u64 iomem_read64(void *iomem, uword addr)
 static void iomem_write64(void *iomem, uword addr, u64 val)
 {
 	PC *pc = iomem;
+	PICO_VGA_DIRTY();
 	vga_mem_write32(pc->vga, addr - 0xa0000, val);
 	vga_mem_write32(pc->vga, addr + 4 - 0xa0000, val >> 32);
 }
@@ -739,6 +767,7 @@ static void iomem_write64(void *iomem, uword addr, u64 val)
 static bool iomem_write_string(void *iomem, uword addr, uint8_t *buf, int len)
 {
 	PC *pc = iomem;
+	PICO_VGA_DIRTY();
 	// fast path for vga ram
 	uword vga_addr2 = pc->pci_vga_ram_addr;
 	if (addr >= vga_addr2) {

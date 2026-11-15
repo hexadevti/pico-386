@@ -2347,6 +2347,16 @@ void vga_set_line_sink(VGAState *s, VGAPicoLineFunc *f, void *opaque)
     s->pico_sink_opaque = opaque;
 }
 
+/* pico-386: in chain-4 mode with the A0000-AFFFF window and no VBE bank, the CPU reaches only
+   VRAM's first 64 KB (vga_mem_*), so the rest can be lent to the pager (pc_pagemem.h). The
+   display may still read past it (a start address up there); that only shows wrong pixels. */
+int vga_pico_hi_idle(VGAState *s)
+{
+    return (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&
+           ((s->gr[VGA_GFX_MISC] >> 2) & 3) == 1 && !s->bank_offset &&
+           !(s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED);
+}
+
 void vga_pico_info(VGAState *s, VGAPicoInfo *p)
 {
     memset(p, 0, sizeof(*p));

@@ -98,18 +98,21 @@
 #define AUDIO_R_PIN       27
 #define AUDIO_OUT_RATE    22050
 
-// The mainboard's 8 MB PSRAM (APS6404L class), plain SPI through PIO1: CS 20, SCK 21,
-// SIO0 (MOSI) 2, SIO1 (MISO) 3.
+// The mainboard's 8 MB PSRAM (APS6404L class) through PIO1: CS 20, SCK 21, SIO0 (MOSI) 2,
+// SIO1 (MISO) 3, SIO2 4, SIO3 5. Quad (QPI) when all four data lines answer, else plain SPI.
 #define PSRAM_CS_PIN      20
 #define PSRAM_SCK_PIN     21
 #define PSRAM_MOSI_PIN    2
 #define PSRAM_MISO_PIN    3
+#define PSRAM_SIO0_PIN    2                // the four data lines are consecutive pins
 #define PSRAM_BYTES       (8u << 20)
 
 // The SRAM arena: VRAM (PM_VRAM_BYTES, 160 KB), then the guest-RAM page frames. The menu canvas
-// (200 KB) reuses its start. 64 KB of frames (64 pages of 1 KB) leave about 9 KB of heap with a
-// PC running; tiny386 alone takes 43 KB of it, and the interpreter in SRAM (i386.c) about 96 KB.
-#define LOWMEM_ARENA_BYTES (160u * 1024 + 64u * 1024)
+// (200 KB) reuses its start. 96 KB of frames (96 pages of 1 KB): Windows 3.x's working set fits
+// in 96 and not in 92, and with 64 it faulted 19 times as often. Since cpu_exec1 was split into
+// a hot copy in SRAM and a full one in flash (i386.c, I386_COLD), that leaves about 15 KB of heap
+// with a PC running; tiny386 alone takes 43 KB of it.
+#define LOWMEM_ARENA_BYTES (160u * 1024 + 96u * 1024)
 
 #elif defined(BOARD_DESKTOP)
 
@@ -120,7 +123,7 @@
 #endif
 #if defined(PICO386_LOWMEM)                // the RP2350's memory, simulated
 #define PSRAM_BYTES       (8u << 20)
-#define LOWMEM_ARENA_BYTES (160u * 1024 + 64u * 1024)
+#define LOWMEM_ARENA_BYTES (160u * 1024 + 96u * 1024)
 #endif
 
 #endif
