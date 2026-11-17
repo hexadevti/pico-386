@@ -669,6 +669,21 @@ the repo root, because `PC_INI` paths are relative to the cwd.
     1.3-1.6 MIPS, 240-294 cycles per guest instruction; idle is 0.1 MIPS (HLT). `prof` is all
     interpreter (`cpu_exec1` 25%, `translate` 12%, `set_seg` 6.5%, `read_desc` 4%): 16-bit
     protected-mode code with paging, which the flat fast path does not take.
+  - **Instruction mix (2026-11-17, branch `win95-speed`):** counted on the desktop with `build-eip`
+    (`-DT386_OPSTATS`, not LOWMEM; `build-opstats` is LOWMEM and its translate counts mean nothing
+    for the P4): `MOVSeg` 20%, `JCCb` 16%, `PUSH` 9%, `POP_DS` + `PUSH_DS` 8%; segment loads in
+    protected mode are about 30% of instructions (6% reload the same selector). CR3 writes, `INVLPG`
+    and task switches are rare (a few thousand), so TLB flushes don't matter; TLB refills are
+    about 5% of instructions. `read_desc` now reads from RAM on a TLB hit (THIRD_PARTY.md): on the
+    device `set_seg` + `read_desc` dropped from 10.7% to 2.8% of `prof`, but the load test still
+    read 1.4-1.5 MIPS, 257-283c. `??` (11% in that first profile) is ROM code at 0x4fc05dxx and
+    shrinks to about 2% under load: it is Windows idling. The TLB entries then went to permission
+    bits and a cached dirty bit (THIRD_PARTY.md): `translate` 12.4% to 11.3%, still 1.4-1.6 MIPS,
+    262-280c. `prof` under load (open/close Multimedia): `cpu_exec1` 29%, `translate` 11%, `fetch8`
+    7%, `fetch8pf` 6%, `pload8` 4%. The hottest lines are loads (`pload8`'s guest RAM, the TLB
+    entry's compare), so PSRAM latency on guest memory is a large share of what is left.
+    To profile while keys run: send `@keys ...` without waiting, then `remote.prof` in the same
+    process (only one program can hold COM9); `remote.py raw` is `@shotraw`, not a raw line.
   - **Dirty lines (2026-11-17, THIRD_PARTY.md):** for 16-colour planar pictures wider than 320
     (mode 12h), `vga.c` decodes only the lines the guest wrote, `pcvid_render` scales only their
     rows plus the previous frame's (`s_pendY0/1`: the other video buffer lacks those), and
@@ -676,6 +691,19 @@ the repo root, because `PC_INI` paths are relative to the cwd.
     pictures are still decoded and pushed whole every frame on the P4 (Prince's crackle). The
     same test then read 1.4-1.6 MIPS, 240-270c: the drawing was not the limit, the interpreter
     is. The P4's shot copies every row a frame was ever pushed to (`s_vTop`/`s_vEnd`).
+  - **16-bit protected-mode fast path (2026-11-17): no gain, removed** (the user agreed). It was
+    `i386_pm16.h`, like `i386_flat.h` but for 16-bit code with CR0.PE (not V86), hooked in
+    `i386_exec.h` after the flat path, and was never committed.
+    Desktop lockstep (`build-fchk`, Control Panel + Multimedia): `pm16check 101674128 checked,
+    0 bad`. But runs average only about 5.6 instructions: the misses are 66 (5.1M), 67 (3.0M),
+    RETF (1.5M), CALL far (1.4M), rotates, LODSB, CLD, LOOP, POP FS/GS, SBB, STOSB, XLAT. On the
+    device, A/B in one session (TEMP `@pm16 0|1`), Multimedia open/close: 1.35 MIPS off, 1.37 on,
+    about 285c both. `prof` showed it taking 16% of core 1 while `cpu_exec1` took 20%: the work
+    moved, its cost did not (guest-memory loads from PSRAM dominate either way).
+    Its 27.7 KB of IRAM left 151 KB of internal RAM at boot, and the PC's `hal_alloc_fast` tables
+    then took the rest: the job semaphores, made at the first frame, were NULL (assert in
+    `xQueueSemaphoreTake` at Start). Fixed for good: `jobInit` in `hal_init`, and `hal_alloc_fast`
+    leaves 48 KB of internal RAM free (`kInternalReserve`).
   - `alt+f4` through `remote.py --p4` did not reach Windows on the device (it does on the
     desktop), so a deploy cuts Windows off without a shutdown.
   - Setup needs 157 MB free even for Compact, so a 128 MB disk is refused.

@@ -109,8 +109,15 @@ void *hal_alloc_big(size_t n) {
             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >> 10));
   return p;
 }
+// The PC's hot tables come here first. They stop 48 KB short of filling the internal RAM:
+// FreeRTOS objects, SD file buffers and driver transactions made later can only come from it,
+// and the fast paths' IRAM code already takes much of it (a 27.7 KB experiment once left only
+// 151 KB at boot, and the job semaphores came back NULL).
+static const size_t kInternalReserve = 48 * 1024;
 void *hal_alloc_fast(size_t n) {
-  void *p = heap_caps_calloc(1, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  void *p = nullptr;
+  if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= n + kInternalReserve)
+    p = heap_caps_calloc(1, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   return p ? p : hal_alloc_big(n);
 }
 void hal_free(void *p) { free(p); }
@@ -131,13 +138,17 @@ static void jobTask(void *) {
   }
 }
 
+// Made in hal_init: made at the first frame, the semaphores once found the internal RAM used up
+// by the PC's tables (NULL, an assert in xQueueSemaphoreTake).
+static void jobInit() {
+  s_jobGo = xSemaphoreCreateBinary();
+  s_jobDone = xSemaphoreCreateBinary();
+  // below the panel (5) and keyboard (4) tasks, which only wake briefly
+  xTaskCreatePinnedToCore(jobTask, "job", 8192, nullptr, 3, &s_jobTask, 0);
+}
+
 bool hal_job_start(void (*job)(void *), void *arg) {
-  if (!s_jobTask) {
-    s_jobGo = xSemaphoreCreateBinary();
-    s_jobDone = xSemaphoreCreateBinary();
-    // below the panel (5) and keyboard (4) tasks, which only wake briefly
-    xTaskCreatePinnedToCore(jobTask, "job", 8192, nullptr, 3, &s_jobTask, 0);
-  }
+  if (!s_jobTask) return false;
   if (s_jobBusy) return false;
   xSemaphoreTake(s_jobDone, 0);                  // drop the last job's completion
   s_job = job;
@@ -182,6 +193,7 @@ void hal_init() {
           (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10),
           (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10));
   p4AudioInit();                     // first: its DMA buffers need internal RAM
+  jobInit();
   const bool board = picocalcWaitForMainboard();
   p4DisplayInit();
   if (board) sdInit();

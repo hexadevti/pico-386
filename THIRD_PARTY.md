@@ -228,6 +228,21 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
     the last refresh, only the lines holding flagged words are decoded, and `VGAPicoInfo`
     reports them (`dirty_y0`/`dirty_y1`). Writers store first and flag after; the refresh clears
     the flags before it reads anything, because the two run on different cores on the P4.
+- **`i386.c`: descriptor reads (2026-11-17).** Under `I386_FASTPATH` (P4 and desktop), `read_desc`
+  reads the 8 bytes straight from guest RAM when the TLB already holds their page (or paging is
+  off), ring 0 may read it, they sit in one page and the page is plain RAM; anything else takes
+  upstream's two `translate_laddr` + `load32`. Windows 95's 16-bit code loads a segment register
+  in about 30% of its instructions (`MOV Sreg`, `PUSH/POP DS/ES`, far returns). Checked on the
+  desktop against upstream's path for 335M loads during Windows 95's Control Panel, 0 differ.
+  On the P4, `set_seg` + `read_desc` went from about 10.7% of core 1 to 2.8%.
+- **`i386.c`: TLB entries (2026-11-17).** For every build. `struct tlb_entry` keeps the four
+  `pte_lookup` answers of its PTE as bits (`deny`, `TLB_DENIED`) instead of a pointer into the table,
+  so a hit tests a byte of the entry. It also keeps `dirty`, the PTE's dirty bit at refill: a write
+  through the entry sets the bit in the PTE only the first time (`TLB_DIRTY`), where upstream
+  read-modify-wrote the PTE (in PSRAM on the P4) on every store. A 386 caches D the same way, so a
+  guest clearing it must flush (INVLPG, CR3), which empties this TLB as well. Windows 95 behaved
+  the same on the desktop with and without it. On the P4 `translate` went from 12.4% of core 1 to
+  11.3%; MIPS did not move measurably.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 
