@@ -116,7 +116,10 @@ struct CPUI386 {
 		struct tlb_entry {
 			uword lpgno;
 			uword xaddr;
-			int (*pte_lookup)[2];
+			/* pico-386: pte_lookup[cpl > 0][rwm > 1] as bits ((cpl > 0) * 2 + (rwm > 1)), and
+			   whether the PTE's dirty bit is already set; see tlb_refill */
+			u8 deny;
+			u8 dirty;
 #ifdef T386_PAGED
 			uword ppte; /* physical address of the PTE; -1 for none */
 #else
@@ -620,13 +623,28 @@ static int pte_lookup[2][4][2][2] = { //[wp != 0][(pte >> 1) & 3][cpl > 0][rwm >
 	}
 };
 
+/* pico-386: the four pte_lookup answers of a PTE as bits, so a TLB hit tests one byte of the
+   entry, not a pointer to a table. And the entry remembers that the PTE's dirty bit is set:
+   the hit path wrote it into the PTE (in PSRAM on the P4) on every store. A 386 caches it the
+   same way, so a guest that clears it must flush the TLB (INVLPG, CR3), which empties ours too. */
+#define TLB_DENY(t) ((t)[0][0] | (t)[0][1] << 1 | (t)[1][0] << 2 | (t)[1][1] << 3)
+#define TLB_DENIED(ent, cpl, rwm) ((ent)->deny >> (((cpl) > 0) * 2 + ((rwm) > 1)) & 1)
+/* sets the PTE's dirty bit the first time the entry is written through */
+#ifdef T386_PAGED
+#define TLB_DIRTY(cpu, ent) do { if (!(ent)->dirty) { (ent)->dirty = 1; if ((ent)->ppte != (uword) -1) \
+	pstore8(cpu, (ent)->ppte, pload8(cpu, (ent)->ppte) | (1 << 6)); } } while (0)
+#else
+#define TLB_DIRTY(cpu, ent) do { if (!(ent)->dirty) { (ent)->dirty = 1; *((ent)->ppte) |= 1 << 6; } } while (0)
+#endif
+
 static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgno)
 {
 	if (unlikely(GET_LM_EFER(cpu))) {
 		static u8 _[8];
 		ent->lpgno = lpgno;
 		ent->xaddr = 0;
-		ent->pte_lookup = pte_lookup[1][3];
+		ent->deny = TLB_DENY(pte_lookup[1][3]);
+		ent->dirty = 1;
 #ifdef T386_PAGED
 		(void) _;
 		ent->ppte = (uword) -1;
@@ -661,8 +679,9 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 
 	ent->lpgno = lpgno;
 	ent->xaddr = (pte & ~0xfff) ^ (lpgno << 12);
+	ent->dirty = (pte >> 6) & 1;
 	pte = pte & ((pde & 7) | 0xfffffff8);
-	ent->pte_lookup = pte_lookup[!!(cpu->cr0 & CR0_WP)][(pte >> 1) & 3];
+	ent->deny = TLB_DENY(pte_lookup[!!(cpu->cr0 & CR0_WP)][(pte >> 1) & 3]);
 #ifdef T386_PAGED
 	ent->ppte = base_addr2 + j * 4;
 #else
@@ -687,7 +706,7 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 			return false;
 		}
 	}
-	if (ent->pte_lookup[cpl > 0][rwm > 1]) {
+	if (TLB_DENIED(ent, cpl, rwm)) {
 		cpu->cr2 = laddr;
 		cpu->excno = EX_PF;
 		cpu->excerr = 1;
@@ -699,16 +718,8 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 		return false;
 	}
 	*paddr = ent->xaddr ^ laddr;
-	if (rwm & 2) {
-#ifdef T386_PAGED
-		if (ent->ppte != (uword) -1)
-			pstore8(cpu, ent->ppte, pload8(cpu, ent->ppte) | (1 << 6)); // dirty
-#else
-		*(ent->ppte) |= 1 << 6; // dirty
-#endif
-//		pstore8(cpu, ent->ppte,
-//			pload8(cpu, ent->ppte) | (1 << 6)); // dirty
-	}
+	if (rwm & 2)
+		TLB_DIRTY(cpu, ent);
 	return true;
 }
 
@@ -818,10 +829,10 @@ static inline bool translate(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword
 #ifndef T386_PAGED
 		uword lpgno = laddr >> 12;
 		struct tlb_entry *ent = &(cpu->tlb.tab[lpgno % tlb_size]);
-		if (likely(ent->lpgno == lpgno && !ent->pte_lookup[cpl > 0][rwm > 1] &&
+		if (likely(ent->lpgno == lpgno && !TLB_DENIED(ent, cpl, rwm) &&
 			   (laddr & 0xfff) <= 0x1000 - size)) {
 			if (rwm & 2)
-				*(ent->ppte) |= 1 << 6; // dirty
+				TLB_DIRTY(cpu, ent);
 			res->res = ADDR_OK1;
 			res->addr1 = ent->xaddr ^ laddr;
 			return true;
@@ -852,7 +863,7 @@ static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword add
 				return false;
 			}
 		}
-		if (ent->pte_lookup[cpu->cpl > 0][0]) {
+		if (TLB_DENIED(ent, cpu->cpl, 0)) {
 			cpu->cr2 = laddr;
 			cpu->excno = EX_PF;
 			cpu->excerr = 1;
@@ -1401,6 +1412,31 @@ static bool IRAM_ATTR read_desc(CPUI386 *cpu, int sel, uword *w1, uword *w2)
 		dolog("read_desc: sel %04x base %x limit %x off %x\n", sel, base, limit, off);
 		THROW(EX_GP, sel & ~0x3);
 	}
+#ifdef I386_FASTPATH
+	/* pico-386: Windows 95's 16-bit code loads a segment register in up to a third of its
+	   instructions, and each load came here for two translate_laddr and two load32 calls. With
+	   the descriptor's 8 bytes in one page of plain RAM that the TLB already holds (a ring 0
+	   read, as below), read them straight from the host's memory. A TLB hit has no side effect
+	   to repeat; everything else takes upstream's path. */
+	{
+		uword laddr = base + off;
+		uword paddr = laddr;
+		bool ok = true;
+		if (cpu->cr0 & CR0_PG) {
+			uword lpgno = laddr >> 12;
+			struct tlb_entry *ent = &(cpu->tlb.tab[lpgno % tlb_size]);
+			ok = ent->lpgno == lpgno && !TLB_DENIED(ent, 0, 0) && (laddr & 0xfff) <= 0x1000 - 8;
+			paddr = ent->xaddr ^ laddr;
+		}
+		if (likely(ok && paddr < (uword) cpu->phys_mem_size - 8 &&
+			   !in_iomem(paddr) && !in_iomem(paddr + 7))) {
+			if (w1)
+				*w1 = pload32(cpu, paddr);
+			*w2 = pload32(cpu, paddr + 4);
+			return true;
+		}
+	}
+#endif
 	if (w1) {
 		TRY(translate_laddr(cpu, &meml, 1, base + off, 4, 0));
 		*w1 = load32(cpu, &meml);
