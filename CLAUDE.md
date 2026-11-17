@@ -315,6 +315,15 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     nothing changes. The log shows `rp2350.ini: ...` and the MHz and mV in use. Compiled, but not
     yet run on a device: the PicoCalc was offline. Another user reported freezes from LyraCalc's
     keyboard firmware, which went away with ClockworkPi's official 1.7.
+  - **No USB stack (2026-11-17, branch `rp2350-nousb`, from v0.3.0):** another user's official
+    Pico 2 (PicoCalc v2.0, keyboard BIOS 1.7) HardFaults at every start on v0.2.1 and v0.3.0,
+    each time in TinyUSB's `tu_fifo_read`, returning to a byte-pattern pc (0x08080808,
+    0x10101010); `mhz = 250`/`vreg = 1.20` didn't help. The RP2350 FQBN is now `usbstack=nousb`
+    (tasks and `package.ps1`), and `nousb_rp2350.cpp` stubs `Serial`, which our code and SdFat
+    still reference. The log and `@` commands are on UART0 anyway. Built, not yet run on any
+    device; the test package is `build-pml/rel/pico-386-pml-v0.3.0-nousb.zip`.
+    PicoMultiLoader started his old 0.2.1 binary after he copied 0.3.0's folder (its lr matched
+    0.2.1's `tu_fifo_read`), so match crash addresses against the right release's uf2.
   - Test it on the desktop with the `build-lowmem` CMake dir (`-DEMU_LOWMEM=ON`), which simulates
     the PSRAM. Prince of Persia and MS-DOS 6 run there.
   - `psram_rp2350.cpp` drives the PSRAM from pio1 (CS 20, SCK 21, SIO0-3 on GP2-5). Since

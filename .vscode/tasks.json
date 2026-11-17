@@ -77,7 +77,7 @@
       "args": [
         "compile",
         "--fqbn",
-        "rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=picosdk,opt=Optimize2,exceptions=Enabled",
+        "rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=nousb,opt=Optimize2,exceptions=Enabled",
         "--build-property",
         "compiler.cpp.extra_flags=-DBOARD_PICOCALC_RP2350 -I{build.source.path}/src/hal/picocalc_rp2350/include",
         "--build-property",
@@ -99,7 +99,7 @@
         "-p",
         "COM7",
         "--fqbn",
-        "rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=picosdk,opt=Optimize2,exceptions=Enabled",
+        "rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=nousb,opt=Optimize2,exceptions=Enabled",
         "--input-dir",
         "${workspaceFolder}/build-rp2350",
         "${workspaceFolder}/pico386"

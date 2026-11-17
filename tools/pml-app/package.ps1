@@ -24,7 +24,7 @@ $rpOut  = Join-Path $out 'rp2350'
 $p4Out  = Join-Path $out 'p4'
 
 # The same boards and flags as the VS Code tasks (.vscode/tasks.json).
-$RP_FQBN = 'rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=picosdk,opt=Optimize2,exceptions=Enabled'
+$RP_FQBN = 'rp2040:rp2040:rpipico2:arch=arm,os=freertos,freq=300,flash=4194304_65536,usbstack=nousb,opt=Optimize2,exceptions=Enabled'
 $P4_FQBN = 'esp32:esp32:esp32p4:PSRAM=enabled,FlashSize=16M,ChipVariant=postv3,PartitionScheme=huge_app,DebugLevel=error'
 
 function Invoke-Compile([string[]]$ArgList, [hashtable]$Env = @{}) {
