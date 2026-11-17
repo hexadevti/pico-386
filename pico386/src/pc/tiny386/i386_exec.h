@@ -28,6 +28,35 @@ static bool EXEC_ATTR EXEC_NAME(CPUI386 *cpu, int stepcount)
 	bool code16 = cpu->code16;
 	uword sp_mask = cpu->sp_mask;
 
+#if defined(I386_FLAT) && defined(T386_FLATCHECK)
+	if (!flat_off && !code16 && (cpu->cr0 & (1 | CR0_PG)) == 1) {
+		CPUI386 before = *cpu;
+		fl_wa = ~(uword) 0;
+		if (cpu_exec_flat(cpu, 1)) {
+			flat_check_a(cpu);
+			*cpu = before;
+			flat_off = 1;
+			bool ok = EXEC_NAME(cpu, 1);
+			flat_off = 0;
+			if (!ok)
+				return false;
+			flat_check_b(cpu, &before);
+			continue;
+		}
+	}
+#elif defined(I386_FLAT)
+	/* pico-386: flat 32-bit code runs in cpu_exec_flat (i386_flat.h) until an instruction it
+	   does not handle, which then runs here */
+	if (!code16 && (cpu->cr0 & (1 | CR0_PG)) == 1) {
+		int k = cpu_exec_flat(cpu, stepcount);
+		if (k) {
+			stepcount -= k;
+			if (stepcount <= 0)
+				break;
+			sp_mask = cpu->sp_mask;
+		}
+	}
+#endif
 	cpu->ip = cpu->next_ip;
 	TRY(fetch8pf(cpu, &b1));
 	cpu->cycle++;

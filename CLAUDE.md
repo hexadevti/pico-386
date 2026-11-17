@@ -123,6 +123,38 @@ started from on 2026-10-18, and **emu16** and **emu8**.
         - The L2 cache can't grow. It is the first 256 KB of L2MEM, and our IRAM code sits after it.
         - Drawing 1 frame in 4 gave the same MIPS, so core 0's drawing doesn't evict the cache.
       - Readings vary between boots, so compare builds back to back with the same keys.
+    - **Core counters (2026-11-15):** the P4's FPS line ends with `ipc0.60 131i 215c` (`pc_core.cpp`,
+      the `cycle`/`instret` CSRs read around `t386_run_until`): IPC, then host instructions and
+      cycles per guest instruction. FastDoom's demo: `1.75 MIPS ipc0.60 131i 215c`; with the
+      unchanged-frame skip back on, `2.1 MIPS ipc0.71 130i 182c`. The same instruction count with
+      fewer cycles means core 0's redraw (about 400 KB through the PSRAM per frame) stalls core 1's
+      memory accesses. `prof` then: fetch and decode (`fetch8pf`, `fetch8`, `fetch32`, `peek*`,
+      `modsib*`, part of `pload8`) about 35% of core 1.
+      Each part of the drawing, cut out at run time (a TEMP switch, since removed), in cycles per guest
+      instruction during the demo: all of it 213 (1.8 MIPS); no PSRAM shadow for shots 197 (1.9); only
+      `vga_refresh` into the 800x600 fb 186 (2.05); no drawing at all 177 (2.2), the ceiling (+20%).
+      Rendering without the push gave 205: the parts overlap, so their costs do not add up. The
+      shadow is now written only when a shot asks (`s_shotWant`, display_p4.cpp).
+    - **Flat fast path (2026-11-15, branch `exp-p4-draw`, THIRD_PARTY.md):** `i386_flat.h` runs flat
+      32-bit code (FastDoom's DOS/32A: bases 0, paging off) with the registers in a local array.
+      FastDoom: 1.75-2.1 to **3.7-4.1 MIPS**, about 100 cycles per guest instruction, 4-5 to about
+      10 fps; batches average about 177 instructions. Left as misses: `REP MOVS` (f3), ADC/SBB (83
+      /2 /3), port I/O and segment loads.
+      - Any change to it must pass the desktop lockstep: configure a build dir with
+        `-DT386_FLATCHECK -DT386_OPSTATS` (it was `build-fchk`), run `doomt8.ini` with
+        `PC_KEYS='w20000,d,:,enter,d,o,o,m,enter,w60000,quit'`, and read `flatcheck N checked, 0 bad`
+        and the `flatstat` misses on stderr. TEMP: `PC_NOFLAT=1` turns it off on the desktop.
+      - The desktop's `doomt8.ini` (DOS-128) has no `BLASTER`: type
+        `set BLASTER=A220 I5 D1 H5 T6` before `doom`, or it quits with "Error setup sound device".
+        The desktop's unzipped doom folder has an `fdoom.cfg` with SB effects. With `PC_WAV`, sound
+        is the same with and without the fast path, also at `PC_MIPS=4`.
+      - On the P4, start Doom from the home menu with keys `d,w300,enter,...`: "d" jumps to the
+      - **Silent on the device (2026-11-15):** the flat path's IRAM left too little internal RAM, and
+        the I2S channel, made at the PC's first sound, failed (`PDM TX init failed (ESP_ERR_NO_MEM)`
+        in the log; `g` stays 0, as nothing is queued). `p4AudioInit` now makes it in `hal_init`,
+        before anything else. `t386_reserve_big` probes its 2 MB margin in 1 MB pieces, not as one
+        block with the RAM, and the P4 logs `psram: no N KB block (free, largest)` on a refusal.
+        "doom" startup. `down` is wrong, since the menu remembers the last startup ("PC").
     - **Profiler:** `python -I tools/remote.py --p4 prof 8` samples core 1 at 2 kHz (`prof_p4.cpp`,
       `@prof`/`@profdump`) and prints hot functions and lines through addr2line on the build's .elf.
       Names are the innermost inlined function, so `pload8` or `fetch8pf` usually means code inside
@@ -625,6 +657,33 @@ the repo root, because `PC_INI` paths are relative to the cwd.
   - `quit` exits
 - `PC_WAV=file` dumps the mono s16 44.1 kHz audio stream.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
+- `PC_KEYS_FILE=path` (2026-11-16) watches a file: when the running script is done and the file is
+  there, its text is the next `PC_KEYS` script and the file is deleted. It drives a long install a
+  step at a time, with a look at each shot before the next keys. `ctrl+esc` is the in-game menu,
+  not the guest's Start menu; `alt+f4` on the Windows 95 desktop opens Shut Down.
+- **Windows 95 OSR2 (2026-11-16, desktop only so far):** `win95.ini` ("Windows 95") boots
+  `win95.img`, a 256 MB disk (local, never commit) installed on the desktop from MS-DOS 6.22 with
+  `setup /is` off the CD (UDVD2 + MSCDEX). It reaches the desktop in under 100 s and shuts down
+  through APM. It runs on the P4 (2026-11-17): the user finds it slow but usable, and sound works.
+  - **Speed on the P4 (2026-11-17):** opening and closing Control Panel > Multimedia reads
+    1.3-1.6 MIPS, 240-294 cycles per guest instruction; idle is 0.1 MIPS (HLT). `prof` is all
+    interpreter (`cpu_exec1` 25%, `translate` 12%, `set_seg` 6.5%, `read_desc` 4%): 16-bit
+    protected-mode code with paging, which the flat fast path does not take.
+  - **Dirty lines (2026-11-17, THIRD_PARTY.md):** for 16-colour planar pictures wider than 320
+    (mode 12h), `vga.c` decodes only the lines the guest wrote, `pcvid_render` scales only their
+    rows plus the previous frame's (`s_pendY0/1`: the other video buffer lacks those), and
+    `drawJob` pushes only that span (`pcvid_span`); nothing written, nothing pushed. Narrower
+    pictures are still decoded and pushed whole every frame on the P4 (Prince's crackle). The
+    same test then read 1.4-1.6 MIPS, 240-270c: the drawing was not the limit, the interpreter
+    is. The P4's shot copies every row a frame was ever pushed to (`s_vTop`/`s_vEnd`).
+  - `alt+f4` through `remote.py --p4` did not reach Windows on the device (it does on the
+    desktop), so a deploy cuts Windows off without a shutdown.
+  - Setup needs 157 MB free even for Compact, so a 128 MB disk is refused.
+  - It stopped with SU0152 ("0 bytes of memory") until the CMOS memory bytes were filled
+    (THIRD_PARTY.md).
+  - At the restart it says a disk is in the empty floppy drive; OK goes on.
+  - The key's boxes move on by themselves: type all the digits in one run.
+  - With the CD mounted at boot its autorun opens, so the ini leaves the CD empty.
 - `PC_MIPS=0.07 PC_MIPS_AT=100` caps the guest at 0.07 MIPS from 100 s of guest time on (boot
   fast, then run at the RP2350's Windows speed).
 

@@ -169,6 +169,16 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   CheckIt on the P4: 9.40x to 10.95x PC-XT under MS-DOS 6.22, and 7.65x to 8.68x under FreeDOS with
   JEMMEX (V86 mode). `cpu_exec1` grew by 8 KB of IRAM. The RP2350 keeps the original code
   (`SLOW(name)` = `name`), because its SRAM has no room for it.
+- **Flat 32-bit fast path (2026-11-15, P4, `i386_flat.h`, new).** While CS/DS/SS have base 0,
+  paging is off and the code is 32-bit (FastDoom under DOS/32A), `cpu_exec_flat` runs the common
+  instructions with the registers in a local array and host pointers into guest RAM: the ALU ops
+  (8/16/32-bit), MOV, LEA, PUSH/POP, Jcc, JMP/CALL/RET, the shifts, SHLD/SHRD, MOVZX/MOVSX, IMUL,
+  the F6/F7/FE/FF groups, SETcc, CWDE/CDQ. The lazy flags are set exactly as `i386.c`'s helpers
+  set them. Anything else (prefixes, the VGA window, a #DE) leaves with nothing changed and runs in
+  `cpu_exec1`, hooked in `i386_exec.h`. Checked on the desktop with `-DT386_FLATCHECK` (each
+  instruction run again by `cpu_exec1` and compared): 587M instructions in FastDoom, 0 differences.
+  FastDoom on the P4: 1.75-2.1 to 3.7-4.1 MIPS, 215 to about 100 cycles per guest instruction,
+  4-5 to about 10 fps.
 - **`i8042.c`: one keyboard byte at a time (2026-11-06).** In Prince of Persia, keys piled up and
   the prince kept moving on his own. Upstream took the next queued byte on every read of port
   60h. A real 8042 keeps the byte it holds until the keyboard sends another, about 1 ms later. So
@@ -202,6 +212,22 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   kept moving after the arrow was let go. 40k instructions with the movement added up (24 px)
   stopped it but made the pointer jump; 8.5k/4 px glides at about 20 packets a second with no
   drift (10k: 16), and 7.5k and 5k drifted again. `@mpace <instr> <step>` (`remote.py mpace`) tunes it live.
+- **`misc.c`: CMOS memory size (2026-11-16).** `cmos_init` fills bytes 15h/16h (640 KB base) and
+  17h/18h (extended KB, at most 65535), as QEMU does. They were 0, and Windows 95's setup stopped
+  in its hardware analysis with SU0152, "Your computer has 0 bytes of memory".
+- **`vga.c`: 16-colour planar pictures (2026-11-17).** For Windows 95 on the standard VGA driver
+  (mode 12h). All under `TINY386_PICO`:
+  - `vga_graphic_refresh` decodes them 8 dots at a time through `pico_spread` (four plane bytes
+    OR into eight 4-bit pixels); the old per-pixel loop does the last dots and every other mode.
+  - Not under `T386_PAGED`: `vga_mem_write` flags each planar word it stores (`pico_dirty`, one
+    byte per 64 words), and everything else that can change the picture sets `pico_dirty_all`
+    (`PICO_MARK_ALL`): chain-4 and odd/even stores, `vbe_write`, and port writes other than the
+    ones a planar driver makes around each store (the indexes, SR2, GR0-4, GR7, GR8, GR5 with the
+    same shift mode). `vga_ioport_write` is now a wrapper around the old body
+    (`vga_ioport_write1`), so the flag is set after the change. With only planar stores since
+    the last refresh, only the lines holding flagged words are decoded, and `VGAPicoInfo`
+    reports them (`dirty_y0`/`dirty_y1`). Writers store first and flag after; the refresh clears
+    the flags before it reads anything, because the two run on different cores on the P4.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 

@@ -158,6 +158,14 @@ struct VGAState {
     int pico_gw, pico_gh; /* pico-386: size of the last graphics picture */
     VGAPicoLineFunc *pico_sink; /* T386_PAGED: where finished lines go */
     void *pico_sink_opaque;
+    int pico_dy0, pico_dy1; /* picture lines [dy0, dy1) the last graphics refresh drew */
+#ifndef T386_PAGED
+    /* pico-386: which planar words the guest wrote since the last refresh, one flag per 64
+       words of the 64 KB window; see vga_graphic_refresh() */
+    uint8_t pico_dirty[65536 / 64];
+    volatile uint8_t pico_dirty_all; /* anything else that changes the picture */
+    int pico_lw, pico_lh;            /* the size the framebuffer holds */
+#endif
 #endif
 
 #if defined(SCALE_3_2) || defined(SCALE_2_1) || defined(SWAPXY)
@@ -167,6 +175,16 @@ struct VGAState {
     uint8_t tmpbuf[(LCD_WIDTH > 720 ? LCD_WIDTH : 720) * 3 * 2];
 #endif
 };
+
+#if defined(TINY386_PICO) && !defined(T386_PAGED)
+/* pico-386: the emulator's core sets these and the drawing core reads and clears them. A
+   writer changes VRAM or a register first and sets the flag after; the refresh clears the flag
+   first and reads after, so it never misses a change. */
+#define PICO_DIRTY_SHIFT 6
+#define PICO_MARK_ALL(s) ((s)->pico_dirty_all = 1)
+#else
+#define PICO_MARK_ALL(s) ((void)0)
+#endif
 
 uint32_t get_uticks();
 static int after_eq(uint32_t a, uint32_t b)
@@ -997,11 +1015,33 @@ static void vga_text_refresh(VGAState *s,
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
 }
 
+#ifdef TINY386_PICO
+#define PICO_SP(b) ((uint32_t)(((b) & 1) | ((b) & 2) << 3 | ((b) & 4) << 6 | ((b) & 8) << 9 | \
+                    ((b) & 16) << 12 | ((b) & 32) << 15 | ((b) & 64) << 18 | ((b) & 128) << 21))
+#define PICO_SP4(b) PICO_SP(b), PICO_SP((b) + 1), PICO_SP((b) + 2), PICO_SP((b) + 3)
+#define PICO_SP16(b) PICO_SP4(b), PICO_SP4((b) + 4), PICO_SP4((b) + 8), PICO_SP4((b) + 12)
+#define PICO_SP64(b) PICO_SP16(b), PICO_SP16((b) + 16), PICO_SP16((b) + 32), PICO_SP16((b) + 48)
+static const uint32_t pico_spread[256] = {
+    PICO_SP64(0), PICO_SP64(64), PICO_SP64(128), PICO_SP64(192)
+};
+#endif
+
 static void vga_graphic_refresh(VGAState *s,
                                 SimpleFBDrawFunc *redraw_func, void *opaque,
                                 int full_update)
 {
     FBDevice *fb_dev = s->fb_dev;
+#if defined(TINY386_PICO) && !defined(T386_PAGED)
+    /* pico-386: take the dirty flags before reading any register or VRAM (see PICO_MARK_ALL) */
+    uint8_t pico_dl[sizeof(s->pico_dirty)];
+    int pico_part = !full_update && !s->pico_dirty_all;
+    s->pico_dirty_all = 0;
+    for (unsigned i = 0; i < sizeof(s->pico_dirty); i++) {
+        pico_dl[i] = s->pico_dirty[i];
+        if (pico_dl[i])
+            s->pico_dirty[i] = 0;
+    }
+#endif
     int w = (s->cr[0x01] + 1) * 8;
     int h = s->cr[0x12] |
         ((s->cr[0x07] & 0x02) << 7) |
@@ -1142,6 +1182,27 @@ static void vga_graphic_refresh(VGAState *s,
 #endif
 #endif
     uint32_t plane_mask = s->ar[0x12];
+#ifdef TINY386_PICO
+    /* pico-386: 16-colour planar pictures (mode 12h, Windows' VGA driver) are decoded 8 dots at
+       a time. Bit i of pico_spread[b] is bit 4*i: four planes OR into eight 4-bit pixels. */
+    int pico_fast = shift_control == 0 && plane_mask != 1;
+    uint16_t pico_pal[16];
+    for (int i = 0; i < 16; i++)
+        pico_pal[i] = palette[i];
+    s->pico_dy0 = 0;
+    s->pico_dy1 = h / pico_ydiv;
+#ifndef T386_PAGED
+    /* Only the lines whose words were written are decoded again, when nothing but planar
+       writes happened since the last refresh (Windows redraws a few lines at a time; decoding
+       all 640x480 60 times a second kept the PSRAM busy for nothing). */
+    if (!pico_fast || vbe_enabled(s) || w != s->pico_lw || h != s->pico_lh)
+        pico_part = 0;
+    s->pico_lw = w;
+    s->pico_lh = h;
+    if (pico_part)
+        s->pico_dy0 = s->pico_dy1 = 0;
+#endif
+#endif
     for (int y = 0; y < h; y++) {
         uint32_t addr = addr1;
         if (!(s->cr[0x17] & 1)) {
@@ -1158,7 +1219,45 @@ static void vga_graphic_refresh(VGAState *s,
 #ifdef TINY386_PICO
         int pico_y = y / pico_ydiv;
         int pico_w = (y % pico_ydiv) ? 0 : w; /* the repeat of a doubled scanline */
-        for (int x = 0; x < pico_w; x++) {
+        int pico_x0 = 0;
+#ifndef T386_PAGED
+        if (pico_part && pico_w) {
+            uint32_t a = addr >> (2 + PICO_DIRTY_SHIFT);
+            uint32_t b = (addr + 4 * ((w - 1) >> 3)) >> (2 + PICO_DIRTY_SHIFT);
+            int dirty = b >= sizeof(pico_dl);
+            for (; !dirty && a <= b; a++)
+                dirty = pico_dl[a];
+            if (!dirty) {
+                pico_w = 0;
+            } else {
+                if (s->pico_dy0 == s->pico_dy1)
+                    s->pico_dy0 = pico_y;
+                s->pico_dy1 = pico_y + 1;
+            }
+        }
+#endif
+        if (pico_fast && pico_w) {
+#ifdef T386_PAGED
+            uint16_t *d = (uint16_t *)fb_dev->fb_data;
+#else
+            uint16_t *d = (uint16_t *)fb_dev->fb_data + pico_y * fb_dev->width;
+#endif
+            const uint8_t *p = vram + addr;
+            for (int n = pico_w >> 3; n > 0; n--, p += 4, d += 8) {
+                uint32_t v = pico_spread[p[0]] | pico_spread[p[1]] << 1 |
+                             pico_spread[p[2]] << 2 | pico_spread[p[3]] << 3;
+                d[0] = pico_pal[v >> 28];
+                d[1] = pico_pal[(v >> 24) & 15];
+                d[2] = pico_pal[(v >> 20) & 15];
+                d[3] = pico_pal[(v >> 16) & 15];
+                d[4] = pico_pal[(v >> 12) & 15];
+                d[5] = pico_pal[(v >> 8) & 15];
+                d[6] = pico_pal[(v >> 4) & 15];
+                d[7] = pico_pal[v & 15];
+            }
+            pico_x0 = pico_w & ~7;
+        }
+        for (int x = pico_x0; x < pico_w; x++) {
 #else
         for (int x = 0; x < w; x++) {
 #endif
@@ -1513,7 +1612,26 @@ uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
     return val;
 }
 
+#if defined(TINY386_PICO) && !defined(T386_PAGED)
+static void vga_ioport_write1(VGAState *s, uint32_t addr, uint32_t val);
+
+/* pico-386: a register write may change the whole picture. Not the ones a planar driver makes
+   around every write to VRAM, which only steer the write: the indexes, the map mask (SR2),
+   GR0-4, GR7, GR8, and GR5 while it keeps its shift mode. */
 void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
+{
+    int steer = addr == 0x3c4 || addr == 0x3ce || (addr == 0x3c5 && s->sr_index == 2) ||
+        (addr == 0x3cf && (s->gr_index <= 4 || s->gr_index == 7 || s->gr_index == 8 ||
+                           (s->gr_index == 5 && !((val ^ s->gr[5]) & 0x60))));
+    vga_ioport_write1(s, addr, val);
+    if (!steer)
+        PICO_MARK_ALL(s);
+}
+
+static void vga_ioport_write1(VGAState *s, uint32_t addr, uint32_t val)
+#else
+void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
+#endif
 {
     int index;
 
@@ -1713,6 +1831,7 @@ void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
             s->bank_offset = (val << 16);
             break;
         }
+        PICO_MARK_ALL(s); /* pico-386: after the change, like every mark */
     }
 }
 
@@ -1865,6 +1984,7 @@ void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
         * (uint16_t *) &(s->vga_ram[addr]) = val;
+        PICO_MARK_ALL(s);
     }
 }
 
@@ -1912,6 +2032,7 @@ void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
         * (uint32_t *) &(s->vga_ram[addr]) = val;
+        PICO_MARK_ALL(s);
     }
 }
 
@@ -1955,6 +2076,7 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
         memcpy(s->vga_ram + addr, buf, len);
+        PICO_MARK_ALL(s);
         return true;
     }
     return false;
@@ -2000,6 +2122,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         mask = (1 << plane);
         if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
             s->vga_ram[addr] = val;
+            PICO_MARK_ALL(s);
 #ifdef DEBUG_VGA_MEM
             printf("vga: chain4: [0x" TARGET_FMT_plx "]\n", addr);
 #endif
@@ -2021,6 +2144,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
                 return;
             }
             s->vga_ram[addr] = val;
+            PICO_MARK_ALL(s);
             if (s->vga_text_ops && s->graphic_mode == 1 && !s->term_refresh) {
                 int width = (s->cr[0x01] + 1);
                 uint32_t start_addr = s->cr[0x0d] | (s->cr[0x0c] << 8);
@@ -2115,6 +2239,13 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         ((uint32_t *)s->vga_ram)[addr] =
             (((uint32_t *)s->vga_ram)[addr] & ~write_mask) |
             (val & write_mask);
+#if defined(TINY386_PICO) && !defined(T386_PAGED)
+        /* pico-386: after the store, see PICO_MARK_ALL */
+        if (addr < 65536)
+            s->pico_dirty[addr >> PICO_DIRTY_SHIFT] = 1;
+        else
+            PICO_MARK_ALL(s);
+#endif
 #ifdef DEBUG_VGA_MEM
         printf("vga: latch: [0x" TARGET_FMT_plx "] mask=0x%08x val=0x%08x\n",
                addr * 4, write_mask, val);
@@ -2368,6 +2499,8 @@ void vga_pico_info(VGAState *s, VGAPicoInfo *p)
         p->mode = 1;
     p->gfx_w = s->pico_gw;
     p->gfx_h = s->pico_gh;
+    p->dirty_y0 = s->pico_dy0;
+    p->dirty_y1 = s->pico_dy1;
 
     p->vram = s->vga_ram;
     p->start_addr = (s->cr[0x0d] | (s->cr[0x0c] << 8)) * 4;

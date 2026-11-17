@@ -168,7 +168,8 @@ static bool loadState(const EmuCore &core, const std::string &rom) {
 
 enum class MenuResult { Resume, Quit };
 
-// The in-game menu. Rows: Resume, Reset, [Save, Load], [core rows], settings, Quit.
+// The in-game menu. Rows: Resume, [Save, Load], [core rows], Reset, settings, Quit. Reset comes
+// after the core's rows, so the PC's snapshots sit right below Resume (the user asked, 2026-11-15).
 static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
   hal_audio_silence();
   hal_video_wait();
@@ -189,7 +190,6 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
     int arg[28];
     int n = 0;
     items[n] = { "Resume", nullptr, ui::ICON_PLAY }; kind[n++] = K_RESUME;
-    items[n] = { "Reset", nullptr, ui::ICON_RESET }; kind[n++] = K_RESET;
     if (core.saveState && core.loadState) {
       items[n] = { "Save state", nullptr, ui::ICON_SAVE }; kind[n++] = K_SAVE;
       items[n] = { "Load state", nullptr, ui::ICON_LOAD }; kind[n++] = K_LOAD;
@@ -203,6 +203,7 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
         kind[n] = K_CORE; arg[n++] = i;
       }
     }
+    items[n] = { "Reset", nullptr, ui::ICON_RESET }; kind[n++] = K_RESET;
     int rowOf[4];
     const int s = settingItems(core, items + n, rowOf);
     for (int i = 0; i < s; i++) { kind[n + i] = K_SETTING; arg[n + i] = rowOf[i]; }
@@ -244,7 +245,7 @@ static MenuResult gameMenu(const EmuCore &core, const std::string &rom) {
 
 // The FPS meter sits on the bottom rows of the panel, under a 4:3 picture or 25 text rows.
 static void showFps(const EmuCore &core, uint32_t fps, uint32_t drawn, int skip, unsigned load) {
-  char b[64];
+  char b[96];
   if (core.selfPaced && core.fpsText) snprintf(b, sizeof(b), "%u fps  %u drawn  %s", (unsigned)fps, (unsigned)drawn, core.fpsText());
   else if (core.selfPaced) snprintf(b, sizeof(b), "%u fps  %u drawn  cpu %u%%", (unsigned)fps, (unsigned)drawn, load);
   else snprintf(b, sizeof(b), "%u fps  %u drawn  skip %d  cpu %u%%", (unsigned)fps, (unsigned)drawn, skip, load);

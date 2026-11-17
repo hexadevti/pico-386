@@ -47,8 +47,16 @@ uint32_t s_mixUs, s_lowQueueUs = ~0u, s_heartGapUs;   // the RP2350 heartbeat's 
 uint32_t s_maxGapUs;               // the longest time between two audio writes since the last meter
 uint32_t s_gapPeakUs;              // the recent longest gap, fading over about 2 s (pc_audio)
 uint32_t s_underrunsShown;         // the output underrun count at the last meter
-char s_speed[48];
-uint64_t s_audioFrac;              // sample-microseconds not yet turned into samples
+char s_speed[72];
+#if defined(BOARD_PICOCALC_P4)
+// The core's own counters (the HP core has the standard cycle and instret), read around
+// t386_run_until: IPC says whether the emulator stalls on memory (low) or is bound by its own
+// work (near 1), and host instructions per guest instruction is the interpreter's cost.
+static inline uint32_t rdCycle() { uint32_t v; asm volatile("csrr %0, cycle" : "=r"(v)); return v; }
+static inline uint32_t rdInstret() { uint32_t v; asm volatile("csrr %0, instret" : "=r"(v)); return v; }
+uint64_t s_perfCycles, s_perfInstret, s_perfGuest;   // since the last meter
+#endif
+uint64_t s_audioFrac;             // sample-microseconds not yet turned into samples
 int16_t s_stereo[kMixMax * 2], s_mono[kMixMax];
 std::string s_ini;                 // the machine's .ini: drive changes are saved to it
 std::string s_drive[DRIVE_COUNT];  // what each drive holds (relative paths, "" = empty)
@@ -235,9 +243,11 @@ void drawJob(void *) {
 #endif
   if (!hal_video_ready()) return;
   uint16_t *back = hal_video_back();
-  // The bottom 10 rows are left alone: the picture never reaches them (25 text rows end at 310),
-  // and they hold the FPS meter, which a full-height push would wipe every frame.
-  if (pcvid_render(back, s_fb, hal_millis())) hal_video_submit(0, SCREEN_H - 10);
+  // Only the rows it drew are pushed (never the bottom 10, which hold the FPS meter).
+  if (!pcvid_render(back, s_fb, hal_millis())) return;
+  int y, h;
+  pcvid_span(&y, &h);
+  hal_video_submit(y, h);
 }
 
 // A line of text in the bottom strip, under the picture (where the FPS meter goes), for 2 s;
@@ -303,7 +313,15 @@ void pc_runFrame(bool draw) {
   // TEMP (RP2350 bring-up): the board resets during the first frames, so trace them.
   static int s_trace = 4;
   if (s_trace) hal_log("frame: run until %lu", (unsigned long)s_nextUs);
+#if defined(BOARD_PICOCALC_P4)
+  const uint32_t pc0 = rdCycle(), pi0 = rdInstret(), pg0 = t386_instructions();
+#endif
   t386_run_until(s_nextUs);
+#if defined(BOARD_PICOCALC_P4)
+  s_perfCycles += rdCycle() - pc0;
+  s_perfInstret += rdInstret() - pi0;
+  s_perfGuest += t386_instructions() - pg0;
+#endif
   if (s_trace) hal_log("frame: ran, %lu instr; audio", (unsigned long)t386_instructions());
   pc_audio();
   if (s_trace) hal_log("frame: draw");
@@ -333,6 +351,17 @@ const char *pc_fpsText() {
              (unsigned)(s_maxGapUs / 1000));
     s_maxGapUs = 0;
     s_underrunsShown = hal_audio_underruns();
+#if defined(BOARD_PICOCALC_P4)
+    // "ipc0.42 190i 450c": host instructions per host cycle while emulating, then host
+    // instructions and cycles per guest instruction
+    if (s_perfCycles && s_perfGuest) {
+      const size_t l = strlen(s_speed);
+      snprintf(s_speed + l, sizeof s_speed - l, " ipc0.%02u %ui %uc",
+               (unsigned)(s_perfInstret * 100 / s_perfCycles > 99 ? 99 : s_perfInstret * 100 / s_perfCycles),
+               (unsigned)(s_perfInstret / s_perfGuest), (unsigned)(s_perfCycles / s_perfGuest));
+    }
+    s_perfCycles = s_perfInstret = s_perfGuest = 0;
+#endif
   }
   s_speedT0 = now;
   s_speedI0 = ins;
@@ -365,24 +394,48 @@ void pc_shutdown() {
 
 void pc_keyEvent(uint8_t code, uint8_t state) { pckbd_event(code, state); }
 
-// The in-game rows: the drives, the snapshots, then the keyboard mouse, its two button keys, what
-// the key that is Shift for the arrows, and Ctrl+Alt+Del.
-enum { ROW_SNAP_SAVE, ROW_SNAP_LOAD, ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_SHIFT_KEY, ROW_CAD, ROW_EXTRA };
+// The in-game rows, right below Resume (the user asked, 2026-11-15): the snapshots, Disks (a
+// submenu with the drives), then the keyboard mouse, its two button keys, the key that is Shift
+// for the arrows, and Ctrl+Alt+Del.
+enum { ROW_SNAP_LOAD, ROW_SNAP_SAVE, ROW_DISKS, ROW_MOUSE, ROW_LEFT, ROW_RIGHT, ROW_SHIFT_KEY, ROW_CAD,
+       ROW_COUNT };
 
 int pc_menuItems(CoreMenuItem *out, int max) {
-  if (max < DRIVE_COUNT + ROW_EXTRA) return 0;
-  for (int d = 0; d < DRIVE_COUNT; d++) {
-    s_driveLabel[d] = pcdisk_drive_label(s_drive[d]);
-    out[d] = { pcdisk_drive_name(d), s_driveLabel[d].c_str(), false };
+  if (max < ROW_COUNT) return 0;
+  out[ROW_SNAP_LOAD] = { "Load snapshot", nullptr, false, ui::ICON_LOAD };
+  out[ROW_SNAP_SAVE] = { "Save snapshot", nullptr, false, ui::ICON_SAVE };
+  out[ROW_DISKS] = { "Disks", nullptr, false, ui::ICON_FOLDER };
+  out[ROW_MOUSE] = { "Arrows (both Shifts)", pckbd_mouse_mode_name(pckbd_mouse_mode()), true };
+  out[ROW_LEFT] = { "Mouse left button", pckbd_mouse_button_label(0), true };
+  out[ROW_RIGHT] = { "Mouse right button", pckbd_mouse_button_label(1), true };
+  out[ROW_SHIFT_KEY] = { "Shift for arrows", pckbd_shift_key_label(), true };
+  out[ROW_CAD] = { "Ctrl+Alt+Del", nullptr, false };
+  return ROW_COUNT;
+}
+
+bool changeDrive(int d);
+
+// The Disks submenu: A:, B:, C:, D: and the CD. True when a drive changed (the menu then closes,
+// as it did when the drives were rows of their own); Esc goes back to the in-game menu.
+bool disksMenu() {
+  int sel = 0;
+  for (;;) {
+    ui::Item items[DRIVE_COUNT];
+    for (int d = 0; d < DRIVE_COUNT; d++) {
+      s_driveLabel[d] = pcdisk_drive_label(s_drive[d]);
+      items[d] = { pcdisk_drive_name(d), s_driveLabel[d].c_str(),
+                   d == DRIVE_C ? ui::ICON_SAVE : d == DRIVE_D ? ui::ICON_FOLDER : ui::ICON_LOAD };
+    }
+    ui::Screen scr;
+    scr.title = "Disks";
+    scr.subtitle = "C: and D: restart the PC";
+    scr.hints = "Enter|Change;Esc|Back";
+    const uint8_t k = ui::list(scr, items, DRIVE_COUNT, &sel);
+    if (k == KEY_ESC) return false;
+    if (k != KEY_ENTER) continue;
+    if (changeDrive(sel)) return true;
+    ui::setBackdrop(hal_video_front());        // the file browser drew over it
   }
-  out[DRIVE_COUNT + ROW_SNAP_SAVE] = { "Save snapshot", nullptr, false, ui::ICON_SAVE };
-  out[DRIVE_COUNT + ROW_SNAP_LOAD] = { "Load snapshot", nullptr, false, ui::ICON_LOAD };
-  out[DRIVE_COUNT + ROW_MOUSE] = { "Arrows (both Shifts)", pckbd_mouse_mode_name(pckbd_mouse_mode()), true };
-  out[DRIVE_COUNT + ROW_LEFT] = { "Mouse left button", pckbd_mouse_button_label(0), true };
-  out[DRIVE_COUNT + ROW_RIGHT] = { "Mouse right button", pckbd_mouse_button_label(1), true };
-  out[DRIVE_COUNT + ROW_SHIFT_KEY] = { "Shift for arrows", pckbd_shift_key_label(), true };
-  out[DRIVE_COUNT + ROW_CAD] = { "Ctrl+Alt+Del", nullptr, false };
-  return DRIVE_COUNT + ROW_EXTRA;
 }
 
 // A, B and the CD change at once. C: and D: cannot change under a running DOS, so the PC restarts.
@@ -432,9 +485,9 @@ bool changeDrive(int d) {
 }
 
 bool pc_menuAction(int i, uint8_t key) {
-  if (i < DRIVE_COUNT) return key == KEY_ENTER && changeDrive(i);
+  if (i == ROW_DISKS) return key == KEY_ENTER && disksMenu();
   const int dir = key == KEY_LEFT ? -1 : 1;
-  switch (i - DRIVE_COUNT) {
+  switch (i) {
     case ROW_SNAP_SAVE: {
       if (key != KEY_ENTER) return false;
       if (pfolder_dirty()) {
@@ -461,7 +514,7 @@ bool pc_menuAction(int i, uint8_t key) {
     }
     case ROW_LEFT:
     case ROW_RIGHT: {
-      const int b = i - DRIVE_COUNT - ROW_LEFT;
+      const int b = i - ROW_LEFT;
       pckbd_next_mouse_button(b, dir);
       pcini_set_in(s_ini, "pico", b ? "mouse_right" : "mouse_left", pckbd_mouse_button(b));
       return false;
