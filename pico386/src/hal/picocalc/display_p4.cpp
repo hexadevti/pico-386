@@ -231,10 +231,13 @@ static void panelFillRawLocked(int x, int y, int w, int h, uint16_t c) {
 static uint16_t *s_vbuf[2];
 static uint8_t   s_back = 0;
 static int       s_vy = 0, s_vh = 0;
+// Every row a frame has been pushed to. A frame may push only the rows that changed, but the
+// front buffer is whole, so a shot copies all of these.
+static int       s_vTop = SCREEN_H, s_vEnd = 0;
 static SemaphoreHandle_t s_vGo = nullptr, s_vIdle = nullptr;
 
 static void noteUi(int y, int h) {
-  if (y < SCREEN_Y0 + s_vy + s_vh && y + h > SCREEN_Y0 + s_vy) s_uiOverVideo = true;
+  if (y < SCREEN_Y0 + s_vEnd && y + h > SCREEN_Y0 + s_vTop) s_uiOverVideo = true;
 }
 
 static void videoTask(void *) {
@@ -245,7 +248,9 @@ static void videoTask(void *) {
     panelWindow(0, SCREEN_Y0 + s_vy, SCREEN_W - 1, SCREEN_Y0 + s_vy + s_vh - 1);
     txRect(src, SCREEN_W, s_vh, SCREEN_W);
     const bool shot = s_shotWant;
-    if (shot) shadowRect(0, SCREEN_Y0 + s_vy, SCREEN_W, s_vh, src, SCREEN_W);   // while the DMA runs
+    if (shot)                                // while the DMA runs
+      shadowRect(0, SCREEN_Y0 + s_vTop, SCREEN_W, s_vEnd - s_vTop,
+                 s_vbuf[s_back ^ 1] + s_vTop * SCREEN_W, SCREEN_W);
     txWait();
     s_uiOverVideo = false;
     if (shot) { s_shotWant = false; xSemaphoreGive(s_shotFrame); }
@@ -270,6 +275,8 @@ uint16_t *hal_video_submit(int y, int h) {
   if (h <= 0) return s_vbuf[s_back];
   xSemaphoreTake(s_vIdle, portMAX_DELAY);     // the other buffer is free once this returns
   s_vy = y; s_vh = h;
+  if (y < s_vTop) s_vTop = y;
+  if (y + h > s_vEnd) s_vEnd = y + h;
   s_back ^= 1;
   xSemaphoreGive(s_vGo);
   return s_vbuf[s_back];
@@ -338,9 +345,10 @@ void p4Shot() {
   s_shotWant = false;
   xSemaphoreTake(s_lock, portMAX_DELAY);
   // No frame came (a text screen that has not changed, or a menu is up): unless the UI has drawn
-  // over it since, the panel still shows the front buffer's last band.
-  if (!fresh && s_vh > 0 && !s_uiOverVideo && hal_video_ready())
-    shadowRect(0, SCREEN_Y0 + s_vy, SCREEN_W, s_vh, s_vbuf[s_back ^ 1] + s_vy * SCREEN_W, SCREEN_W);
+  // over it since, the panel still shows the front buffer.
+  if (!fresh && s_vEnd > s_vTop && !s_uiOverVideo && hal_video_ready())
+    shadowRect(0, SCREEN_Y0 + s_vTop, SCREEN_W, s_vEnd - s_vTop,
+               s_vbuf[s_back ^ 1] + s_vTop * SCREEN_W, SCREEN_W);
   memcpy(pic, s_shadow, PANEL_W * PANEL_H * 2);
   xSemaphoreGive(s_lock);
   char line[80];

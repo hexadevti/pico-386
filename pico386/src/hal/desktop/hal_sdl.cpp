@@ -243,6 +243,24 @@ static void scriptStep() {
   static bool started = false;
   static int shots = 0;
   if (!started) { started = true; ks.start(getenv("PC_KEYS")); }
+  // PC_KEYS_FILE names a file to watch: when the script is done and the file is there, its text
+  // is the next script and the file is deleted. That drives a long run (an OS install) a step at
+  // a time, looking at each shot before the next keys.
+  static const char *const live = getenv("PC_KEYS_FILE");
+  static std::string liveText;
+  static uint32_t livePoll = 0;
+  if (live && !ks.busy(hal_millis()) && (int32_t)(hal_millis() - livePoll) >= 0) {
+    livePoll = hal_millis() + 100;
+    if (FILE *f = fopen(live, "rb")) {
+      char buf[2048];
+      const size_t k = fread(buf, 1, sizeof(buf), f);
+      fclose(f);
+      remove(live);
+      liveText.assign(buf, k);
+      while (!liveText.empty() && liveText.back() < ' ') liveText.pop_back();   // the line end
+      ks.start(liveText.c_str());
+    }
+  }
   char t[32];
   if (!ks.step(hal_millis(), s_qHead == s_qTail, qPush, t, sizeof(t))) return;
   if (!strcmp(t, "quit")) exit(0);

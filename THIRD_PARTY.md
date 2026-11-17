@@ -212,6 +212,22 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   kept moving after the arrow was let go. 40k instructions with the movement added up (24 px)
   stopped it but made the pointer jump; 8.5k/4 px glides at about 20 packets a second with no
   drift (10k: 16), and 7.5k and 5k drifted again. `@mpace <instr> <step>` (`remote.py mpace`) tunes it live.
+- **`misc.c`: CMOS memory size (2026-11-16).** `cmos_init` fills bytes 15h/16h (640 KB base) and
+  17h/18h (extended KB, at most 65535), as QEMU does. They were 0, and Windows 95's setup stopped
+  in its hardware analysis with SU0152, "Your computer has 0 bytes of memory".
+- **`vga.c`: 16-colour planar pictures (2026-11-17).** For Windows 95 on the standard VGA driver
+  (mode 12h). All under `TINY386_PICO`:
+  - `vga_graphic_refresh` decodes them 8 dots at a time through `pico_spread` (four plane bytes
+    OR into eight 4-bit pixels); the old per-pixel loop does the last dots and every other mode.
+  - Not under `T386_PAGED`: `vga_mem_write` flags each planar word it stores (`pico_dirty`, one
+    byte per 64 words), and everything else that can change the picture sets `pico_dirty_all`
+    (`PICO_MARK_ALL`): chain-4 and odd/even stores, `vbe_write`, and port writes other than the
+    ones a planar driver makes around each store (the indexes, SR2, GR0-4, GR7, GR8, GR5 with the
+    same shift mode). `vga_ioport_write` is now a wrapper around the old body
+    (`vga_ioport_write1`), so the flag is set after the change. With only planar stores since
+    the last refresh, only the lines holding flagged words are decoded, and `VGAPicoInfo`
+    reports them (`dirty_y0`/`dirty_y1`). Writers store first and flag after; the refresh clears
+    the flags before it reads anything, because the two run on different cores on the P4.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 

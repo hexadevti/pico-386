@@ -657,6 +657,33 @@ the repo root, because `PC_INI` paths are relative to the cwd.
   - `quit` exits
 - `PC_WAV=file` dumps the mono s16 44.1 kHz audio stream.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
+- `PC_KEYS_FILE=path` (2026-11-16) watches a file: when the running script is done and the file is
+  there, its text is the next `PC_KEYS` script and the file is deleted. It drives a long install a
+  step at a time, with a look at each shot before the next keys. `ctrl+esc` is the in-game menu,
+  not the guest's Start menu; `alt+f4` on the Windows 95 desktop opens Shut Down.
+- **Windows 95 OSR2 (2026-11-16, desktop only so far):** `win95.ini` ("Windows 95") boots
+  `win95.img`, a 256 MB disk (local, never commit) installed on the desktop from MS-DOS 6.22 with
+  `setup /is` off the CD (UDVD2 + MSCDEX). It reaches the desktop in under 100 s and shuts down
+  through APM. It runs on the P4 (2026-11-17): the user finds it slow but usable, and sound works.
+  - **Speed on the P4 (2026-11-17):** opening and closing Control Panel > Multimedia reads
+    1.3-1.6 MIPS, 240-294 cycles per guest instruction; idle is 0.1 MIPS (HLT). `prof` is all
+    interpreter (`cpu_exec1` 25%, `translate` 12%, `set_seg` 6.5%, `read_desc` 4%): 16-bit
+    protected-mode code with paging, which the flat fast path does not take.
+  - **Dirty lines (2026-11-17, THIRD_PARTY.md):** for 16-colour planar pictures wider than 320
+    (mode 12h), `vga.c` decodes only the lines the guest wrote, `pcvid_render` scales only their
+    rows plus the previous frame's (`s_pendY0/1`: the other video buffer lacks those), and
+    `drawJob` pushes only that span (`pcvid_span`); nothing written, nothing pushed. Narrower
+    pictures are still decoded and pushed whole every frame on the P4 (Prince's crackle). The
+    same test then read 1.4-1.6 MIPS, 240-270c: the drawing was not the limit, the interpreter
+    is. The P4's shot copies every row a frame was ever pushed to (`s_vTop`/`s_vEnd`).
+  - `alt+f4` through `remote.py --p4` did not reach Windows on the device (it does on the
+    desktop), so a deploy cuts Windows off without a shutdown.
+  - Setup needs 157 MB free even for Compact, so a 128 MB disk is refused.
+  - It stopped with SU0152 ("0 bytes of memory") until the CMOS memory bytes were filled
+    (THIRD_PARTY.md).
+  - At the restart it says a disk is in the empty floppy drive; OK goes on.
+  - The key's boxes move on by themselves: type all the digits in one run.
+  - With the CD mounted at boot its autorun opens, so the ini leaves the CD empty.
 - `PC_MIPS=0.07 PC_MIPS_AT=100` caps the guest at 0.07 MIPS from 100 s of guest time on (boot
   fast, then run at the RP2350's Windows speed).
 

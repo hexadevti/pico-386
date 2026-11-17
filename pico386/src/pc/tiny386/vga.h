@@ -52,6 +52,7 @@ void vga_set_text_ops(VGAState *s, VGATextOps *ops, void *o);
 typedef struct VGAPicoInfo {
     int mode;                 /* 0 blank, 1 text, 2 graphics */
     int gfx_w, gfx_h;         /* last graphics picture, top-left of the framebuffer */
+    int dirty_y0, dirty_y1;   /* its lines [y0, y1) the last refresh drew again */
     const uint8_t *vram;      /* planes interleaved: byte 4*a+p is plane p of address a */
     uint32_t start_addr;      /* text: vram byte of the top-left cell (char; attr at +1) */
     uint32_t line_offset;     /* text: vram bytes per row */

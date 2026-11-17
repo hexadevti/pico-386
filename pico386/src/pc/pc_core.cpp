@@ -243,9 +243,11 @@ void drawJob(void *) {
 #endif
   if (!hal_video_ready()) return;
   uint16_t *back = hal_video_back();
-  // The bottom 10 rows are left alone: the picture never reaches them (25 text rows end at 310),
-  // and they hold the FPS meter, which a full-height push would wipe every frame.
-  if (pcvid_render(back, s_fb, hal_millis())) hal_video_submit(0, SCREEN_H - 10);
+  // Only the rows it drew are pushed (never the bottom 10, which hold the FPS meter).
+  if (!pcvid_render(back, s_fb, hal_millis())) return;
+  int y, h;
+  pcvid_span(&y, &h);
+  hal_video_submit(y, h);
 }
 
 // A line of text in the bottom strip, under the picture (where the FPS meter goes), for 2 s;

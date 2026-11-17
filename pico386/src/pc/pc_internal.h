@@ -35,6 +35,7 @@ void pcvid_reset();                          // forget caches: the next frame is
 // frame need not be submitted.
 // fb is the guest framebuffer (T386_FB_W x T386_FB_H) the machine draws graphics modes into.
 bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs);
+void pcvid_span(int *y, int *h);                // the rows of dst the last render drew
 // A small picture of the guest screen for a snapshot: the picture's area (not the black around it)
 // box-averaged to PCVID_THUMB_W x PCVID_THUMB_H, handed to row(ctx, px) a row at a time, top row
 // first. frame is the last frame drawn (hal_video_front()); LOWMEM has none, so the screen is

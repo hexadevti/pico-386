@@ -162,6 +162,18 @@ CMOS *cmos_init(long mem_size, int irq, void *pic, void (*set_irq)(void *pic, in
 	c->data[11] = 0x02;
 	c->data[12] = 0x00;
 	c->data[13] = 0x80;
+	/* TINY386_PICO: the AT's own memory bytes, base (15h/16h) and extended (17h/18h) in KB, as
+	 * QEMU fills them. SeaBIOS doesn't need them, but Windows 95's setup reads them and stopped
+	 * with "Your computer has 0 bytes of memory" (SU0152). */
+	c->data[0x15] = 640 & 0xff;
+	c->data[0x16] = 640 >> 8;
+	if (mem_size >= 1024 * 1024) {
+		long ext_kb = (mem_size - 1024 * 1024) >> 10;
+		if (ext_kb > 65535)
+			ext_kb = 65535;
+		c->data[0x17] = ext_kb & 0xff;
+		c->data[0x18] = ext_kb >> 8;
+	}
 	if (mem_size >= 1024 * 1024) {
 		if (mem_size >= 64 * 1024 * 1024) {
 			mem_size -= 16 * 1024 * 1024;

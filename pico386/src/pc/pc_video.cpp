@@ -33,6 +33,10 @@ int s_lastMode = -1, s_lastW, s_lastH;
 int s_lastFontSize = -1;
 int s_clearFrames;                             // both video buffers need their borders cleared
 bool s_gfxFull = true;
+int s_pendY0, s_pendY1 = kOutH;                // output rows the other video buffer still lacks
+// Rows of the buffer the last pcvid_render drew. The bottom 10 are never pushed: the picture
+// never reaches them (25 text rows end at 310), and they hold the FPS meter.
+int s_spanY, s_spanH = SCREEN_H - 10;
 uint32_t s_gfxGen;                             // t386_vga_gen() of the last picture drawn
 
 // ---- graphics ----------------------------------------------------------------------------------
@@ -159,7 +163,8 @@ void lineSink(void *, int y, const uint16_t *line, int w, int h) {
 }
 #endif
 
-void renderGraphics(uint16_t *dst, const uint16_t *fb, int w, int h) {
+// Output rows [y0, y1) of the picture only.
+void renderGraphics(uint16_t *dst, const uint16_t *fb, int w, int h, int y0, int y1) {
   if (w <= 0 || h <= 0) return;
   if (w > T386_FB_W) w = T386_FB_W;
   if (h > T386_FB_H) h = T386_FB_H;
@@ -171,8 +176,8 @@ void renderGraphics(uint16_t *dst, const uint16_t *fb, int w, int h) {
     s_x1[x] = (int16_t)b;
   }
   const bool sameW = w == SCREEN_W;
-  uint16_t *out = dst + (SCREEN_H - kOutH) / 2 * SCREEN_W;
-  for (int y = 0; y < kOutH; y++, out += SCREEN_W) {
+  uint16_t *out = dst + ((SCREEN_H - kOutH) / 2 + y0) * SCREEN_W;
+  for (int y = y0; y < y1; y++, out += SCREEN_W) {
     int a = y * h / kOutH, b = (y + 1) * h / kOutH - 1;
     if (b < a) b = a;
     const uint16_t *r0 = fb + a * T386_FB_W, *r1 = fb + b * T386_FB_W;
@@ -385,9 +390,16 @@ void pcvid_reset() {
   s_gfxFull = true;
 }
 
+void pcvid_span(int *y, int *h) {
+  *y = s_spanY;
+  *h = s_spanH;
+}
+
 bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
   VGAPicoInfo in;
   t386_info(&in);
+  s_spanY = 0;
+  s_spanH = SCREEN_H - 10;
   bool changed = in.mode != s_lastMode || g_settings.fontSize != s_lastFontSize;
   s_lastFontSize = g_settings.fontSize;
   if (in.mode == 2) {
@@ -415,7 +427,13 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
 #if defined(PICO386_LOWMEM)
     const int preW = in.gfx_w, preH = in.gfx_h;
 #endif
+#if defined(PICO386_LOWMEM)
     t386_refresh(s_gfxFull || changed);
+#else
+    // Pictures no wider than the panel (mode 13h, the EGA games) are decoded whole every time,
+    // as before the dirty lines: see the P4's note above about Prince's music.
+    t386_refresh(s_gfxFull || changed || s_lastW <= SCREEN_W);
+#endif
 #if defined(PICO386_LOWMEM)
     flushBand();
 #endif
@@ -458,9 +476,35 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
   }
 
   if (in.mode == 2) {
-    renderGraphics(dst, fb, in.gfx_w, in.gfx_h);
+    // The refresh decoded only the lines the guest wrote (vga.c). Scale and push only their rows,
+    // plus the rows of the frame before: that one went to the other buffer, so this buffer still
+    // lacks them. A full frame makes the next one full too, which fills both buffers.
+    int y0 = 0, y1 = 0;
+    if (clear || changed || in.gfx_h <= 0) {
+      y1 = kOutH;
+    } else if (in.dirty_y1 > in.dirty_y0) {
+      y0 = in.dirty_y0 * kOutH / in.gfx_h - 1;
+      y1 = (in.dirty_y1 - 1) * kOutH / in.gfx_h + 2;
+      if (y0 < 0) y0 = 0;
+      if (y1 > kOutH) y1 = kOutH;
+    }
+    int r0 = y0, r1 = y1;                      // with the last frame's rows
+    if (s_pendY1 > s_pendY0) {
+      if (r1 <= r0) { r0 = s_pendY0; r1 = s_pendY1; }
+      else { r0 = r0 < s_pendY0 ? r0 : s_pendY0; r1 = r1 > s_pendY1 ? r1 : s_pendY1; }
+    }
+    s_pendY0 = y0;
+    s_pendY1 = y1;
+    if (r1 <= r0) return false;                // nothing written: the panel is up to date
+    renderGraphics(dst, fb, in.gfx_w, in.gfx_h, r0, r1);
+    if (r0 > 0 || r1 < kOutH) {
+      s_spanY = (SCREEN_H - kOutH) / 2 + r0;
+      s_spanH = r1 - r0;
+    }
     return true;
   }
+  s_pendY0 = 0;                                // text or blank next: graphics start over in full
+  s_pendY1 = kOutH;
 #endif
   if (in.mode == 1) {
     // the cleared buffer needs the text again even if the text did not change
