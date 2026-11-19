@@ -429,12 +429,18 @@ bool hal_net_available() { return false; }   // as on the RP2350
 #else
 bool hal_net_available() { return true; }
 #endif
-void hal_net_begin(const char *, const char *) {}
-void hal_net_end() {}
+// PC_NET_NORAM=1 plays the P4's radio refused for want of internal RAM (netmenu's block).
+static bool s_netNoRam;
+void hal_net_begin(const char *, const char *) { s_netNoRam = getenv("PC_NET_NORAM") != nullptr; }
+void hal_net_end() { s_netNoRam = false; }
 int hal_net_state(char *info, size_t n) {
+  if (s_netNoRam) {
+    if (n) snprintf(info, n, "no RAM: 40 KB free, 72 needed");
+    return HAL_NET_NO_RAM;
+  }
   if (n) snprintf(info, n, "host network");
   return HAL_NET_UP;
 }
-int hal_net_scan(char (*)[33], int) { return 0; }
+int hal_net_scan(char (*)[33], int) { return getenv("PC_NET_NORAM") ? -1 : 0; }
 
 #endif // BOARD_DESKTOP

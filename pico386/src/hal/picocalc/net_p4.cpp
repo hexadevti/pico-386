@@ -23,6 +23,7 @@
 #include "../hal.h"
 
 static bool s_started, s_radio, s_noRoom;
+static unsigned s_roomKB;              // internal RAM free when the radio was refused
 static String s_ssid, s_pass;
 static uint32_t s_beganAt;
 static int s_retries;
@@ -127,6 +128,7 @@ static bool radioOn() {
   if (freeI < kNeedInternal) {
     hal_log("wifi: only %u KB of internal RAM, not starting the radio", (unsigned)(freeI >> 10));
     s_noRoom = true;
+    s_roomKB = (unsigned)(freeI >> 10);
     return false;
   }
   if (!WiFi.mode(WIFI_STA)) return false;
@@ -190,6 +192,7 @@ void hal_net_begin(const char *ssid, const char *pass) {
 }
 
 void hal_net_end() {
+  s_noRoom = false;
   if (!s_started) return;
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
@@ -197,8 +200,12 @@ void hal_net_end() {
 }
 
 int hal_net_state(char *info, size_t n) {
+  if (s_noRoom) {
+    if (n) snprintf(info, n, "no RAM: %u KB free, %u needed", s_roomKB, (unsigned)(kNeedInternal >> 10));
+    return HAL_NET_NO_RAM;
+  }
   if (!s_started) {
-    if (n) snprintf(info, n, s_noRoom ? "no internal RAM for Wi-Fi" : s_ssid.isEmpty() ? "no network set" : "off");
+    if (n) snprintf(info, n, s_ssid.isEmpty() ? "no network set" : "off");
     return HAL_NET_OFF;
   }
   const wl_status_t st = WiFi.status();

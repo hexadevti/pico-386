@@ -100,7 +100,9 @@ const char *hal_sd_root();                 // "/sd" on the P4, the sdcard folder
 // network: the P4's Wi-Fi (an ESP32-C6 over SDIO), for pc_net's NAT. The desktop is always
 // online through the host; the RP2350 has no radio (hal_net_available() false).
 // ---------------------------------------------------------------------------------------------
-enum { HAL_NET_OFF = 0, HAL_NET_CONNECTING = 1, HAL_NET_UP = 2, HAL_NET_FAILED = -1 };
+// HAL_NET_NO_RAM: the radio was refused for want of internal RAM (the P4's ESP-Hosted needs about
+// 72 KB); it stays so until hal_net_end() or a radio start that works.
+enum { HAL_NET_OFF = 0, HAL_NET_CONNECTING = 1, HAL_NET_UP = 2, HAL_NET_FAILED = -1, HAL_NET_NO_RAM = -2 };
 bool hal_net_available();
 // Joins ssid; an empty ssid means the loader's network (PicoMultiLoader's card cfg). Returns at
 // once; hal_net_state() tells how it went. Calling it again with the same network does nothing.

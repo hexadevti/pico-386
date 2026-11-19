@@ -28,6 +28,11 @@ int pckbd_zoom_count();
 // Where the guest's pointer is estimated to be in a w x h picture (from the moves sent; recentred
 // when w or h change).
 void pckbd_pointer(int w, int h, int *x, int *y);
+// Bumped by every move sent to the guest.
+uint32_t pckbd_pointer_moves();
+// The pointer was found on the screen at x, y (pc_video.cpp): the estimate starts again from there.
+// Windows 95 accelerates short and long moves differently, so summing the deltas drifts.
+void pckbd_pointer_seen(int w, int h, int x, int y);
 // The STM32 sends no Shift+arrows (Shift+Up/Down arrive as PgUp/PgDn). The "shift key" is another
 // key that is then the guest's Left Shift, so arrows can be pressed with it; with one set, PgUp/PgDn
 // with a real Shift held are Shift+Up/Down too. None: PgUp/PgDn stay themselves.

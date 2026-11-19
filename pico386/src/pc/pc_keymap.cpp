@@ -143,6 +143,7 @@ bool s_ctrlHeld;                    // Ctrl physically held (also when it is a b
 bool s_zoom;                        // Ctrl+Caps Lock: the 1:1 zoom (pc_video.cpp)
 int s_zoomCount;                    // bumped by every toggle
 int s_ptrX, s_ptrY, s_ptrW, s_ptrH; // the guest pointer as estimated, in a picture of W x H
+uint32_t s_ptrMoves;                // bumped by every move sent
 uint8_t s_button[2] = { KEY_ALT, KEY_SHIFT_R };   // the left and right button keys (0 = none)
 bool s_buttonDown[2];
 bool s_arrow[4];                    // the pointer's arrows held: left, right, up, down
@@ -245,6 +246,7 @@ int shiftedArrowOf(uint8_t code) {
 int mouseMode() { return s_zoom && s_mouseMode == MOUSE_ARROWS ? MOUSE_ON : s_mouseMode; }
 
 void trackPointer(int dx, int dy) {
+  if (dx || dy) s_ptrMoves++;
   if (s_ptrW <= 0 || s_ptrH <= 0) return;
   s_ptrX = std::max(0, std::min(s_ptrW - 1, s_ptrX + dx));
   s_ptrY = std::max(0, std::min(s_ptrH - 1, s_ptrY + dy));
@@ -304,6 +306,15 @@ void pckbd_pointer(int w, int h, int *x, int *y) {
   }
   *x = s_ptrX;
   *y = s_ptrY;
+}
+
+uint32_t pckbd_pointer_moves() { return s_ptrMoves; }
+
+void pckbd_pointer_seen(int w, int h, int x, int y) {
+  s_ptrW = w;
+  s_ptrH = h;
+  s_ptrX = std::max(0, std::min(w - 1, x));
+  s_ptrY = std::max(0, std::min(h - 1, y));
 }
 
 const char *pckbd_mouse_mode_name(int mode) {

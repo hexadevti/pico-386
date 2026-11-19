@@ -13,7 +13,8 @@
 
 #if defined(PICO386_LOWMEM)
 // The RP2350 has no radio, and no SRAM to spare for this menu.
-void netApply() {}
+bool netApply() { return true; }
+bool netBlocked() { return false; }
 void netMenu() {}
 #else
 
@@ -99,14 +100,27 @@ void editCustomProxy() {
 
 } // namespace
 
-void netApply() {
-  if (!hal_net_available()) return;
+// The radio refused for want of internal RAM: the PC gets no card (a card with no way out would
+// only leave the guest's DHCP waiting), until a netApply that works.
+static bool s_blocked;
+
+bool netBlocked() { return s_blocked; }
+
+bool netApply() {
+  if (!hal_net_available()) return true;
   std::string host;
   int port;
   proxyOf(host, port);
-  pcnet_configure(g_settings.netOn, host.c_str(), port);
-  if (g_settings.netOn) hal_net_begin(g_settings.wifiSsid.c_str(), g_settings.wifiPass.c_str());
+  bool on = g_settings.netOn;
+  if (on) hal_net_begin(g_settings.wifiSsid.c_str(), g_settings.wifiPass.c_str());
   else hal_net_end();
+  s_blocked = on && hal_net_state(nullptr, 0) == HAL_NET_NO_RAM;
+  if (s_blocked) {
+    hal_log("net: not enough RAM for the Wi-Fi; machines get no network card");
+    on = false;
+  }
+  pcnet_configure(on, host.c_str(), port);
+  return !s_blocked;
 }
 
 void netMenu() {
@@ -123,8 +137,8 @@ void netMenu() {
     int n = 0;
     char state[64], traffic[64], custom[64];
     row[n] = R_CARD;
-    items[n++] = { "Network card", g_settings.netOn ? "On" : "Off", ui::ICON_GEAR,
-                   "Fitted when a machine starts", -1, true };
+    items[n++] = { "Network card", !g_settings.netOn ? "Off" : s_blocked ? "No RAM" : "On", ui::ICON_GEAR,
+                   s_blocked ? "Not fitted (see Status)" : "Fitted when a machine starts", -1, true };
     row[n] = R_WIFI;
     items[n++] = { "Wi-Fi", g_settings.wifiSsid.empty() ? "Loader's" : g_settings.wifiSsid.c_str(), ui::ICON_CHART };
     if (!g_settings.wifiSsid.empty()) {
@@ -169,7 +183,14 @@ void netMenu() {
       case R_CUSTOM: if (k == KEY_ENTER) editCustomProxy(); else changed = false; break;
       default: changed = false; break;   // Status, Traffic: any key shows them again
     }
-    if (changed) netApply();
+    if (changed && !netApply() && row[sel] == R_CARD) {
+      // Refused: say why, and leave the card off rather than "on" with nothing behind it.
+      char why[64];
+      hal_net_state(why, sizeof why);
+      ui::message("Network", why, 2500);
+      g_settings.netOn = false;
+      netApply();
+    }
   }
   settingsSave();
 }

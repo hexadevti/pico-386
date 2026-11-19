@@ -417,6 +417,18 @@ started from on 2026-10-18, and **emu16** and **emu8**.
   since the last): bigger packets were accelerated by Windows 3.x and the estimate fell behind.
   Queuing the 2 px packets all at once lost the pointer on the device. On the desktop at
   `PC_MIPS=1.5` the estimate matches the real pointer, also after an edge.
+  Windows 95 accelerates the pointer itself (short moves about 0.45x, long ones about 1.5x at
+  1.5 MIPS), so the estimate drifted and the pointer left the window on the P4 (2026-11-19). Now,
+  P4/desktop only, `syncPointer` (pc_video.cpp) looks for the standard arrow (black outline, white
+  fill, `isArrow`) in the last picture within 64 px of the estimate (the whole picture at most
+  twice a second) while the pointer moves, and `pckbd_pointer_seen` restarts the estimate there.
+  The window centres on the arrow found (`s_seenX/Y`), not on the estimate: the estimate runs up
+  to 24 px ahead of what the guest has drawn (moves not taken yet), and centring on it made the
+  window jump ahead and back every frame on the P4. Other shapes, or an arrow cut by the picture's
+  edge, are not found, and the estimate goes on alone. Desktop Win95 at `PC_MIPS=1.5`: the
+  pointer stays in the window through long and short moves and at every edge; on the P4 (2026-11-19)
+  the arrow is found in nearly every frame while it moves, and shots after each move show it centred. Held 3 s, straight and diagonal, the step guess found
+  it in nearly every frame; only an arrow cut by the bottom edge is missed.
   `pc_video`'s `Geo` holds the layout; P4/desktop copy rows (`renderZoom`, dirty rows map by
   `y - vy`), LOWMEM passes the window to `vga.c`
   (`t386_set_line_window`, THIRD_PARTY.md) so it decodes only that. Tested on the desktop and
@@ -449,10 +461,18 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       also points `g_hosted_osi_funcs._h_malloc_align` at a PSRAM-first allocator: the newer
       esp-hosted has `CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM` for this. It refuses (no assert)
       under 72 KB free.
+      - **Block (2026-11-19, the user asked):** a refusal sets `HAL_NET_NO_RAM` (`hal_net_state`
+        says "no RAM: N KB free, 72 needed" until `hal_net_end`). `netApply` then returns false and
+        gives pc_net `on = false`, so machines get no NE2000. Turning the card on in the Network
+        menu shows the reason and leaves it Off; with `net=1` at boot, Settings and the card row
+        read "No RAM". Desktop test: `PC_NET_NORAM=1` fakes the refusal.
       - Either change alone still asserted, or looped on `sdmmc_allocate_aligned_buf`.
       - The radio still takes about 56 KB of internal RAM (106 to 49 KB).
     - With 49 KB left, `hal_alloc_fast` (48 KB reserve) puts the PC's tables in PSRAM while the
-      network card is on. The speed cost is not measured yet.
+      network card is on. Measured on the device (2026-11-19), Win95 opening My Computer, Control
+      Panel and Multimedia three times (each round starts with a Mouse-mode click on the empty
+      desktop, since nothing has focus after a boot): card off, rebooted, 1.60 MIPS and 243.5c
+      (medians of 50 busy seconds); card on, 1.60 MIPS and 246c. No cost worth counting.
     - The loader's network is PicoMultiLoader's: `/picomultiloader.cfg` on the card (`wifi_ssid=`,
       `wifi_pass=`). The NVS is empty; esp32loader's NVS "loader" is only the fallback.
     - Scan, join and joining at boot work on the device (192.168.0.100). MS-DOS 5.0 boots with it on.
@@ -460,6 +480,19 @@ started from on 2026-10-18, and **emu16** and **emu8**.
       but only the Network menu calls it (`Screen::refreshMs` = 1 s redraws Status and Traffic).
     - "Response not received for Req_GetCoprocessorFwVersion": the C6 has old firmware; harmless.
     - Windows 95 browses through Protoweb on the device (2026-11-18, the user tested it).
+    - **Opening a website reset the device (2026-11-19):** `H_SDIO_DRV: sdio_write_task: Failed to
+      send data: 258`, then `Unrecoverable host sdio state` and `SW_CPU_RESET`. The SDMMC driver
+      (IDF 5.5) refuses a block-mode buffer whose address or size is not cache-line aligned (128
+      in PSRAM, 64 internal); byte mode (under 512) bounces by itself. ESP-Hosted's TX frames are
+      not aligned that way. `net_p4.cpp` now hooks `_h_sdio_write_block` and copies a misaligned
+      write of 512 or more into an aligned bounce buffer (and retries a refused one through it,
+      logging `wifi: SDIO write ... refused`). Win95's IE then loaded home.microsoft.com with its
+      pictures over about 20 connections, with no error.
+      - **Trap:** `g_hosted_osi_funcs`' layout depends on `H_USE_MEMPOOL` and `H_TRANSPORT_IN_USE`,
+        set only in `port/esp/freertos/include/port_esp_hosted_host_config.h`. Without that
+        include first, the table is 3 slots off, and the "write" hook landed on `_h_sdio_read_reg`
+        (it broke the init). `hookHosted` checks that the slot holds `hosted_sdio_write_block`
+        before hooking.
   - **Windows 95 online (2026-11-18, desktop, then the P4):** `win95net.ini` (local; C: = `win95net.img`, a
     copy of win95.img, CD = win95.iso, `net=1` in pico386.cfg). Control Panel > Network: Add >
     Adapter > Novell/Anthem > NE2000 Compatible, Resources typed in (IRQ `9`, I/O `300 - 31F`:
@@ -767,8 +800,9 @@ the repo root, because `PC_INI` paths are relative to the cwd.
     then took the rest: the job semaphores, made at the first frame, were NULL (assert in
     `xQueueSemaphoreTake` at Start). Fixed for good: `jobInit` in `hal_init`, and `hal_alloc_fast`
     leaves 48 KB of internal RAM free (`kInternalReserve`).
-  - `alt+f4` through `remote.py --p4` did not reach Windows on the device (it does on the
-    desktop), so a deploy cuts Windows off without a shutdown.
+  - `alt+f4` through `remote.py --p4` did not reach Windows on the device because the Windows 95
+    startup was in Mouse mode, where Alt is the left button. In Arrows mode (in-game menu) it
+    works, and `alt+f4` on the desktop then `enter` shuts down through APM (2026-11-19).
   - Setup needs 157 MB free even for Compact, so a 128 MB disk is refused.
   - It stopped with SU0152 ("0 bytes of memory") until the CMOS memory bytes were filled
     (THIRD_PARTY.md).

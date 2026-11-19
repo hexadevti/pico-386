@@ -24,6 +24,7 @@
 // (t386_set_line_window). A window that moved draws the whole of it again.
 #include <string.h>
 #include <algorithm>
+#include <cstdlib>
 #include "pc_internal.h"
 #include "pc_glue.h"
 #include "../hal/hal.h"
@@ -57,12 +58,21 @@ struct Geo {
   }
 };
 Geo s_geo;                                     // the last picture's
+// The pointer as last found drawn in a picture of seenW x seenH (syncPointer). The window centres
+// on it rather than on the estimate, which runs ahead of what the guest has drawn by the moves it
+// has not taken yet (up to 24 px on the P4), so the window jumped ahead and back every frame.
+bool s_seenOk;
+int s_seenX, s_seenY, s_seenW, s_seenH;
 
 Geo geometry(int w, int h) {
   Geo g;
   if (!pckbd_zoom() || w <= 0 || h <= 0 || (w <= SCREEN_W && h <= kZoomH)) return g;
   int px, py;
   pckbd_pointer(w, h, &px, &py);
+  if (s_seenOk && s_seenW == w && s_seenH == h) {
+    px = s_seenX;
+    py = s_seenY;
+  }
   g.zoom = true;
   g.top = 0;
   g.outH = kZoomH;
@@ -74,6 +84,111 @@ Geo geometry(int w, int h) {
 }
 
 int s_lastMode = -1, s_lastW, s_lastH;
+
+#if !defined(PICO386_LOWMEM)
+// Zoomed, the window follows the guest's pointer. Its place summed from the moves sent drifts
+// under Windows 95, which slows short moves (about 0.45x) and speeds up long ones (about 1.5x),
+// so the pointer left the window on the P4 (2026-11-19). Here the standard arrow is looked for in
+// the last picture near the estimate, and the estimate starts again from it. Any other shape (an
+// I-beam, an hourglass) is not found, and the estimate goes on alone.
+//   row 0  #           black at x
+//   row 1  ##
+//   row k  #o..o#      black at x, white from x+1 to x+k-1, black at x+k (k = 2..9)
+bool isArrow(const uint16_t *fb, int x, int y, int w, int h) {
+  if (y + 4 > h || x + 3 > w) return false;   // too little of it shows to tell
+  const uint16_t *r = fb + y * T386_FB_W + x;
+  if (r[T386_FB_W] != 0 || r[T386_FB_W + 1] != 0) return false;
+  for (int k = 2; k <= 9 && y + k < h; k++) {
+    const uint16_t *row = r + k * T386_FB_W;
+    if (row[0] != 0) return false;
+    for (int i = 1; i < k; i++) {
+      if (x + i >= w) goto next;
+      if (row[i] != 0xFFFF) return false;
+    }
+    if (x + k < w && row[k] != 0) return false;
+  next:;
+  }
+  return true;
+}
+
+// The arrow's tip nearest (cx, cy) with its tip in columns [xa, xb] and rows [ya, yb], if any.
+bool findArrowIn(const uint16_t *fb, int w, int h, int xa, int xb, int ya, int yb, int cx, int cy,
+                 int *ox, int *oy) {
+  xa = std::max(0, xa);
+  xb = std::min(w - 3, xb);
+  ya = std::max(0, ya);
+  yb = std::min(h - 4, yb);
+  int best = -1;
+  for (int y = ya; y <= yb; y++) {
+    const uint16_t *row = fb + y * T386_FB_W;
+    for (int x = xa; x <= xb; x++) {
+      if (row[x] || row[x + T386_FB_W] || row[x + T386_FB_W + 1]) continue;
+      if (!isArrow(fb, x, y, w, h)) continue;
+      const int d = std::abs(x - cx) + std::abs(y - cy);
+      if (best < 0 || d < best) { best = d; *ox = x; *oy = y; }
+    }
+  }
+  return best >= 0;
+}
+
+bool findArrow(const uint16_t *fb, int w, int h, int cx, int cy, int rad, int *ox, int *oy) {
+  return findArrowIn(fb, w, h, cx - rad, cx + rad, cy - rad, cy + rad, cx, cy, ox, oy);
+}
+
+uint32_t s_seenMoves = ~0u, s_seenAt;            // the moves and the time of the last search
+uint32_t s_movedAt;                              // the last time the moves changed
+uint32_t s_wideAt;                               // the last search of the whole picture
+int s_seenVX, s_seenVY;                          // how far the arrow went between two searches
+
+// Put the estimate on the pointer drawn in the picture just decoded (fb, w x h, the guest wrote
+// rows [dy0, dy1) since the last one). While the arrow is held the pointer speeds up (ours up to
+// 8 px a frame, and Windows accelerates on top of that), and with 100-230 ms between frames on
+// the P4 it went past any fixed search box: the window was lost until the whole-picture search.
+// So, in order: around where the last step says it is now, around the estimate, the rows the
+// guest just wrote (moving the pointer redraws it there), and the whole picture twice a second.
+// Searched every frame while the arrows move it and for a second after (the guest catches up),
+// otherwise twice a second for the guest's own moves.
+void syncPointer(const uint16_t *fb, int w, int h, int dy0, int dy1, uint32_t nowMs) {
+  if (!fb || !pckbd_zoom() || w <= 0 || h <= 0 || (w <= SCREEN_W && h <= kZoomH)) {
+    s_seenOk = false;
+    return;
+  }
+  const uint32_t moves = pckbd_pointer_moves();
+  if (moves != s_seenMoves) s_movedAt = nowMs;
+  if (moves == s_seenMoves && nowMs - s_movedAt > 1000 && nowMs - s_seenAt < 500) return;
+  s_seenMoves = moves;
+  s_seenAt = nowMs;
+  const bool had = s_seenOk && s_seenW == w && s_seenH == h;
+  int px, py, fx, fy;
+  pckbd_pointer(w, h, &px, &py);
+  bool found = false;
+  if (had) {
+    const int cx = s_seenX + s_seenVX, cy = s_seenY + s_seenVY;
+    const int rad = 48 + 2 * std::max(std::abs(s_seenVX), std::abs(s_seenVY));
+    found = findArrow(fb, w, h, cx, cy, rad, &fx, &fy);
+  }
+  if (!found) found = findArrow(fb, w, h, px, py, 64, &fx, &fy);
+  if (!found && dy1 > dy0 && dy1 - dy0 <= 160)
+    found = findArrowIn(fb, w, h, 0, w, dy0 - 16, dy1, px, py, &fx, &fy);
+  if (!found && nowMs - s_wideAt >= 500) {
+    s_wideAt = nowMs;
+    found = findArrow(fb, w, h, px, py, std::max(w, h), &fx, &fy);
+  }
+  if (found && had) {
+    s_seenVX = fx - s_seenX;
+    s_seenVY = fy - s_seenY;
+  } else {
+    s_seenVX = s_seenVY = 0;
+  }
+  s_seenOk = found;
+  if (!found) return;
+  s_seenX = fx;
+  s_seenY = fy;
+  s_seenW = w;
+  s_seenH = h;
+  pckbd_pointer_seen(w, h, fx, fy);
+}
+#endif
 int s_lastFontSize = -1;
 int s_clearFrames;                             // both video buffers need their borders cleared
 bool s_gfxFull = true;
@@ -536,6 +651,19 @@ bool pcvid_render(uint16_t *dst, const uint16_t *fb, uint32_t nowMs) {
     // read again: the refresh is what measures the picture
     t386_info(&in);
     if (in.gfx_w != s_lastW || in.gfx_h != s_lastH) changed = true;
+#if !defined(PICO386_LOWMEM)
+    // Zoomed: find the pointer in the picture just decoded and place the window on it, so the
+    // window shows the arrow where this very picture has it.
+    if (pckbd_zoom()) {
+      syncPointer(fb, in.gfx_w, in.gfx_h, in.dirty_y0, in.dirty_y1, nowMs);
+      const Geo g2 = geometry(in.gfx_w, in.gfx_h);
+      if (g2 != s_geo) {
+        moved = true;
+        if (!g2.sameLayout(s_geo)) changed = true;
+        s_geo = g2;
+      }
+    }
+#endif
 #if defined(PICO386_LOWMEM)
     // The refresh found a new size and drew it over the old picture's borders: clear them now,
     // the next frame draws the picture again.

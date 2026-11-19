@@ -122,7 +122,8 @@ static void settingsMenu(const EmuCore &core) {
     const int biosRow = n;
     items[n++] = { "BIOS folder", biosShown.c_str(), ui::ICON_FOLDER, nullptr, -1, false };
     const int netRow = hal_net_available() ? n : -1;   // the RP2350 has no radio
-    if (netRow >= 0) items[n++] = { "Network", g_settings.netOn ? "On" : "Off", ui::ICON_CHART };
+    if (netRow >= 0)
+      items[n++] = { "Network", !g_settings.netOn ? "Off" : netBlocked() ? "No RAM" : "On", ui::ICON_CHART };
     const uint8_t k = ui::list(scr, items, n, &sel);
     if (k == KEY_ESC || k == KEY_BACKSPACE) break;
     if (sel == biosRow) { if (k == KEY_ENTER) chooseBiosDir(core); continue; }
