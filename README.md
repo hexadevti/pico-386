@@ -236,6 +236,7 @@ Every key goes to the PC except these:
 |---|---|
 | **Ctrl-Esc** | the in-game menu: Resume, Reset, the drives, Save and Load snapshot, the arrows' mode, the mouse buttons, Ctrl+Alt+Del, Quit machine |
 | **Both Shifts together**, or **Ctrl-Tab** | the next mode for the arrows (see below) |
+| **Ctrl+Caps Lock** | zoom: a picture over 320x310 (Windows, 640x480 games) at 1:1, in a window that follows the mouse pointer |
 | **Ctrl+Alt+Del**, **Ctrl+Alt+Backspace** | restart the PC |
 | **Ctrl-PgUp** (in the PC), **Ctrl-Shift-Up** (in the menus) | back to the loader |
 | **Ctrl-F8** (in the PC), **Ctrl-Shift-F3** (in the menus) | restart the PicoCalc |
@@ -249,9 +250,40 @@ The arrows have three modes. The current one shows for 2 s under the picture whe
 In Mouse and Both, the button keys (Alt and Right Shift, unless changed in the in-game menu)
 are only mouse buttons. DOS needs a mouse driver (CTMOUSE); Windows has its own.
 
+**Zoom** (Ctrl+Caps Lock) shows graphics pictures larger than 320x310 at their own size,
+cropped to a window centred on the mouse pointer. At the picture's edges the window stops and
+the pointer moves on to the edge; back in the middle, the window follows it again. While it is on, the arrows move the pointer (Arrows mode becomes Mouse). The emulator only sends mouse movements, so the
+pointer's place is estimated; if the window drifts off the pointer, push the pointer into a corner to line
+the window up again. Text modes are not zoomed.
+
 Shifted characters are sent as Shift plus the US-layout key, so set the PC to the US keyboard
 layout. Keys repeat like a real keyboard (500 ms, then 30 a second). **Caps Lock** works on
 letters; the PC's own Caps Lock stays off.
+
+### The network (P4 only)
+
+**Settings > Network** fits the PC with an NE2000 card (I/O 300h, IRQ 9) that reaches the
+internet through the P4's Wi-Fi, as if a cable were plugged in. Turn on **Network card**, then
+start the machine. **Wi-Fi** picks the network: the one esp32loader joins (the default), one
+from a scan, or a typed name. **Status** shows whether it has joined.
+
+The PC gets its address by DHCP (10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3). In DOS, load a
+packet driver for the card and then a TCP/IP stack, for example
+[mTCP](https://www.brutman.com/mTCP/) with Crynwr's `NE2000.COM`:
+
+```
+NE2000 0x60 9 0x300
+SET MTCPCFG=C:\MTCP\MTCP.CFG
+DHCP
+```
+
+In Windows 95, add the "Novell/Anachem NE2000 compatible" adapter at 300h, IRQ 9, with TCP/IP
+on DHCP.
+
+**Web proxy** sends the PC's web traffic (port 80) to [Protoweb](https://protoweb.org/), which
+serves the web of the 1990s to period browsers, so a browser needs no proxy settings. **Line
+speed** picks Protoweb's simulated modem or line. **Protoweb 2** and **Custom** (host:port) are
+the other choices, and **Off** goes to the real web, where most sites now need HTTPS.
 
 ### The .ini files
 

@@ -16,7 +16,16 @@ struct Settings {
   std::string startup;       // the .ini of the startup last chosen ("pc.ini"), for the home menu's cursor
   std::string biosDir = "pico-386/roms"; // bios.bin + vgabios.bin, relative to the card root
   std::string pickDir[PICK_COUNT];     // where each kind of disk was last chosen, relative to the card root ("/" is the root)
+  // the network (netmenu.cpp, pc_net.cpp)
+  bool netOn = false;        // the PC gets an NE2000 (I/O 300h, IRQ 9)
+  std::string wifiSsid;      // "" = esp32loader's network
+  std::string wifiPass;
+  int proxy = 1;             // NET_PROXY_*
+  int proxySpeed = 0;        // Protoweb's simulated line, kProtowebSpeeds
+  std::string proxyCustom;   // "host:port"
 };
+
+enum { NET_PROXY_OFF, NET_PROXY_PROTOWEB, NET_PROXY_PROTOWEB2, NET_PROXY_CUSTOM, NET_PROXY_COUNT };
 
 extern const char *const kPickKeys[PICK_COUNT];
 

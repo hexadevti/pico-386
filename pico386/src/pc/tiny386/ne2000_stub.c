@@ -1,7 +1,8 @@
-/* ne2000_stub.c -- pico-386: the PC has no network card. pc.c still wires one at 0x300, so these
-   stand in for upstream's ne2000.c (which needs slirp or the ESP32 wifi stack): reads float high,
-   writes vanish. */
+/* ne2000_stub.c -- pico-386: the RP2350's PC has no network card (no radio, and the card's 48 KB of
+   buffer would not fit its SRAM). pc.c still wires one at 0x300, so these stand in for ne2000.c:
+   reads float high, writes vanish. */
 #include "tiny386_port.h"
+#if defined(PICO386_LOWMEM)
 #include "ne2000.h"
 
 void ne2000_ioport_write(void *opaque, uint32_t addr, uint32_t val) { (void)opaque; (void)addr; (void)val; }
@@ -19,3 +20,4 @@ NE2000State *isa_ne2000_init(int base, int irq, void *pic,
 	return NULL;
 }
 void ne2000_set_config_file(const char *file) { (void)file; }
+#endif /* PICO386_LOWMEM */

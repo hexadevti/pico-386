@@ -70,6 +70,9 @@ int vga_pico_hi_idle(VGAState *s);
    and each finished line of a graphics picture goes to the sink: line y of h, w pixels. */
 typedef void VGAPicoLineFunc(void *opaque, int y, const uint16_t *line, int w, int h);
 void vga_set_line_sink(VGAState *s, VGAPicoLineFunc *f, void *opaque);
+/* pico-386 (T386_PAGED): with on, only picture lines [y0, y1) reach the sink, and only their dots
+   [x0, x1) are decoded (the rest of the line is stale). on 0: the whole picture. */
+void vga_set_line_window(VGAState *s, int on, int x0, int x1, int y0, int y1);
 #endif
 
 #ifdef TINY386_PICO

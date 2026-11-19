@@ -1169,12 +1169,18 @@ static void ide_atapi_cmd(IDEState *s)
     }
     switch(s->io_buffer[0]) {
     case GPCMD_TEST_UNIT_READY:
-        if (!s->cdrom_changed) {
-            ide_atapi_cmd_ok(s);
-        } else {
+        /* pico-386: an empty drive is not ready. Upstream said ready, so Windows 95's
+           media poll (every ~4 s) saw a disc that READ TOC then denied, and retried it
+           about 30 times each poll, showing the hourglass. */
+        if (s->cdrom_changed) {
             s->cdrom_changed = 0;
             ide_atapi_cmd_error(s, SENSE_NOT_READY,
                                 ASC_MEDIUM_NOT_PRESENT);
+        } else if ((s->bs->get_sector_count(s->bs) >> 2) == 0) {
+            ide_atapi_cmd_error(s, SENSE_NOT_READY,
+                                ASC_MEDIUM_NOT_PRESENT);
+        } else {
+            ide_atapi_cmd_ok(s);
         }
         break;
     case GPCMD_MODE_SENSE_6:

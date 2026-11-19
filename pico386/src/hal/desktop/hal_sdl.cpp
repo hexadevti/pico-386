@@ -133,6 +133,8 @@ bool  hal_battery_charging()   { return false; }
 bool        hal_sd_mounted()   { return true; }
 const char *hal_sd_root()      { return s_sdRoot.c_str(); }
 
+uint16_t *pccore_fb();                    // pc_core.cpp: the guest's framebuffer
+
 static void saveShot(const char *name) {
   SDL_Surface *sf = SDL_CreateRGBSurfaceWithFormatFrom(s_panel, PANEL_W, PANEL_H, 16, PANEL_W * 2, SDL_PIXELFORMAT_RGB565);
   const std::string p = s_sdRoot + "/" + name;
@@ -265,6 +267,14 @@ static void scriptStep() {
   if (!ks.step(hal_millis(), s_qHead == s_qTail, qPush, t, sizeof(t))) return;
   if (!strcmp(t, "quit")) exit(0);
   if (!strcmp(t, "shot")) { char n[32]; snprintf(n, sizeof(n), "shot%d.bmp", ++shots); saveShot(n); }
+  // bigshot: the guest's 800x600 framebuffer, which the panel's 320x240 shrinks past reading
+  if (!strcmp(t, "bigshot") && pccore_fb()) {
+    char n[32];
+    snprintf(n, sizeof(n), "shot%d.bmp", ++shots);
+    SDL_Surface *sf = SDL_CreateRGBSurfaceWithFormatFrom(pccore_fb(), 800, 600, 16, 800 * 2, SDL_PIXELFORMAT_RGB565);
+    SDL_SaveBMP(sf, (s_sdRoot + "/" + n).c_str());
+    SDL_FreeSurface(sf);
+  }
 }
 
 bool hal_key_poll(KeyEvent *ev) {
@@ -410,5 +420,21 @@ void hal_init() {
   present();
   hal_log("pico-386 on " BOARD_NAME ", SD folder: %s", s_sdRoot.c_str());
 }
+
+// ---------------------------------------------------------------------------------------------
+// network: the host's own, always up (pc_net uses its sockets directly)
+// ---------------------------------------------------------------------------------------------
+#if defined(PICO386_LOWMEM)
+bool hal_net_available() { return false; }   // as on the RP2350
+#else
+bool hal_net_available() { return true; }
+#endif
+void hal_net_begin(const char *, const char *) {}
+void hal_net_end() {}
+int hal_net_state(char *info, size_t n) {
+  if (n) snprintf(info, n, "host network");
+  return HAL_NET_UP;
+}
+int hal_net_scan(char (*)[33], int) { return 0; }
 
 #endif // BOARD_DESKTOP

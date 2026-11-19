@@ -96,6 +96,20 @@ uint32_t hal_audio_queued_us();            // sound written but not yet played
 bool        hal_sd_mounted();
 const char *hal_sd_root();                 // "/sd" on the P4, the sdcard folder on the desktop
 
+// ---------------------------------------------------------------------------------------------
+// network: the P4's Wi-Fi (an ESP32-C6 over SDIO), for pc_net's NAT. The desktop is always
+// online through the host; the RP2350 has no radio (hal_net_available() false).
+// ---------------------------------------------------------------------------------------------
+enum { HAL_NET_OFF = 0, HAL_NET_CONNECTING = 1, HAL_NET_UP = 2, HAL_NET_FAILED = -1 };
+bool hal_net_available();
+// Joins ssid; an empty ssid means the loader's network (PicoMultiLoader's card cfg). Returns at
+// once; hal_net_state() tells how it went. Calling it again with the same network does nothing.
+void hal_net_begin(const char *ssid, const char *pass);
+void hal_net_end();
+int  hal_net_state(char *info, size_t n);   // HAL_NET_*; info: the SSID, the IP or why it failed
+// Scans for networks (blocks a few seconds): up to max names of up to 32 characters, strongest first.
+int  hal_net_scan(char (*names)[33], int max);   // -1: the radio could not start
+
 #if defined(PICO386_LOWMEM)
 // ---------------------------------------------------------------------------------------------
 // PICO386_LOWMEM (the RP2350): the PSRAM that holds the guest's RAM, which is not on the bus,

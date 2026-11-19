@@ -360,4 +360,14 @@ void hal_init() {
           (unsigned)(mi.uordblks >> 10), (unsigned)(sizeof(s_arena) >> 10));
 }
 
+// No radio on a plain Pico 2: no network.
+bool hal_net_available() { return false; }
+void hal_net_begin(const char *, const char *) {}
+void hal_net_end() {}
+int hal_net_state(char *info, size_t n) {
+  if (n) snprintf(info, n, "no radio");
+  return HAL_NET_OFF;
+}
+int hal_net_scan(char (*)[33], int) { return 0; }
+
 #endif // BOARD_PICOCALC_RP2350

@@ -56,6 +56,12 @@ void settingsLoad() {
     else if (!strcmp(line, "lastdir"))   g_settings.lastDir = v;
     else if (!strcmp(line, "startup"))   g_settings.startup = v;
     else if (!strcmp(line, "biosdir"))   g_settings.biosDir = v;
+    else if (!strcmp(line, "net"))       g_settings.netOn = atoi(v) != 0;
+    else if (!strcmp(line, "wifi_ssid")) g_settings.wifiSsid = v;
+    else if (!strcmp(line, "wifi_pass")) g_settings.wifiPass = v;
+    else if (!strcmp(line, "proxy"))     g_settings.proxy = atoi(v);
+    else if (!strcmp(line, "proxy_speed")) g_settings.proxySpeed = atoi(v);
+    else if (!strcmp(line, "proxy_custom")) g_settings.proxyCustom = v;
     else
       for (int i = 0; i < PICK_COUNT; i++)
         if (!strcmp(line, kPickKeys[i])) g_settings.pickDir[i] = v;
@@ -64,6 +70,8 @@ void settingsLoad() {
   if (g_settings.volume < 0 || g_settings.volume > 10) g_settings.volume = 7;
   if (g_settings.frameskip < 0 || g_settings.frameskip > 3) g_settings.frameskip = 0;
   if (g_settings.fontSize < 0 || g_settings.fontSize > 1) g_settings.fontSize = 0;
+  if (g_settings.proxy < 0 || g_settings.proxy >= NET_PROXY_COUNT) g_settings.proxy = NET_PROXY_PROTOWEB;
+  if (g_settings.proxySpeed < 0) g_settings.proxySpeed = 0;
   while (!g_settings.biosDir.empty() && g_settings.biosDir[0] == '/') g_settings.biosDir.erase(0, 1);
 }
 
@@ -74,6 +82,9 @@ void settingsSave() {
   fprintf(f, "volume=%d\nframeskip=%d\nshowfps=%d\nfontsize=%d\nlastdir=%s\nstartup=%s\nbiosdir=%s\n",
           g_settings.volume, g_settings.frameskip, g_settings.showFps ? 1 : 0, g_settings.fontSize,
           g_settings.lastDir.c_str(), g_settings.startup.c_str(), g_settings.biosDir.c_str());
+  fprintf(f, "net=%d\nwifi_ssid=%s\nwifi_pass=%s\nproxy=%d\nproxy_speed=%d\nproxy_custom=%s\n",
+          g_settings.netOn ? 1 : 0, g_settings.wifiSsid.c_str(), g_settings.wifiPass.c_str(), g_settings.proxy,
+          g_settings.proxySpeed, g_settings.proxyCustom.c_str());
   for (int i = 0; i < PICK_COUNT; i++)
     if (!g_settings.pickDir[i].empty()) fprintf(f, "%s=%s\n", kPickKeys[i], g_settings.pickDir[i].c_str());
   fclose(f);

@@ -8,6 +8,7 @@
 void pckbd_reset();                          // every key up (new machine, menu, lost events)
 void pckbd_event(uint8_t code, uint8_t state);
 void pckbd_tick(uint32_t nowMs);             // typematic repeat and mouse movement, once a frame
+void pckbd_mouse_poll();                     // zoomed: the next small mouse packet (t386_run_until)
 // The keyboard mouse: the arrows are arrow keys, move the pointer, or both. Saved per startup as
 // [pico] mouse = 0/1/2.
 enum { MOUSE_ARROWS, MOUSE_ON, MOUSE_BOTH };
@@ -20,6 +21,13 @@ const char *pckbd_mouse_button(int button);          // the .ini name
 const char *pckbd_mouse_button_label(int button);    // "Right Shift"
 void pckbd_next_mouse_button(int button, int dir);   // dir -1 / +1 through the choices
 void pckbd_ctrl_alt_del();
+// Ctrl+Caps Lock toggles the zoom: a big graphics picture shown 1:1 around the mouse pointer
+// (pc_video.cpp). The count changes with every toggle (for the note in the bottom strip).
+bool pckbd_zoom();
+int pckbd_zoom_count();
+// Where the guest's pointer is estimated to be in a w x h picture (from the moves sent; recentred
+// when w or h change).
+void pckbd_pointer(int w, int h, int *x, int *y);
 // The STM32 sends no Shift+arrows (Shift+Up/Down arrive as PgUp/PgDn). The "shift key" is another
 // key that is then the guest's Left Shift, so arrows can be pressed with it; with one set, PgUp/PgDn
 // with a real Shift held are Shift+Up/Down too. None: PgUp/PgDn stay themselves.

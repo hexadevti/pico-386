@@ -8,6 +8,7 @@
 #include "pc_glue.h"
 #include "pc_folder.h"
 #include "pc_zip.h"
+#include "pc_net.h"
 #include "tiny386/snap.h"
 
 static PC *s_pc;
@@ -276,7 +277,16 @@ void t386_set_line_sink(T386LineFunc *f, void *opaque) {
 #endif
 }
 
+void t386_set_line_window(int on, int x0, int x1, int y0, int y1) {
+#if defined(PICO386_LOWMEM)
+  if (s_pc) vga_set_line_window(s_pc->vga, on, x0, x1, y0, y1);
+#else
+  (void)on; (void)x0; (void)x1; (void)y0; (void)y1;
+#endif
+}
+
 void t386_stop() {
+  pcnet_reset();                        // the guest's connections go with it
   t386_release_all();                   // closes the images (flushing writes), frees everything
   s_pc = NULL;
 #if defined(PICO386_LOWMEM)
