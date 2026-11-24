@@ -571,7 +571,110 @@ bool renderText(uint16_t *dst, const VGAPicoInfo &in, uint32_t nowMs, bool force
 
 } // namespace
 
+#if defined(EMU_WEB)
+// ---- the browser: the guest screen at its own resolution ----------------------------------------
+// The page scales the picture to the phone's screen itself, so nothing is shrunk here: graphics go
+// as the framebuffer holds them, and text is drawn dot for dot with the guest's own font, as a VGA
+// monitor shows it (720x400 for 80x25).
+namespace {
+constexpr int kNatW = 1280, kNatH = 1024;      // 132 columns of 9 dots, 60 rows of 16
+uint16_t *s_nat;
+int s_natMode = -1, s_natW = 0, s_natH = 0;
+uint32_t s_natGen = 0, s_natHash = 0;
+bool s_natForce = true;
+}
+
+void pcvid_native(const uint16_t *fb, uint32_t nowMs) {
+  VGAPicoInfo in;
+  t386_info(&in);
+  const bool fresh = s_natForce || in.mode != s_natMode;
+  s_natForce = false;
+  s_natMode = in.mode;
+  if (in.mode == 2) {
+    const int w = in.gfx_w > T386_FB_W ? T386_FB_W : in.gfx_w;
+    const int h = in.gfx_h > T386_FB_H ? T386_FB_H : in.gfx_h;
+    if (w <= 0 || h <= 0 || !fb) return;
+    // pcvid_render refreshed fb just before when anything was written (the same generation test)
+    const uint32_t gen = t386_vga_gen();
+    if (!fresh && gen == s_natGen && w == s_natW && h == s_natH) return;
+    s_natGen = gen;
+    s_natW = w;
+    s_natH = h;
+    hal_web_pc_frame(fb, w, h, T386_FB_W);
+    return;
+  }
+  s_natW = s_natH = 0;
+  if (!s_nat) s_nat = (uint16_t *)calloc((size_t)kNatW * kNatH, 2);
+  if (!s_nat) return;
+  const int cheight = in.cheight > 32 ? 32 : in.cheight;
+  const int cw = in.cols * 9 <= kNatW ? 9 : 8;
+  if (in.mode != 1 || in.cols <= 0 || in.rows <= 0 || cheight <= 0 || !in.line_offset ||
+      in.cols * cw > kNatW || in.rows * cheight > kNatH) {
+    if (fresh) {                               // blank: a black 640x400 once
+      memset(s_nat, 0, 640 * 400 * 2);
+      hal_web_pc_frame(s_nat, 640, 400, 640);
+    }
+    return;
+  }
+  const uint8_t *vram = in.vram;
+  const bool blinkOn = (nowMs / 267) & 1;      // as renderText
+  int curX = -1, curY = -1;
+  if (!(in.cursor_start & 0x20) && in.cursor_addr >= in.start_addr) {
+    const uint32_t off = in.cursor_addr - in.start_addr;
+    curY = (int)(off / in.line_offset);
+    curX = (int)(off % in.line_offset) / 4;
+  }
+  uint32_t th = 2166136261u;
+  for (int c = 0; c < 256; c++) th = hashBytes(th, in.font + c * 32 * 4, cheight * 4, 4);
+  for (int y = 0; y < in.rows; y++) {
+    const uint32_t row = in.start_addr + y * in.line_offset;
+    for (int x = 0; x < in.cols; x++) {
+      const uint32_t a = (row + x * 4) & 0x3fffc;
+      th = (th ^ vram[a]) * 16777619u;
+      th = (th ^ vram[a + 1]) * 16777619u;
+    }
+  }
+  th = hashBytes(th, (const uint8_t *)in.palette, sizeof in.palette, 1);
+  th = (th ^ (uint32_t)(curX * 131 + curY)) * 16777619u;
+  th = (th ^ (uint32_t)(blinkOn ? 1 : 2)) * 16777619u;
+  th = (th ^ (uint32_t)(in.cursor_start * 256 + in.cursor_end + in.cols * 7 + in.rows)) * 16777619u;
+  if (!fresh && th == s_natHash) return;
+  s_natHash = th;
+
+  const int W = in.cols * cw, H = in.rows * cheight;
+  const int cs = in.cursor_start & 0x1f;
+  int ce = in.cursor_end & 0x1f;
+  if (ce >= cheight) ce = cheight - 1;
+  for (int y = 0; y < in.rows; y++) {
+    const uint32_t row = in.start_addr + y * in.line_offset;
+    for (int x = 0; x < in.cols; x++) {
+      const uint32_t a = (row + x * 4) & 0x3fffc;
+      const uint8_t c = vram[a], attr = vram[a + 1];
+      int fgi = attr & 15, bgi = attr >> 4;
+      if (in.blink) {
+        bgi &= 7;
+        if ((attr & 0x80) && !blinkOn) fgi = bgi;
+      }
+      const uint16_t fg = in.palette[fgi], bg = in.palette[bgi];
+      const bool line9 = cw == 9 && c >= 0xC0 && c <= 0xDF;   // box drawing: the 9th dot repeats the 8th
+      const bool cur = y == curY && x == curX && blinkOn && cs <= ce;
+      uint16_t *p = s_nat + (size_t)y * cheight * W + x * cw;
+      for (int r = 0; r < cheight; r++, p += W) {
+        uint8_t bits = in.font[(c * 32 + r) * 4];
+        if (cur && r >= cs && r <= ce) bits = 0xff;
+        for (int i = 0; i < 8; i++) p[i] = (bits & (0x80 >> i)) ? fg : bg;
+        if (cw == 9) p[8] = (cur && r >= cs && r <= ce) || (line9 && (bits & 1)) ? fg : bg;
+      }
+    }
+  }
+  hal_web_pc_frame(s_nat, W, H, W);
+}
+#endif
+
 void pcvid_reset() {
+#if defined(EMU_WEB)
+  s_natForce = true;
+#endif
   s_lastMode = -1;
   s_fontHash = 0;
   s_textHash = 0;

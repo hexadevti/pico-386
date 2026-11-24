@@ -247,6 +247,18 @@ void drawJob(void *) {
   if (!hal_video_ready()) return;
   uint16_t *back = hal_video_back();
   // Only the rows it drew are pushed (never the bottom 10, which hold the FPS meter).
+#if defined(EMU_WEB)
+  // The browser shows the PC at its own resolution (pcvid_native). The 320x320 render still runs,
+  // for its refresh of s_fb and for the snapshots' thumbnails (hal_video_front).
+  const uint32_t now = hal_millis();
+  if (pcvid_render(back, s_fb, now)) {
+    int y, h;
+    pcvid_span(&y, &h);
+    hal_video_submit(y, h);
+  }
+  pcvid_native(s_fb, now);
+  return;
+#endif
   if (!pcvid_render(back, s_fb, hal_millis())) return;
   int y, h;
   pcvid_span(&y, &h);
@@ -261,10 +273,16 @@ void showNote(const char *text) {
   if (text) ui::text(PANEL_W / 2, y + 5, text, ui::kAccent, 1, ui::MC);
   hal_panel_push(0, y, PANEL_W, 10, ui::canvas() + y * PANEL_W, PANEL_W);
   s_noteUntil = text ? (hal_millis() + 2000) | 1 : 0;
+#if defined(EMU_WEB)
+  hal_web_status(0, text);
+#endif
 }
 
 void pc_runFrame(bool draw) {
   if (!s_running) return;
+#if defined(EMU_WEB)
+  hal_web_ui_pc();                             // back from a menu: the page shows the PC again
+#endif
   if (!s_snapSave.empty()) {
     hal_job_wait();
     showNote("Saving snapshot...");

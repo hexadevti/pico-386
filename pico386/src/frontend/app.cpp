@@ -258,6 +258,9 @@ static void showFps(const EmuCore &core, uint32_t fps, uint32_t drawn, int skip,
   ui::fill(0, y, PANEL_W, 10, 0);
   ui::text(PANEL_W / 2, y + 5, b, load > 100 ? ui::kWarn : ui::kGood, 1, ui::MC);
   hal_panel_push(0, y, PANEL_W, 10, ui::canvas() + y * PANEL_W, PANEL_W);
+#if defined(EMU_WEB)
+  hal_web_status(1, b);
+#endif
   hal_log("%s", b);
 }
 

@@ -49,6 +49,8 @@ std::string genFile() { return sdPath("pico-386/snapshots/disks.gen"); }
 constexpr char kHardware[] = "p4";
 #elif defined(BOARD_PICOCALC_RP2350)
 constexpr char kHardware[] = "rp2350";
+#elif defined(EMU_WEB)
+constexpr char kHardware[] = "web";              // web/: the browser build
 #elif defined(PICO386_LOWMEM)
 constexpr char kHardware[] = "desktop-lowmem";   // the RP2350's memory model, on the desktop
 #else

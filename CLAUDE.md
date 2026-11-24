@@ -733,6 +733,43 @@ the data folder since 2026-11-03 (it was `/pc-386`; the user asked). The zip als
 file git tracks under `sdcard/pico-386/` (BIOS, free disks, tests), copied by `package.ps1`.
 Old cards need their `/pc-386` moved and the .ini drive paths edited (README says how). `app.ini` must stay under 512 bytes, ASCII with no BOM.
 
+**Web (2026-11-24, the user asked: "a web version for phones, with emu8's techniques").** `web/`:
+- `python web/build.py` (emsdk in `~/emsdk`; objects in `build-web/`, output in `web/dist/`). It builds
+  the desktop sources (`BOARD_DESKTOP` + `EMU_WEB`) with `web/src/hal_web.cpp` in place of the SDL HAL:
+  pthreads + `PROXY_TO_PTHREAD`, 256 MB fixed memory, IDBFS at `/sdcard`. Guest RAM goes up to 64 MB
+  there (`T386_MEM_MAX_MB` under `EMU_WEB`, 2026-11-24, the user asked; a phone ran about 50 MIPS);
+  the page's seed `pc.ini` asks for 64M and raises an old `mem_size = 32M` in `pc.ini` once. FreeDOS's
+  `mem` shows 65,536K in headless Chrome. `kHardware` is `web`, the home
+  menu's Exit is "Restart" (reloads the page). Network: none.
+- `web/shell/` is the page (copied into dist): `app.js` reads the 320x320 RGBA frame from wasm memory,
+  sends keys as PicoCalc codes (`web_key`; letters lower case unless Shift, Caps Lock sent, no browser
+  repeats), the canvas is a touchpad (`web_mouse`: drag, tap = left, two-finger tap = right; pointer
+  lock with a mouse), an on-screen PC keyboard, ☰ = Ctrl+Esc, 🖱 = a trackpad in the keyboard's place (2026-11-24, the user asked; tap, two-finger tap, double-tap-drag; none in the overlay layout, whose screen is the touchpad; Ctrl+Tab is on the on-screen keyboard), 🎮 = a game keyboard (2026-11-24, the user asked: Esc, Tab, Bs, Enter, WASD, Shift, Ctrl, Alt, Space and a 3x3 arrow pad whose corners press two arrows and whose middle is a second Down, where a finger sliding to another arrow changes the direction, big, on a 14-column grid; its modifiers are held, not latched); in landscape (`gsplit`, 2026-11-24, the user asked) the screen sits in the middle with WASD, Esc, Tab, Shift, Ctrl, Alt and Space on the left and the arrows, Enter, Backspace, a second Shift and Space on the right, a pinch on the screen zooms up to 8x (`zoom`/`zu`/`zv`: `drawPc` scales only the part in view, so it stays sharp), an AudioWorklet on the
+  ring (`web_audio_ring`), Files (upload, download, delete) and "receive from PC" through
+  `worker/relay.js` (Cloudflare Durable Object, `wrangler.jsonc`, `/send`). pt/en/es in `i18n.js`.
+- **Native picture and touch menus (2026-11-24, the user asked):** the page shows the PC at its own
+  resolution, not the panel: `pcvid_native` (pc_video.cpp, EMU_WEB) hands graphics modes from the fb
+  and draws text at 9 (or 8) dots a cell with the guest's font (720x400 for 80x25) through
+  `hal_web_pc_frame`; the page fits it in a 4:3 box (`fitPc`) and scales it sharp-bilinear (`drawPc`, 2026-11-24, the user
+  asked): whole-number nearest-neighbour to the first size at least the box's, then smoothly down to
+  the box in device pixels, so 320x200 has even blocks with no blur at any size or `devicePixelRatio`. `ui::list`,
+  `ui::message` and `ui::editText` publish JSON (`hal_web_ui_show`: list rows with label, value,
+  sub, icon, meter, adjust, snapshot picture as base64 RGB565) and the page (`#ui` in app.js) draws
+  them as cards; a tap answers `web_ui_reply(seq, key, row)` with ENTER, LEFT/RIGHT (◀ ▶ on adjust
+  rows), ESC or BACKSPACE ("Bs|Up" in the hints), so the C++ callers are unchanged. Real keys still
+  work. Screens drawn on the panel (`present`) send `{"t":"panel"}` and show the 320 canvas;
+  `pc_runFrame` sends `{"t":"pc"}`. `showNote` and the FPS meter go to `hal_web_status`. Tested in
+  headless Chrome: home menu, drives screen, FreeDOS in 720x400, the in-game menu, Save snapshot's
+  name field, the Load list with its picture, landscape. Mode 13h (`m13.img`, a named copy of `m13.ini` written into IDBFS) checked at dpr 1 and 3.
+- A new visitor is seeded (missing files only) with the BIOS and `freedos-hdd-32mb.img` (gzipped in
+  `dist/seed/`), and a `pc.ini` named FreeDOS.
+- Test: `python web/serve.py [--all]` (http://localhost:8766, COOP/COEP; on localhost the page also
+  copies the repo's git-tracked sdcard files, or every file up to 64 MB with `--all`). Tested in
+  headless Chrome (2026-11-24): home menu, FreeDOS to `C:\>` in under 30 s, `ver` typed, the in-game
+  menu, landscape layout, audio drained at 44.1 kHz, files kept across a reload. Never tested on a phone.
+- Deploy: `npx wrangler deploy` in `web/` after `build.py` (the user's Cloudflare login). Live at
+  https://pico-386.lucianobf.workers.dev (2026-11-24) and at https://386.hexadevit.com (the user's domain; the README links it); a fresh headless Chrome there seeds and boots FreeDOS.
+
 **Desktop.** MSYS2 MinGW32. The login shell starts in `$HOME`, so `cd` inside the `-lc`:
 
 ```sh

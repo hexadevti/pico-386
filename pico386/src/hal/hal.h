@@ -112,6 +112,23 @@ int  hal_net_state(char *info, size_t n);   // HAL_NET_*; info: the SSID, the IP
 // Scans for networks (blocks a few seconds): up to max names of up to 32 characters, strongest first.
 int  hal_net_scan(char (*names)[33], int max);   // -1: the radio could not start
 
+#if defined(EMU_WEB)
+// ---------------------------------------------------------------------------------------------
+// The browser build (web/src/hal_web.cpp): the page shows the PC at its own resolution, not
+// through the 320x320 panel, and draws the menus itself as touch screens.
+// ---------------------------------------------------------------------------------------------
+// The guest's whole picture, RGB565 (w x h, stride in pixels, at most 800x600).
+void hal_web_pc_frame(const uint16_t *px, int w, int h, int stride);
+// A status line over the picture: slot 0 the 2 s note, 1 the FPS meter; null or "" clears it.
+void hal_web_status(int slot, const char *text);
+// The menu bridge. ui.cpp publishes each screen as JSON and gets a sequence number; the page
+// answers that number with a key (ENTER, LEFT, ESC, ...) and the row it was for.
+uint32_t hal_web_ui_show(const char *json);
+bool hal_web_ui_take(uint32_t seq, int *key, int *sel);
+const char *hal_web_ui_text();               // an edit's text, as the page left it (UTF-8)
+void hal_web_ui_pc();                        // a PC frame runs: the page shows the PC again
+#endif
+
 #if defined(PICO386_LOWMEM)
 // ---------------------------------------------------------------------------------------------
 // PICO386_LOWMEM (the RP2350): the PSRAM that holds the guest's RAM, which is not on the bus,

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>pico-386</title>
+<script>
+  // SharedArrayBuffer needs a secure context: never run from plain http (except localhost)
+  if (location.protocol === 'http:' && !/^(localhost|127\.)/.test(location.hostname)) location.replace('https://' + location.host + location.pathname + location.search);
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" class="portrait">
+  <div id="screen-wrap">
+    <canvas id="screen" width="320" height="320"></canvas>
+    <!-- the PC at its own resolution (hal_web_pc_frame), shown while a PC runs -->
+    <canvas id="pc" width="640" height="400" hidden></canvas>
+    <div id="status"><span id="st-note"></span><span id="st-fps"></span></div>
+  </div>
+
+  <div id="toolbar">
+    <button data-act="menu" data-i18n-title="tb.menu">☰</button>
+    <button data-act="kbd" data-i18n-title="tb.kbd">⌨</button>
+    <button data-act="game" data-i18n-title="tb.game">🎮</button>
+    <button data-act="files" data-i18n-title="tb.files">📁</button>
+    <button data-act="mouse" data-i18n-title="tb.mouse">🖱</button>
+    <button data-act="sound" data-i18n-title="tb.sound">🔊</button>
+    <button data-act="fs" data-i18n-title="tb.fs">⛶</button>
+  </div>
+
+  <!-- the trackpad (🖱): takes the keyboard's place; the touchpad's buttons below it -->
+  <div id="pad" hidden><span data-i18n="pad.hint"></span></div>
+
+  <!-- the touchpad's buttons: shown while a PC runs; held for drags -->
+  <div id="mbtns" hidden>
+    <button class="mb" data-mb="1" data-i18n="mb.left"></button>
+    <button class="mb" data-mb="2" data-i18n="mb.right"></button>
+  </div>
+
+  <div id="kbd" hidden></div>
+</div>
+
+<!-- the emulator's menus, drawn by the page as touch screens (ui.cpp publishes them as JSON) -->
+<div id="ui" hidden>
+  <div class="ui-head">
+    <button class="ui-btn" id="ui-back" data-i18n-title="ui.back">‹</button>
+    <div class="ui-titles"><b id="ui-title"></b><small id="ui-sub"></small></div>
+    <button class="ui-btn" id="ui-close" data-i18n-title="ui.close" hidden>✕</button>
+    <button class="ui-btn" id="ui-files" data-i18n-title="tb.files">📁</button>
+    <button class="ui-btn" id="ui-fs" data-i18n-title="tb.fs">⛶</button>
+  </div>
+  <div class="ui-body" id="ui-body"></div>
+</div>
+
+<div id="files" class="dialog" hidden>
+  <div class="dlg-body">
+    <div class="dlg-head"><b data-i18n="files.title"></b><button data-close>✕</button></div>
+    <p class="hint" data-i18n-html="files.hint"></p>
+    <div class="row">
+      <label><span data-i18n="files.folder"></span> <select id="folder"></select></label>
+      <label class="btn"><span data-i18n="files.upload"></span><input id="upload" type="file" multiple hidden></label>
+    </div>
+    <div id="upload-status" class="hint"></div>
+    <div class="row"><button id="btn-recv" data-i18n="recv.start"></button></div>
+    <div id="recv" hidden>
+      <p class="hint" data-i18n-html="recv.how"></p>
+      <div class="recv-url" id="recv-url"></div>
+      <div class="recv-code" id="recv-code"></div>
+      <div class="row"><span id="recv-status" class="hint"></span><button id="btn-recv-stop" data-i18n="recv.stop"></button></div>
+    </div>
+    <ul id="file-list"></ul>
+    <div class="row">
+      <button id="btn-reboot" data-i18n="files.reboot"></button>
+      <label><span data-i18n="files.lang"></span> <select id="lang"></select></label>
+    </div>
+  </div>
+</div>
+
+<div id="boot" class="dialog">
+  <div class="dlg-body center">
+    <h1>pico-386</h1>
+    <p id="boot-msg" data-i18n="boot.loading">…</p>
+  </div>
+</div>
+
+<script src="i18n.js"></script>
+<script src="pico386.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

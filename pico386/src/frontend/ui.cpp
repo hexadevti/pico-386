@@ -5,6 +5,9 @@
 #include "ui.h"
 #include "uitext.h"
 #include "../hal/hal.h"
+#if defined(EMU_WEB)
+#include <string>
+#endif
 
 namespace ui {
 
@@ -234,6 +237,11 @@ void icon(int x, int y, uint8_t id, uint16_t c) {
 // ------------------------------------------------------------------------------------------------
 // vertical gradient with two soft glows: violet top right, teal bottom left
 static void gradient(uint16_t *dst) {
+#if defined(EMU_WEB)
+  // The page's own menus are flat; a glow at the top of a panel screen looked like a stray band.
+  for (int i = 0; i < PANEL_W * PANEL_H; i++) dst[i] = kBgTop;
+  return;
+#endif
   for (int y = 0; y < PANEL_H; y++) {
     const uint16_t base = mix(kBgTop, kBgBot, y * 256 / PANEL_H);
     for (int x = 0; x < PANEL_W; x++) {
@@ -288,7 +296,12 @@ void drawBackground() {
 }
 #endif
 
-void present() { hal_panel_push(0, 0, PANEL_W, PANEL_H, s_cv, PANEL_W); }
+void present() {
+#if defined(EMU_WEB)
+  hal_web_ui_show("{\"t\":\"panel\"}");     // drawn straight on the panel: the page shows it
+#endif
+  hal_panel_push(0, 0, PANEL_W, PANEL_H, s_cv, PANEL_W);
+}
 
 // ------------------------------------------------------------------------------------------------
 // pieces of a screen
@@ -397,8 +410,68 @@ static void drawMeter(int right, int cy, int level, bool on) {
   }
 }
 
+
+#if defined(EMU_WEB)
+// ------------------------------------------------------------------------------------------------
+// The browser: the page draws message, editText and list itself as touch screens (web/shell/app.js).
+// Each screen goes out as JSON (hal_web_ui_show); a tap comes back as the key it stands for and
+// the row it was on, so the callers see exactly what the keys would have given them. Keys typed
+// on a real keyboard still work, through hal_key_poll as before.
+// ------------------------------------------------------------------------------------------------
+namespace web {
+
+void str(std::string &o, const char *s) {
+  if (!s) { o += "null"; return; }
+  o += '"';
+  for (; *s; s++) {
+    const unsigned char c = (unsigned char)*s;
+    if (c == '"' || c == '\\') { o += '\\'; o += (char)c; }
+    else if (c < 0x20 || c >= 0x80) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); o += b; }  // Latin-1 names
+    else o += (char)c;
+  }
+  o += '"';
+}
+
+void base64(std::string &o, const uint8_t *p, size_t n) {
+  static const char k[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  o += '"';
+  for (size_t i = 0; i < n; i += 3) {
+    const uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+    o += k[v >> 18 & 63];
+    o += k[v >> 12 & 63];
+    o += i + 1 < n ? k[v >> 6 & 63] : '=';
+    o += i + 2 < n ? k[v & 63] : '=';
+  }
+  o += '"';
+}
+
+// One key from a real keyboard, or 0; the global hotkeys as in waitKey.
+uint8_t pollKey() {
+  KeyEvent ev;
+  while (hal_key_poll(&ev)) {
+    if (ev.state != KEYSTATE_PRESSED && ev.state != KEYSTATE_HELD) continue;
+    if (ev.code == KEY_PGUP && ev.state == KEYSTATE_PRESSED) hal_reboot_to_loader();
+    if (ev.code == KEY_F8 && ev.state == KEYSTATE_PRESSED) hal_reboot();
+    return ev.code;
+  }
+  return 0;
+}
+
+} // namespace web
+#endif
+
 // ------------------------------------------------------------------------------------------------
 void message(const char *title, const char *line, uint32_t holdMs) {
+#if defined(EMU_WEB)
+  std::string j = "{\"t\":\"msg\",\"title\":";
+  web::str(j, title);
+  j += ",\"line\":";
+  web::str(j, line);
+  j += '}';
+  hal_web_ui_show(j.c_str());
+  if (holdMs) hal_delay(holdMs);
+  return;
+#endif
   const int w = 248, h = 74, x = (PANEL_W - w) / 2, y = (PANEL_H - h) / 2;
   blendRound(x + 4, y + 5, w, h, 8, 0, 130);                 // shadow
   fillRoundGrad(x - 1, y - 1, w + 2, h + 2, 9, kAccent, kAccent2);
@@ -414,6 +487,35 @@ void message(const char *title, const char *line, uint32_t holdMs) {
 bool editText(const char *title, const char *prompt, char *buf, size_t cap) {
   char text_[64];
   if (cap > sizeof text_) cap = sizeof text_;
+#if defined(EMU_WEB)
+  // The page's own text field (the phone's keyboard): only its final text comes back, at OK.
+  for (;;) {
+    std::string j = "{\"t\":\"edit\",\"title\":";
+    web::str(j, title);
+    j += ",\"prompt\":";
+    web::str(j, prompt);
+    j += ",\"text\":";
+    web::str(j, buf);
+    j += ",\"cap\":" + std::to_string(cap - 1) + "}";
+    const uint32_t seq = hal_web_ui_show(j.c_str());
+    int key = 0, sel = 0;
+    for (;;) {
+      if (hal_web_ui_take(seq, &key, &sel)) break;
+      if (web::pollKey() == KEY_ESC) return false;
+      hal_delay(10);
+    }
+    if (key != KEY_ENTER) return false;
+    // printable ASCII only, as the PicoCalc types: the names go into .ini files and the panel's font
+    size_t len = 0;
+    for (const char *t = hal_web_ui_text(); *t && len + 1 < cap; t++)
+      if (*t >= 0x20 && *t < 0x7F && (len || *t != ' ')) text_[len++] = *t;
+    while (len && text_[len - 1] == ' ') len--;
+    text_[len] = 0;
+    if (!len) continue;
+    snprintf(buf, cap, "%s", text_);
+    return true;
+  }
+#endif
   snprintf(text_, cap, "%s", buf);
   size_t len = strlen(text_);
   for (;;) {
@@ -499,6 +601,69 @@ static int typeAhead(const Screen &screen, const Item *items, int n, int sel, ui
 }
 
 uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
+#if defined(EMU_WEB)
+  // The rows are built once a call; a key that only moves the selection sends them again with the
+  // new one (the page sees the same rows and only moves its highlight).
+  std::string rowsJ = "[";
+  for (int i = 0; i < n; i++) {
+    if (screen.prepare && i % 16 == 0) screen.prepare(screen.ctx, i, n - i < 16 ? n - i : 16);
+    const Item it = rowOf(screen, items, i);   // itemAt's strings last until its next call: copy now
+    if (i) rowsJ += ',';
+    rowsJ += "{\"l\":";
+    web::str(rowsJ, it.label);
+    if (it.value) { rowsJ += ",\"v\":"; web::str(rowsJ, it.value); }
+    if (it.sub) { rowsJ += ",\"s\":"; web::str(rowsJ, it.sub); }
+    if (it.icon) rowsJ += ",\"i\":" + std::to_string(it.icon);
+    if (it.meter >= 0) rowsJ += ",\"m\":" + std::to_string(it.meter);
+    if (it.adjust) rowsJ += ",\"a\":1";
+    if (screen.picture && screen.pictureW > 0 && screen.rowH > 6) {
+      // drawn on the canvas as on the panel, then read back: RGB565, little-endian
+      const int pw = screen.pictureW, ph = screen.rowH - 6;
+      fill(0, 0, pw + 4, ph + 4, 0);
+      screen.picture(screen.ctx, i, 2, 2, false);
+      std::string px((size_t)pw * ph * 2, 0);
+      for (int y = 0; y < ph; y++) memcpy(&px[(size_t)y * pw * 2], s_cv + (y + 2) * PANEL_W + 2, (size_t)pw * 2);
+      rowsJ += ",\"p\":";
+      web::base64(rowsJ, (const uint8_t *)px.data(), px.size());
+      rowsJ += ",\"pw\":" + std::to_string(pw) + ",\"ph\":" + std::to_string(ph);
+    }
+    rowsJ += '}';
+  }
+  rowsJ += ']';
+  std::string head = "{\"t\":\"list\",\"title\":";
+  web::str(head, screen.title);
+  head += ",\"subtitle\":";
+  web::str(head, screen.subtitle);
+  head += ",\"hints\":";
+  web::str(head, screen.hints);
+  if (screen.logo) head += ",\"logo\":1";
+  const uint32_t t0 = hal_millis();
+  for (;;) {
+    if (n <= 0 || *sel < 0) *sel = 0;
+    else if (*sel >= n) *sel = n - 1;
+    const std::string j = head + ",\"sel\":" + std::to_string(*sel) + ",\"rows\":" + rowsJ + "}";
+    const uint32_t seq = hal_web_ui_show(j.c_str());
+    for (;;) {
+      int key = 0, s = 0;
+      if (hal_web_ui_take(seq, &key, &s)) {
+        if (s >= 0 && s < n) *sel = s;
+        return (uint8_t)key;
+      }
+      const uint8_t k = web::pollKey();
+      if (k == KEY_ENTER || k == KEY_LEFT || k == KEY_RIGHT || k == KEY_ESC || k == KEY_BACKSPACE) return k;
+      if (k == KEY_UP) *sel = *sel > 0 ? *sel - 1 : n - 1;
+      else if (k == KEY_DOWN) *sel = *sel < n - 1 ? *sel + 1 : 0;
+      else if (k == KEY_PGDN) *sel += 8;
+      else if (k == KEY_HOME) *sel = 0;
+      else if (k == KEY_END) *sel = n - 1;
+      else if (n > 0 && ((k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z') || (k >= '0' && k <= '9')))
+        *sel = typeAhead(screen, items, n, *sel, k);
+      if (k) break;                              // the selection moved: send it
+      if (screen.refreshMs && hal_millis() - t0 >= screen.refreshMs) return 0;
+      hal_delay(10);
+    }
+  }
+#endif
   bool tall = false;
   for (int i = 0; i < n; i++) tall |= rowOf(screen, items, i).sub != nullptr;
   const int rowH = screen.rowH ? screen.rowH : tall ? 40 : 24;

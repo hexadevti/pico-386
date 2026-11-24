@@ -18,8 +18,13 @@ extern "C" {
 #define T386_FB_W 800
 #define T386_FB_H 600
 // The most guest RAM a machine gets; t386_start steps it down to what PSRAM (32 MB, shared with
-// the framebuffer, VGA memory and the rest) has room for.
+// the framebuffer, VGA memory and the rest) has room for. The web build's 256 MB of wasm memory
+// takes 64 MB (cmos_init fills 34h/35h from 64 MB on, for SeaBIOS).
+#ifdef EMU_WEB
+#define T386_MEM_MAX_MB 64
+#else
 #define T386_MEM_MAX_MB 32
+#endif
 
 enum T386Error {
   T386_OK = 0,

@@ -221,7 +221,9 @@ bool pcprof_home(std::string &iniOut) {
     items[rowNew] = { "Create new startup", nullptr, ui::ICON_FOLDER, "A named set of drives (C:, a CD, a zip...)" };
     items[rowCreate] = { "Create a hard disk", nullptr, ui::ICON_SAVE, "A new, formatted C: drive (32-504 MB)" };
     items[rowSettings] = { "Settings", nullptr, ui::ICON_GEAR, "Volume, FPS meter" };
-#if defined(BOARD_DESKTOP)
+#if defined(EMU_WEB)
+    items[rowExit] = { "Restart", nullptr, ui::ICON_EXIT, "Save the files and reload the page" };
+#elif defined(BOARD_DESKTOP)
     items[rowExit] = { "Quit", nullptr, ui::ICON_EXIT, "Close the window" };
 #else
     items[rowExit] = { "Exit to loader", nullptr, ui::ICON_EXIT, "Back to the esp32loader menu" };

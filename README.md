@@ -10,6 +10,10 @@ The same code also builds for the desktop (SDL2), for debugging. The emulator is
 [tiny386](https://github.com/hchunhui/tiny386). The menus and the hardware layer come from the
 author's pico-amiga and [emu8](https://github.com/hexadevti/emu8).
 
+**Try it on a phone:** a web version runs in the browser at
+[386.hexadevit.com](https://386.hexadevit.com). It boots FreeDOS, with a touch keyboard, a
+game keyboard, a trackpad and pinch zoom.
+
 <p>
 <img src="docs/screenshots/home.png" width="320" alt="The home menu">
 <img src="docs/screenshots/prince.png" width="320" alt="Prince of Persia's title screen">
