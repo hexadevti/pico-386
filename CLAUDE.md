@@ -736,7 +736,7 @@ Old cards need their `/pc-386` moved and the .ini drive paths edited (README say
 **Web (2026-11-24, the user asked: "a web version for phones, with emu8's techniques").** `web/`:
 - `python web/build.py` (emsdk in `~/emsdk`; objects in `build-web/`, output in `web/dist/`). It builds
   the desktop sources (`BOARD_DESKTOP` + `EMU_WEB`) with `web/src/hal_web.cpp` in place of the SDL HAL:
-  pthreads + `PROXY_TO_PTHREAD`, 256 MB fixed memory, IDBFS at `/sdcard`. Guest RAM goes up to 64 MB
+  pthreads + `PROXY_TO_PTHREAD`, 256 MB fixed memory, WASMFS with `/sdcard` on OPFS (see the card below). Guest RAM goes up to 64 MB
   there (`T386_MEM_MAX_MB` under `EMU_WEB`, 2026-11-24, the user asked; a phone ran about 50 MIPS);
   the page's seed `pc.ini` asks for 64M and raises an old `mem_size = 32M` in `pc.ini` once. FreeDOS's
   `mem` shows 65,536K in headless Chrome. `kHardware` is `web`, the home
@@ -745,8 +745,39 @@ Old cards need their `/pc-386` moved and the .ini drive paths edited (README say
   sends keys as PicoCalc codes (`web_key`; letters lower case unless Shift, Caps Lock sent, no browser
   repeats), the canvas is a touchpad (`web_mouse`: drag, tap = left, two-finger tap = right; pointer
   lock with a mouse), an on-screen PC keyboard, ☰ = Ctrl+Esc, 🖱 = a trackpad in the keyboard's place (2026-11-24, the user asked; tap, two-finger tap, double-tap-drag; none in the overlay layout, whose screen is the touchpad; Ctrl+Tab is on the on-screen keyboard), 🎮 = a game keyboard (2026-11-24, the user asked: Esc, Tab, Bs, Enter, WASD, Shift, Ctrl, Alt, Space and a 3x3 arrow pad whose corners press two arrows and whose middle is a second Down, where a finger sliding to another arrow changes the direction, big, on a 14-column grid; its modifiers are held, not latched); in landscape (`gsplit`, 2026-11-24, the user asked) the screen sits in the middle with WASD, Esc, Tab, Shift, Ctrl, Alt and Space on the left and the arrows, Enter, Backspace, a second Shift and Space on the right, a pinch on the screen zooms up to 8x (`zoom`/`zu`/`zv`: `drawPc` scales only the part in view, so it stays sharp), an AudioWorklet on the
-  ring (`web_audio_ring`), Files (upload, download, delete) and "receive from PC" through
-  `worker/relay.js` (Cloudflare Durable Object, `wrangler.jsonc`, `/send`). pt/en/es in `i18n.js`.
+  ring (`web_audio_ring`), Files (upload, download, delete; 2026-11-24, the user asked: the home menu's first row under EMU_WEB, `hal_web_files` waits
+  until the page calls `web_files_closed`, and the screen is `#files` in `#ui`'s card style: Upload (by extension), Receive,
+  the folders as rows, each with its files and Download/Delete, Language, Restart) and "receive from PC" through
+  `worker/relay.js` (Cloudflare Durable Object, `wrangler.jsonc`, `/send`). Files up to 512 MB (2026-11-24, the user asked; it was 128) go into the FS a 4 MB piece at a time, sized first with `ftruncate` (`openSized`), never whole in memory; a 300 MB upload passed a reload in headless Chrome. pt/en/es in `i18n.js`.
+- **The card on OPFS (2026-11-24, the user asked: a big file received from a PC reloaded the page on
+  the phone).** IDBFS kept the whole card in the tab's memory, loaded every file at start and cloned a
+  file again on each save (desktop Chrome's JS heap was 648 MB after a 300 MB receive). Now
+  `-sWASMFS=1` and `mountCard` (hal_web.cpp) mounts `/sdcard` on the OPFS backend from main()'s
+  pthread (memory backend if the browser lacks `FileSystemSyncAccessHandle`), then waits for the
+  page's `webFsInit` (app.js `fsInit`: migrate, seed, pc.ini) to call `web_fs_ready`. Every write is
+  on disk, so `persist()`/`syncfs` are gone. `migrateIdb` moves an old IDBFS card (database
+  `/sdcard`, store `FILE_DATA`) once, a record at a time, then deletes it. The first deploy hung a
+  phone on "Loading": a record is read whole, and a big one kills a phone's tab, which reloads and
+  dies on it again. Now each record is deleted once copied, the one being read is kept in
+  localStorage (`pico386-migrating`) and, found at the next start, is dropped unread and named on the
+  boot screen (`boot.lost`). `boot.card` ("Opening the files…") shows once the page has the card:
+  a hang on "Loading" with it never shown is in `mountCard`, not the page. WASMFS has no `FS.isDir`
+  (`isDirMode`), and its `FS.read`/`write`/`readFile` go through the 256 MB wasm heap, so writes are
+  in 4 MB pieces (`writeAll`) and a download is OPFS's own disk-backed `File` (`fileBlob`).
+  Receive is flow-controlled: the phone acks the header and every 1 MB written (`{t:'ack',got}`),
+  and `/send` keeps at most 8 MB unacked (`WINDOW`; a page that never acks is sent to as before).
+  Tested with `wrangler dev` and a node sender: 200 MB received, byte-exact after a reload, page
+  heap peak 18 MB, never more than 8 MB ahead; download and delete work; an old IDBFS card migrated
+  (snapshot included) and FreeDOS booted from OPFS. Never tested on a phone. The 📁 button in the
+  home menu's header was removed (the user asked); Files is the menu's first row.
+  **The page never calls `Module.FS` (2026-11-24):** with OPFS, a WASMFS call from the browser's main
+  thread blocks it until OPFS's thread answers, and a phone hung for good at the first `mkdir` of the
+  IDBFS move ("Moving to the new storage: pico-386"); desktop Chrome never did. Every page file op
+  (boot, seed, Files, upload, receive, download's fallback) goes to `fsThread` (hal_web.cpp) through
+  `web_fs_req`, answered by `Module.fsDone`; app.js's `fsCall` and its `fs*` helpers are async.
+  Receive handles messages in order (`recv.chain`) and acks only what is written. Pool size 6.
+  Tested in headless Chrome: migration, 200 MB receive byte-exact, upload, delete, Files in-game,
+  FreeDOS boot. Works on the user's phone (2026-11-24): the move finished and the menu came up.
 - **Native picture and touch menus (2026-11-24, the user asked):** the page shows the PC at its own
   resolution, not the panel: `pcvid_native` (pc_video.cpp, EMU_WEB) hands graphics modes from the fb
   and draws text at 9 (or 8) dots a cell with the guest's font (720x400 for 80x25) through
@@ -760,7 +791,7 @@ Old cards need their `/pc-386` moved and the .ini drive paths edited (README say
   work. Screens drawn on the panel (`present`) send `{"t":"panel"}` and show the 320 canvas;
   `pc_runFrame` sends `{"t":"pc"}`. `showNote` and the FPS meter go to `hal_web_status`. Tested in
   headless Chrome: home menu, drives screen, FreeDOS in 720x400, the in-game menu, Save snapshot's
-  name field, the Load list with its picture, landscape. Mode 13h (`m13.img`, a named copy of `m13.ini` written into IDBFS) checked at dpr 1 and 3.
+  name field, the Load list with its picture, landscape. Mode 13h (`m13.img`, a named copy of `m13.ini` written into the card) checked at dpr 1 and 3.
 - A new visitor is seeded (missing files only) with the BIOS and `freedos-hdd-32mb.img` (gzipped in
   `dist/seed/`), and a `pc.ini` named FreeDOS.
 - Test: `python web/serve.py [--all]` (http://localhost:8766, COOP/COEP; on localhost the page also

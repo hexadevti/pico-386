@@ -127,6 +127,8 @@ uint32_t hal_web_ui_show(const char *json);
 bool hal_web_ui_take(uint32_t seq, int *key, int *sel);
 const char *hal_web_ui_text();               // an edit's text, as the page left it (UTF-8)
 void hal_web_ui_pc();                        // a PC frame runs: the page shows the PC again
+// The page's Files screen (upload, receive from a PC, download, delete); returns once it is closed.
+void hal_web_files();
 #endif
 
 #if defined(PICO386_LOWMEM)

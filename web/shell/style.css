@@ -107,19 +107,16 @@ button { font: inherit; color: inherit; }
 .dialog select { background: #2b2b33; color: #ddd; border: 1px solid #444; border-radius: 8px; padding: 7px; font: inherit; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
 .hint { font-size: 13px; color: #999; }
-#file-list { list-style: none; padding: 0; margin: 0; font-size: 14px; }
-#file-list li { display: flex; align-items: center; padding: 6px 4px; border-bottom: 1px solid #2a2a30; gap: 8px; }
-#file-list li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#file-list li small { color: #777; margin-left: 6px; }
-#file-list li button { padding: 3px 9px; }
 #boot h1 { margin: 4px 0 8px; letter-spacing: 3px; }
 
-/* receive from PC (Files dialog) */
-#recv { margin: 8px 0; padding: 10px 12px; border: 1px solid #444; border-radius: 10px; background: #1b1b21; }
-#recv p { margin: 0 0 6px; }
-.recv-url { font: 13px ui-monospace, monospace; color: #9cf; word-break: break-all; user-select: all; }
-.recv-code { font: 700 34px/1.2 ui-monospace, monospace; letter-spacing: .2em; text-align: center; margin: 6px 0; user-select: all; }
-#recv .row { justify-content: space-between; }
+/* the Files screen (#files): #ui's cards, plus section titles, a note and the receive card */
+.ui-sec { margin: 10px 4px 0; font-size: 12.5px; color: #99a; text-transform: uppercase; letter-spacing: .08em; }
+.ui-note { margin: 8px 4px 0; font-size: 12.5px; color: #99a; line-height: 1.45; }
+.ui-txt small.wrap { white-space: normal; }
+.ui-adj button.wide { width: auto; padding: 0 14px; font-size: 14px; }
+.recv-card { align-items: flex-start; }
+.recv-url { font: 13px ui-monospace, monospace; color: #9cf; word-break: break-all; user-select: all; margin-top: 6px; }
+.recv-code { font: 700 32px/1.2 ui-monospace, monospace; letter-spacing: .2em; margin: 4px 0; user-select: all; }
 
 /* ---------- the PC at its own resolution: a 4:3 picture in device pixels, scaled by app.js (fitPc, drawPc) ---------- */
 #pc { display: block; touch-action: none; image-rendering: auto; }
@@ -133,17 +130,18 @@ button { font: inherit; color: inherit; }
 #st-fps { margin-left: auto; }
 
 /* ---------- the menus as touch screens (#ui) ---------- */
-#ui { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; color: #eef;
+#ui, #files { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; color: #eef;
   background: rgba(20,22,40,.94);
   -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2);
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-#ui[hidden] { display: none; }
+#ui[hidden], #files[hidden] { display: none; }
+#files { z-index: 20; }   /* over the home menu that opened it */
 .ui-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; min-height: 60px; }
 .ui-btn { width: 44px; height: 44px; flex: none; border: none; border-radius: 14px; background: rgba(255,255,255,.08);
   font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .ui-btn:active { background: rgba(255,255,255,.22); }
 .ui-btn[hidden] { display: none; }
-#ui-back { font-size: 30px; line-height: 1; padding-bottom: 4px; }
+#ui-back, #files-back { font-size: 30px; line-height: 1; padding-bottom: 4px; }
 #ui-back.hide { visibility: hidden; }
 .ui-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ui-titles b { font-size: 19px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -62,16 +62,16 @@ CXXFLAGS = COMMON + ["-std=c++17", "-Wno-unused-parameter", "-fexceptions"]
 LDFLAGS = [
     "-O2", "-pthread", "-fexceptions",
     "-sPROXY_TO_PTHREAD=1",
-    "-sPTHREAD_POOL_SIZE=4",
+    "-sPTHREAD_POOL_SIZE=6",           # main(), OPFS's backend thread and the page's file thread (hal_web.cpp)
     "-sDEFAULT_PTHREAD_STACK_SIZE=1048576",
     "-sSTACK_SIZE=4194304",           # main() runs on a pthread with this stack (the cores keep line buffers on it)
     "-sINITIAL_MEMORY=268435456",     # shared memory can't grow cheaply: guest RAM, VRAM and the framebuffer fit
     "-sALLOW_MEMORY_GROWTH=0",
     "-sMODULARIZE=1", "-sEXPORT_NAME=createPico386",
     "-sENVIRONMENT=web,worker",
-    "-sFORCE_FILESYSTEM=1", "-lidbfs.js",
+    "-sFORCE_FILESYSTEM=1", "-sWASMFS=1",   # the card in OPFS (hal_web.cpp mountCard)
     "-sEXIT_RUNTIME=0",
-    "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,HEAPU8,HEAP32,UTF8ToString,stringToUTF8,addRunDependency,removeRunDependency",
+    "-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8,HEAP32,UTF8ToString,stringToUTF8,addRunDependency,removeRunDependency",
     "-sEXPORTED_FUNCTIONS=_main,_malloc,_free",
 ]
 
