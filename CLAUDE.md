@@ -740,7 +740,25 @@ Old cards need their `/pc-386` moved and the .ini drive paths edited (README say
   there (`T386_MEM_MAX_MB` under `EMU_WEB`, 2026-11-24, the user asked; a phone ran about 50 MIPS);
   the page's seed `pc.ini` asks for 64M and raises an old `mem_size = 32M` in `pc.ini` once. FreeDOS's
   `mem` shows 65,536K in headless Chrome. `kHardware` is `web`, the home
-  menu's Exit is "Restart" (reloads the page). Network: none.
+  menu's Exit is "Restart" (reloads the page).
+- **Network (2026-11-24, the user asked: "only Protoweb").** A page has no sockets, so on the web
+  `pc_net.cpp` (EMU_WEB) sends only the proxy's port-80 connections out, each as a WebSocket to the
+  Worker's `/api/tcp?host=&port=` (`hal_tun_*` in hal_web.cpp, `tunOpen` in app.js). The Worker
+  (`relay.js`, `connect()` from `cloudflare:sockets`) takes only `TCP_ALLOW`: Protoweb's hosts and
+  ports (403 otherwise), so it is no open proxy. Binary frames are the stream; the Worker sends
+  text "open" once connected, the page sends "shut" for the guest's FIN, and the proxy's EOF
+  closes the WebSocket. The Worker ignores "shut": on Cloudflare (not wrangler dev) a half-close, even
+  with `allowHalfOpen`, left Protoweb answering nothing (0 bytes; htget sends a FIN after its request). Workerd hands binary messages to the Worker as a Blob (`arrayBuffer()`
+  first). Other TCP is refused, UDP goes nowhere, DNS answers only with fake addresses. The
+  Network menu has no Wi-Fi rows there, and the proxy is Protoweb or Protoweb 2 (Off/Custom read
+  as Protoweb). Dev: `localStorage['pico386-tun'] = 'ws://127.0.0.1:8787'` sends the tunnels to
+  `wrangler dev` while the page comes from serve.py. Tested in headless Chrome (FreeDOS, D: =
+  `nettest/`, `echo PACKETINT 0x60 > mtcp.cfg`, NET.BAT): DHCP, ping 10.0.2.2, and htget of
+  www.yahoo.com brought all 8315 bytes (htget then fails on Protoweb's bare LFs, as on the desktop).
+  The same run on https://386.hexadevit.com (2026-11-24) also brought 8315 bytes.
+- Touch: Files > More > Double tap (`pico386-tapgap` in localStorage, 200-500 ms, default 300) is the
+  longest gap between a tap and the next touch; a finger's first 9 px are held back so both clicks
+  land on one spot. Text selection is blocked everywhere but fields and the receive code (`selectstart`).
 - `web/shell/` is the page (copied into dist): `app.js` reads the 320x320 RGBA frame from wasm memory,
   sends keys as PicoCalc codes (`web_key`; letters lower case unless Shift, Caps Lock sent, no browser
   repeats), the canvas is a touchpad (`web_mouse`: drag, tap = left, two-finger tap = right; pointer

@@ -1,6 +1,8 @@
 // netmenu.cpp -- Settings > Network: the PC's network card, the Wi-Fi it goes out on, and the
 // web proxy its HTTP goes through (pc_net.cpp). Protoweb (https://protoweb.org) serves the web
-// of the 1990s to period browsers, at a simulated line speed picked by the port.
+// of the 1990s to period browsers, at a simulated line speed picked by the port. In the browser
+// (EMU_WEB) there is no Wi-Fi and only Protoweb is reachable (the worker's tunnel allows nothing
+// else), so those are the only choices there.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,9 +32,22 @@ const Speed kSpeeds[] = {
 };
 constexpr int kNumSpeeds = sizeof(kSpeeds) / sizeof(kSpeeds[0]);
 
+#if defined(EMU_WEB)
+constexpr bool kWeb = true;
+#else
+constexpr bool kWeb = false;
+#endif
+
+// The browser's proxy is always one of Protoweb's.
+void webProxyOnly() {
+  if (kWeb && g_settings.proxy != NET_PROXY_PROTOWEB && g_settings.proxy != NET_PROXY_PROTOWEB2)
+    g_settings.proxy = NET_PROXY_PROTOWEB;
+}
+
 void proxyOf(std::string &host, int &port) {
   host.clear();
   port = 0;
+  webProxyOnly();
   switch (g_settings.proxy) {
     case NET_PROXY_PROTOWEB:
       host = "wayback.protoweb.org";
@@ -139,17 +154,21 @@ void netMenu() {
     row[n] = R_CARD;
     items[n++] = { "Network card", !g_settings.netOn ? "Off" : s_blocked ? "No RAM" : "On", ui::ICON_GEAR,
                    s_blocked ? "Not fitted (see Status)" : "Fitted when a machine starts", -1, true };
-    row[n] = R_WIFI;
-    items[n++] = { "Wi-Fi", g_settings.wifiSsid.empty() ? "Loader's" : g_settings.wifiSsid.c_str(), ui::ICON_CHART };
-    if (!g_settings.wifiSsid.empty()) {
+    if (!kWeb) {
+      row[n] = R_WIFI;
+      items[n++] = { "Wi-Fi", g_settings.wifiSsid.empty() ? "Loader's" : g_settings.wifiSsid.c_str(), ui::ICON_CHART };
+    }
+    if (!kWeb && !g_settings.wifiSsid.empty()) {
       row[n] = R_PASS;
       items[n++] = { "Password", g_settings.wifiPass.empty() ? "None" : "********", ui::ICON_PAD };
     }
     hal_net_state(state, sizeof state);
     row[n] = R_STATUS;
     items[n++] = { "Status", nullptr, ui::ICON_PLAY, state };
+    webProxyOnly();
     row[n] = R_PROXY;
     items[n++] = { "Web proxy", kProxyNames[g_settings.proxy], ui::ICON_FOLDER,
+                   kWeb ? "The guest's port 80; nothing else gets out" :
                    g_settings.proxy ? "The guest's port 80 goes through it" : nullptr, -1, true };
     if (g_settings.proxy == NET_PROXY_PROTOWEB) {
       if (g_settings.proxySpeed >= kNumSpeeds) g_settings.proxySpeed = 0;
@@ -178,7 +197,10 @@ void netMenu() {
           if (ui::editText("Wi-Fi password", "Password", buf, sizeof buf)) g_settings.wifiPass = buf;
         } else changed = false;
         break;
-      case R_PROXY: g_settings.proxy = (g_settings.proxy + d + NET_PROXY_COUNT) % NET_PROXY_COUNT; break;
+      case R_PROXY:
+        if (kWeb) g_settings.proxy = g_settings.proxy == NET_PROXY_PROTOWEB ? NET_PROXY_PROTOWEB2 : NET_PROXY_PROTOWEB;
+        else g_settings.proxy = (g_settings.proxy + d + NET_PROXY_COUNT) % NET_PROXY_COUNT;
+        break;
       case R_SPEED: g_settings.proxySpeed = (g_settings.proxySpeed + d + kNumSpeeds) % kNumSpeeds; break;
       case R_CUSTOM: if (k == KEY_ENTER) editCustomProxy(); else changed = false; break;
       default: changed = false; break;   // Status, Traffic: any key shows them again

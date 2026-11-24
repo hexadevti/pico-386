@@ -132,7 +132,49 @@ const moduleCfg = {
   // main() mounted /sdcard (hal_web.cpp mountCard) and waits for this to call web_fs_ready
   webFsInit: (mod, opfs) => fsInit(mod, opfs),
   fsDone,                        // the file thread's answers (hal_web.cpp fsThread)
+  tunOpen, tunSend, tunShut, tunClose,   // the PC's network (hal_web.cpp hal_tun_*)
 };
+
+// ---- the PC's network: one WebSocket per guest TCP connection, to the worker's /api/tcp, which
+// connects only to Protoweb's proxies (worker/relay.js). Binary frames are the stream; the worker
+// says "open" once its socket is up, and our "shut" is the guest's FIN.
+const tuns = new Map();
+function tunOpen(id, host, port) {
+  const mod = fsMod;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // testing: web/serve.py has no worker, so localStorage 'pico386-tun' can name one (wrangler dev)
+  const base = localStorage.getItem('pico386-tun') || `${proto}//${location.host}`;
+  let ws;
+  try {
+    ws = new WebSocket(`${base}/api/tcp?host=${encodeURIComponent(host)}&port=${port}`);
+  } catch (e) { mod._web_tun_event(id, -1); return; }
+  ws.binaryType = 'arraybuffer';
+  tuns.set(id, ws);
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') { if (ev.data === 'open') mod._web_tun_event(id, 1); return; }
+    const d = new Uint8Array(ev.data);
+    if (!d.length) return;
+    const p = mod._malloc(d.length);
+    if (!p) return;
+    mod.HEAPU8.set(d, p);
+    mod._web_tun_data(id, p, d.length);
+    mod._free(p);
+  };
+  ws.onclose = () => { tuns.delete(id); mod._web_tun_event(id, -1); };
+}
+function tunSend(id, p, n) {
+  const mod = fsMod;
+  const ws = tuns.get(id);
+  if (ws && ws.readyState === 1) ws.send(mod.HEAPU8.slice(p, p + n));
+  mod._free(p);
+  mod._web_tun_sent(id, n);
+}
+function tunShut(id) { const ws = tuns.get(id); if (ws && ws.readyState === 1) ws.send('shut'); }
+function tunClose(id) {
+  const ws = tuns.get(id);
+  tuns.delete(id);
+  if (ws) { ws.onclose = null; ws.onmessage = null; try { ws.close(); } catch (e) {} }
+}
 
 async function fsInit(mod, opfs) {
   fsMod = mod;
@@ -801,6 +843,14 @@ buildKbd();
 layout();
 
 // ======================= mouse =======================
+// No text selection from a drag or a long press: a gesture on the screen, the trackpad or the keys must
+// not start one (phones do, despite user-select). Only fields and the receive code may be selected.
+const selectable = (n) => n && n.closest && n.closest('input, textarea, .recv-url, .recv-code');
+document.addEventListener('selectstart', (e) => {
+  if (!selectable(e.target.nodeType === 1 ? e.target : e.target.parentElement)) e.preventDefault();
+});
+function clearSelection() { const s = window.getSelection && window.getSelection(); if (s && s.rangeCount) s.removeAllRanges(); }
+
 // The canvas, and the trackpad 🖱 puts in the keyboard's place, are touchpads: a finger's moves are
 // sent relative (web_mouse), a quick tap is a left click and a two-finger tap a right click; the
 // Left/Right buttons below hold for drags, and a pinch on the screen zooms. With a real
@@ -831,9 +881,19 @@ function touchMove(dxCss, dyCss) {
 // mouseToo: a real mouse dragging on el acts as a finger (the trackpad; the screen locks instead).
 // zoomable: two fingers that spread, close or move together zoom and pan the PC's picture instead
 // (back to the whole picture below 1.03x); they move no pointer and click nothing.
+// The longest gap between a tap and the next touch for a double tap (and a tap-and-drag), in ms: Files >
+// More > Double tap. Too short and a double tap is hard to make; too long and two taps meant apart become one.
+const TAP_GAPS = [200, 250, 300, 350, 400, 450, 500];
+let tapGap = +(localStorage.getItem('pico386-tapgap') || 300);
+if (!TAP_GAPS.includes(tapGap)) tapGap = 300;
+function stepTapGap(d) {
+  tapGap = TAP_GAPS[Math.min(TAP_GAPS.length - 1, Math.max(0, TAP_GAPS.indexOf(tapGap) + d))];
+  try { localStorage.setItem('pico386-tapgap', String(tapGap)); } catch (_) {}
+}
 function bindTouchpad(el, mouseToo, zoomable) {
   const touches = new Map();          // pointerId -> { x, y, t, moved }
   let multi = false, lastTap = 0, drag = false;
+  const TAP_LEN = 300, STILL = 9;   // ms a tap may last, px a tap may slip (the gap between taps: tapGap)
   let pinch = null, gesture = false;  // two fingers down / they zoomed or panned since the first went down
   const twoOf = () => {
     const [p, q] = [...touches.values()], r = pcCanvas.getBoundingClientRect();
@@ -848,14 +908,15 @@ function bindTouchpad(el, mouseToo, zoomable) {
       return;                         // locked: the window's mouse events below take it
     }
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
-    touches.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0 });
+    clearSelection();
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0, hx: 0, hy: 0 });
     if (touches.size > 1) {
       multi = true;
       if (zoomable && touches.size === 2 && screenKind === 'pc') {
         const g = twoOf();
         pinch = { d0: g.d, mx0: g.mx, my0: g.my, s0: zoom, a: zu + g.mx / zoom, b: zv + g.my / zoom };
       }
-    } else if (performance.now() - lastTap < 300) { drag = true; setButtons(btnHeld | 1); }
+    } else if (performance.now() - lastTap < tapGap) { drag = true; setButtons(btnHeld | 1); }
     el.classList.add('touch');
   });
   el.addEventListener('pointermove', (e) => {
@@ -878,22 +939,26 @@ function bindTouchpad(el, mouseToo, zoomable) {
     }
     if (gesture) return;              // a finger left over from a pinch moves nothing
     // two fingers: only the first one steers
-    if (touches.keys().next().value === e.pointerId) touchMove(dx, dy);
+    if (touches.keys().next().value !== e.pointerId) return;
+    // A finger that has barely moved may still be a tap: its slip is held back, so the two clicks of
+    // a double tap land on the same spot (Windows wants them within 4 px), and sent once it moves on.
+    if (p.moved < STILL) { p.hx += dx; p.hy += dy; return; }
+    if (p.hx || p.hy) { dx += p.hx; dy += p.hy; p.hx = p.hy = 0; }
+    touchMove(dx, dy);
   });
   for (const ev of ['pointerup', 'pointercancel']) el.addEventListener(ev, (e) => {
     const p = touches.get(e.pointerId);
     if (!p) return;
     touches.delete(e.pointerId);
     pinch = null;
-    const tap = ev === 'pointerup' && performance.now() - p.t < 250 && p.moved < 10;
+    const tap = ev === 'pointerup' && performance.now() - p.t < TAP_LEN && p.moved < STILL;
     if (touches.size === 0) {
       el.classList.remove('touch');
       if (gesture) {                  // a pinch: no click
         gesture = false; lastTap = 0;
         if (drag) { drag = false; setButtons(btnHeld & ~1); }
-      } else if (drag) {                     // the end of a drag; a quick second tap is a double click
-        drag = false; setButtons(btnHeld & ~1);
-        if (tap) click(1);
+      } else if (drag) {                     // the end of a drag; a quick second tap was the double click's second
+        drag = false; setButtons(btnHeld & ~1);   // its press went at the touch, its release goes now
         lastTap = 0;
       } else if (tap) {
         click(multi ? 2 : 1);
@@ -1069,6 +1134,9 @@ async function renderFiles() {
     const stepLang = (d) => setLang(langs[(langs.indexOf(LANG) + d + langs.length) % langs.length]);
     w.append(fRow({ ico: '🌐', label: t('files.lang'), sub: I18N[LANG]._name,
       acts: [['◀', t('files.lang'), () => stepLang(-1)], ['▶', t('files.lang'), () => stepLang(1)]] }));
+    w.append(fRow({ ico: '👆', label: t('files.tapgap'), sub: t('files.tapgapSub', tapGap),
+      acts: [['◀', t('files.tapgap'), () => { stepTapGap(-1); renderFiles(); }],
+             ['▶', t('files.tapgap'), () => { stepTapGap(1); renderFiles(); }]] }));
     w.append(fRow({ ico: '🔄', label: t('files.reboot'), sub: t('files.rebootSub'),
       click: () => { if (confirm(t('confirm.reboot'))) M.webReboot(); } }));
     const hint = el('p', 'ui-note'); hint.innerHTML = t('files.hint'); w.append(hint);

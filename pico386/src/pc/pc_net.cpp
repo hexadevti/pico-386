@@ -17,6 +17,10 @@
 //
 // Everything here runs on the emulator's thread (pcnet_poll, from each pc_step), except the
 // resolver. The RP2350 has no radio and no room: it gets stubs.
+//
+// The browser (EMU_WEB) has no sockets. There only the proxy's connections go out, each through a
+// WebSocket tunnel (hal_tun_*) to the worker, which reaches only Protoweb's proxies; other TCP is
+// refused, UDP goes nowhere, and DNS answers only from the proxy's fake addresses.
 #include "pc_net.h"
 #include "../../board.h"
 #include <stdio.h>
@@ -81,7 +85,11 @@ static void netInit() {
 #include <sys/socket.h>
 typedef int sock_t;
 static const sock_t kNoSock = -1;
+#if defined(EMU_WEB)
+static void sclose(sock_t s) { hal_tun_close(s); }   // a tunnel's id, never a socket
+#else
 static void sclose(sock_t s) { close(s); }
+#endif
 static bool wouldBlock() { return errno == EWOULDBLOCK || errno == EAGAIN || errno == EINPROGRESS; }
 static void setNonblock(sock_t s) { fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK); }
 static void netInit() {}
@@ -208,6 +216,9 @@ void resolverMain() {
 }
 
 void resolverStart() {
+#if defined(EMU_WEB)
+  return;                                         // no getaddrinfo in a page
+#endif
   if (s_resolverUp) return;
   netInit();
 #if defined(BOARD_PICOCALC_P4)
@@ -226,6 +237,9 @@ void resolverStart() {
 int resolve(const std::string &name, uint32_t *ip) {
   struct in_addr a;
   if (inet_pton(AF_INET, name.c_str(), &a) == 1) { *ip = ntohl(a.s_addr); return 1; }
+#if defined(EMU_WEB)
+  return -1;
+#endif
   resolverStart();
   const uint32_t now = hal_millis();
   std::lock_guard<std::mutex> lk(s_rm);
@@ -539,6 +553,16 @@ Tcp *tcpFind(uint32_t gip, uint16_t gport, uint32_t rip, uint16_t rport) {
 void tcpOpen(Tcp &c) {
   const std::string *fake = fakeName(c.rip);
   c.hostName = fake ? *fake : dotted(c.rip);
+#if defined(EMU_WEB)
+  if (s_proxyHost.empty() || c.rport != 80) { tcpAbort(c); return; }
+  c.rw = new HttpRw();
+  c.s = hal_tun_open(s_proxyHost.c_str(), s_proxyPort);
+  if (c.s == kNoSock) { hal_log("net: no tunnel free"); tcpAbort(c); return; }
+  hal_log("net: tcp %s:80 -> %s:%d (tunnel)", c.hostName.c_str(), s_proxyHost.c_str(), s_proxyPort);
+  c.state = T_CONNECTING;
+  c.since = hal_millis();
+  return;
+#endif
   if (!s_proxyHost.empty() && c.rport == 80) {
     c.rw = new HttpRw();
     c.target = s_proxyHost;
@@ -656,6 +680,19 @@ void tcpService(Tcp &c, fd_set *rd, fd_set *wr, fd_set *ex, uint32_t now) {
     return;
   }
   if (c.state == T_CONNECTING) {
+#if defined(EMU_WEB)
+    const int st = hal_tun_state(c.s);
+    if (st < 0) { hal_log("net: tunnel to %s failed", s_proxyHost.c_str()); tcpAbort(c); return; }
+    if (st > 0) {
+      c.state = T_SYNACK;
+      c.rto = kRto0;
+      c.retries = 0;
+      tcpSynAck(c);
+    } else if (now - c.since > 20000) {
+      tcpAbort(c);
+    }
+    return;
+#endif
     if (FD_ISSET(c.s, wr) || FD_ISSET(c.s, ex)) {
       int err = 0;
       socklen_t l = sizeof err;
@@ -679,6 +716,34 @@ void tcpService(Tcp &c, fd_set *rd, fd_set *wr, fd_set *ex, uint32_t now) {
     return;
   }
   // T_EST
+#if defined(EMU_WEB)
+  if (!c.toHost.empty()) {
+    const int n = hal_tun_write(c.s, c.toHost.data(), (int)c.toHost.size());
+    if (n > 0) {
+      const bool wasSmall = c.smallWin;
+      c.toHost.erase(c.toHost.begin(), c.toHost.begin() + n);
+      if (wasSmall && tcpWindow(c) >= kMss) c.needAck = true;
+    } else if (n < 0 && !c.hostEof) {
+      c.hostEof = true;                           // closed before it took them: FIN the guest
+    }
+  }
+  if (c.guestFin && c.toHost.empty() && !c.shutWr) {
+    hal_tun_shut(c.s);
+    c.shutWr = true;
+  }
+  if (!c.hostEof && c.toGuest.size() < kToGuestCap) {
+    uint8_t buf[4096];
+    const int want = (int)std::min<size_t>(sizeof buf, kToGuestCap - c.toGuest.size());
+    const int n = hal_tun_read(c.s, buf, want);
+    if (n > 0) {
+      c.toGuest.insert(c.toGuest.end(), buf, buf + n);
+      s_rxBytes += n;
+      c.last = now;
+    } else if (n < 0) {
+      c.hostEof = true;
+    }
+  }
+#else
   if (!c.toHost.empty() && FD_ISSET(c.s, wr)) {
     const int n = send(c.s, (const char *)c.toHost.data(), (int)c.toHost.size(), MSG_NOSIGNAL);
     if (n > 0) {
@@ -708,6 +773,7 @@ void tcpService(Tcp &c, fd_set *rd, fd_set *wr, fd_set *ex, uint32_t now) {
       c.hostEof = true;                           // a reset: send what came, then FIN
     }
   }
+#endif
   // the retransmission and persist timer
   if (c.rtoAt && seqLe(c.rtoAt, now)) {
     if (c.snd_una != c.snd_max) {
@@ -835,6 +901,9 @@ void udpInput(uint32_t src, uint32_t dst, const uint8_t *u, int len) {
   if (dport == 67) { dhcpInput(d, n); return; }
   if (dst == kDnsIp && dport == 53) { dnsQuery(src, sport, d, n); return; }
   if (dst == 0xFFFFFFFF || inNet(dst)) return;    // NetBIOS and other broadcasts stay on the LAN
+#if defined(EMU_WEB)
+  return;                                         // the page can't send UDP
+#endif
   uint32_t real = dst;
   if (const std::string *name = fakeName(dst)) {
     if (resolve(*name, &real) <= 0) return;       // the guest asks again
@@ -939,6 +1008,7 @@ void service() {
     if ((int)s > maxfd) maxfd = (int)s;
     count++;
   };
+#if !defined(EMU_WEB)                             // a tunnel's id is no fd: polled in tcpService
   for (Tcp &c : s_tcp) {
     if (c.s == kNoSock) continue;
     if (c.state == T_CONNECTING) { add(c.s, &wr); add(c.s, &ex); }
@@ -948,6 +1018,7 @@ void service() {
     }
   }
   for (Udp &u : s_udp) if (u.used) add(u.s, &rd);
+#endif
   if (count) {
     struct timeval tv = { 0, 0 };
     if (select(maxfd + 1, &rd, &wr, &ex, &tv) < 0) { FD_ZERO(&rd); FD_ZERO(&wr); FD_ZERO(&ex); }

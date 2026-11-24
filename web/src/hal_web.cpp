@@ -16,6 +16,7 @@
 //     does on the desktop.
 //   * the PC's picture goes at its own resolution to a second buffer (hal_web_pc_frame), and the
 //     menus go out as JSON for the page to draw as touch screens (hal_web_ui_show; ui.cpp).
+//   * network: pc_net's TCP to Protoweb goes through WebSockets the page opens to the worker.
 //   * the SD card is /sdcard, an IndexedDB-backed folder the page mounts before main() starts and
 //     saves from time to time.
 #include "../../pico386/board.h"
@@ -40,6 +41,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include "../../pico386/src/hal/hal.h"
 #include "../../pico386/src/pc/pc_glue.h"
 
@@ -368,13 +371,116 @@ uint32_t hal_audio_queued_us() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// network: pc_net needs a host's sockets, which a page doesn't have
+// network: pc_net's TCP to Protoweb, through WebSockets the page holds (app.js tun*) to the
+// worker's /api/tcp. A tunnel's bytes from the far end are appended here by the page's thread
+// (web_tun_data) and read by the PC's; what the PC writes goes to the page as a malloc'd copy, and
+// at most kTunPending bytes of it may be on their way, so a stuck socket pushes back on the guest.
 // ------------------------------------------------------------------------------------------------
-bool hal_net_available() { return false; }
+bool hal_net_available() { return true; }
 void hal_net_begin(const char *, const char *) {}
 void hal_net_end() {}
-int  hal_net_state(char *info, size_t n) { if (n) snprintf(info, n, "not in the browser"); return HAL_NET_OFF; }
-int  hal_net_scan(char (*)[33], int) { return -1; }
+int  hal_net_state(char *info, size_t n) { if (n) snprintf(info, n, "Through the browser"); return HAL_NET_UP; }
+int  hal_net_scan(char (*)[33], int) { return 0; }
+
+namespace {
+constexpr int kTuns = 16;
+constexpr int kTunPending = 65536;
+struct Tun { int id = -1, state = 0, pending = 0; bool eof = false; std::vector<uint8_t> in; };
+std::mutex s_tm;
+Tun s_tun[kTuns];
+int s_tunNext = 1;
+Tun *tunOf(int id) {                       // under s_tm
+  Tun &t = s_tun[id % kTuns];
+  return t.id == id ? &t : nullptr;
+}
+}
+
+int hal_tun_open(const char *host, int port) {
+  int id = -1;
+  {
+    std::lock_guard<std::mutex> lk(s_tm);
+    for (int k = 0; k < kTuns && id < 0; k++) {
+      const int cand = s_tunNext + k;
+      Tun &t = s_tun[cand % kTuns];
+      if (t.id >= 0) continue;
+      t = Tun();
+      t.id = id = cand;
+      s_tunNext = cand + 1;
+    }
+  }
+  if (id < 0) return -1;
+  MAIN_THREAD_ASYNC_EM_ASM({ Module.tunOpen($0, UTF8ToString($1), $2); _free($1); }, id, strdup(host), port);
+  return id;
+}
+
+int hal_tun_state(int id) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  const Tun *t = tunOf(id);
+  return !t ? -1 : t->state;
+}
+
+int hal_tun_read(int id, uint8_t *buf, int max) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  Tun *t = tunOf(id);
+  if (!t) return -1;
+  const int n = (int)std::min<size_t>(t->in.size(), (size_t)max);
+  if (!n) return t->eof ? -1 : 0;
+  memcpy(buf, t->in.data(), n);
+  t->in.erase(t->in.begin(), t->in.begin() + n);
+  return n;
+}
+
+int hal_tun_write(int id, const uint8_t *d, int n) {
+  uint8_t *copy;
+  {
+    std::lock_guard<std::mutex> lk(s_tm);
+    Tun *t = tunOf(id);
+    if (!t || t->state < 0 || t->eof) return -1;
+    if (t->state == 0) return 0;
+    n = std::min(n, kTunPending - t->pending);
+    if (n <= 0) return 0;
+    copy = (uint8_t *)malloc(n);
+    if (!copy) return 0;
+    t->pending += n;
+  }
+  memcpy(copy, d, n);
+  MAIN_THREAD_ASYNC_EM_ASM({ Module.tunSend($0, $1, $2); }, id, copy, n);
+  return n;
+}
+
+void hal_tun_shut(int id) { MAIN_THREAD_ASYNC_EM_ASM({ Module.tunShut($0); }, id); }
+
+void hal_tun_close(int id) {
+  {
+    std::lock_guard<std::mutex> lk(s_tm);
+    Tun *t = tunOf(id);
+    if (!t) return;
+    *t = Tun();
+  }
+  MAIN_THREAD_ASYNC_EM_ASM({ Module.tunClose($0); }, id);
+}
+
+extern "C" {
+// From the page: ev 1 = open, -1 = closed or failed (what came stays readable).
+EMSCRIPTEN_KEEPALIVE void web_tun_event(int id, int ev) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  Tun *t = tunOf(id);
+  if (!t) return;
+  if (ev > 0) { if (t->state == 0) t->state = 1; }
+  else { t->eof = true; if (t->state == 0) t->state = -1; }
+}
+EMSCRIPTEN_KEEPALIVE void web_tun_data(int id, const uint8_t *d, int n) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  Tun *t = tunOf(id);
+  if (!t) return;
+  if (t->state == 0) t->state = 1;
+  t->in.insert(t->in.end(), d, d + n);
+}
+EMSCRIPTEN_KEEPALIVE void web_tun_sent(int id, int n) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  if (Tun *t = tunOf(id)) t->pending -= n;
+}
+}
 
 // ------------------------------------------------------------------------------------------------
 void hal_init() {

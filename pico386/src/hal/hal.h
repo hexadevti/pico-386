@@ -113,6 +113,18 @@ int  hal_net_state(char *info, size_t n);   // HAL_NET_*; info: the SSID, the IP
 int  hal_net_scan(char (*names)[33], int max);   // -1: the radio could not start
 
 #if defined(EMU_WEB)
+// The browser has no sockets: pc_net's TCP goes through WebSocket tunnels the page opens to the
+// worker's /api/tcp (web/worker/relay.js), which reaches only Protoweb's proxies. Ids are never
+// reused. Called from the PC's thread only.
+int  hal_tun_open(const char *host, int port);           // an id, or -1 when all are in use
+int  hal_tun_state(int id);                              // 0 opening, 1 open, -1 closed or failed
+int  hal_tun_read(int id, uint8_t *buf, int max);        // bytes; 0: none yet; -1: the far end closed
+int  hal_tun_write(int id, const uint8_t *d, int n);     // bytes taken (0: full); -1: closed
+void hal_tun_shut(int id);                               // no more to send (TCP FIN)
+void hal_tun_close(int id);
+#endif
+
+#if defined(EMU_WEB)
 // ---------------------------------------------------------------------------------------------
 // The browser build (web/src/hal_web.cpp): the page shows the PC at its own resolution, not
 // through the 320x320 panel, and draws the menus itself as touch screens.
