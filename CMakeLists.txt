@@ -71,6 +71,11 @@ else()
   target_link_libraries(pico386 PRIVATE ${SDL2_LIBRARIES})
 endif()
 
+# pc_net.cpp's sockets
+if(WIN32)
+  target_link_libraries(pico386 PRIVATE ws2_32)
+endif()
+
 # Copy the MinGW + SDL2 runtime DLLs next to the exe so it runs without msys64 on PATH.
 if(WIN32)
   get_filename_component(MINGW_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)

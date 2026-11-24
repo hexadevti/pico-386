@@ -91,6 +91,9 @@ int  t386_refresh(int full);
 // picture to f (line y of h, w pixels) instead. Set it before each refresh.
 typedef void T386LineFunc(void *opaque, int y, const uint16_t *line, int w, int h);
 void t386_set_line_sink(T386LineFunc *f, void *opaque);
+// LOWMEM: with on, only picture lines [y0, y1) reach the sink, and only their dots [x0, x1) are
+// decoded (the zoom); on 0 = the whole picture. Elsewhere it does nothing.
+void t386_set_line_window(int on, int x0, int x1, int y0, int y1);
 void t386_info(VGAPicoInfo *info);
 // Changes with every guest write to the VGA's memory or registers: the same value means the
 // picture has not changed since.

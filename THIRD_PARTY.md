@@ -31,7 +31,8 @@ them; they are not in this repo.
 The vendored copy is the upstream `src/` core. These were left out:
 
 - the platform front ends (`main.c`, `win32.c`, `esp/`, `wasm/`, `android/`)
-- `ne2000.c`, which needs a host network. `ne2000_stub.c` (new) gives `pc.c` an inert card.
+- `ne2000.c`, which needs a host network. `ne2000_stub.c` (new) gave `pc.c` an inert card. It was
+  brought back on 2026-11-18 for the network (below); the stub stays for the RP2350.
 - `adlib_nuked_opl3.h`, the alternative OPL3 that is not used (`USE_NUKED_OPL3` stays unset).
 - the Makefile
 
@@ -75,6 +76,10 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
 - **`ide.c`:** a CD drive given an empty path starts empty instead of `exit(1)`, and
   `block_device_reinit` with an empty path ejects the disc. This gives every machine a CD drive
   that can be filled later.
+  TEST UNIT READY on an empty drive answers NOT READY / MEDIUM NOT PRESENT (2026-11-18).
+  Upstream answered ready, so Windows 95's media poll (every ~4 s) saw a disc that READ TOC then
+  denied, and retried about 30 times each poll (some 300 commands), with the hourglass showing.
+  Now each poll is 4 commands, and a disc in the drive is still found (the CD's autorun opens).
   A hard disk whose path is a folder becomes a block device over `pc_folder.cpp` (a FAT16 disk
   built from that folder; see the D: drive in the README).
 - **`pc.c`:** the IDE attach loop skips an empty path only for hard disks, so an empty CD drive
@@ -243,6 +248,18 @@ Changes, all made on 2026-10-18 and all marked `pico-386` or `TINY386_PICO` in t
   guest clearing it must flush (INVLPG, CR3), which empties this TLB as well. Windows 95 behaved
   the same on the desktop with and without it. On the P4 `translate` went from 12.4% of core 1 to
   11.3%; MIPS did not move measurably.
+- **The network card (2026-11-18, P4 and desktop).** `ne2000.c` is upstream's again (MIT, from
+  QEMU), with its host backends (tuntap, libslirp, the ESP32 Wi-Fi bridge, wasm) taken out:
+  - `qemu_send_packet` hands the guest's frame to `pcnet_guest_frame` (pc_net.cpp, ours: a NAT with
+    DHCP, DNS, ARP, ICMP echo to the gateway, TCP and UDP over the host's sockets, and an
+    optional HTTP proxy rewrite for Protoweb).
+  - `ne2000_step` calls `pcnet_poll`, which feeds queued frames to `ne2000_receive` while
+    `can_receive_cb` (not stopped, ring not full) allows. `ne2000_can_receive` and
+    `ne2000_receive` are exported in `ne2000.h` for that.
+  - `isa_ne2000_init` returns NULL unless `pcnet_enabled()` (Settings > Network > Network card),
+    and the I/O and step functions take a NULL card as an empty slot, as the stub did. The MAC
+    comes from `pcnet_guest_mac`.
+  - Under `PICO386_LOWMEM` the whole file is compiled out and `ne2000_stub.c` is used instead.
 
 ### The low-memory build (2026-10-27, for the RP2350)
 
@@ -303,6 +320,11 @@ not memory-mapped, and is paged through 1 KB SRAM frames (`pc_pagemem.c`, ours).
     (PSRAM, one cached 256-byte line) in the latched and odd/even paths. Upstream dropped those
     writes and read 0xff, which garbled Windows 3.0: its VGA driver keeps bitmaps above 40 KB
     per plane. The screen still shows only the first 160 KB. (2026-11-13)
+  - `vga_set_line_window()` (new, 2026-11-18): a window of lines and columns for the zoom
+    (Ctrl+Caps Lock, 1:1 crop that follows the mouse). Lines outside it skip the decode and the
+    sink; the 16-colour fast path decodes only from the window's first column (rounded down
+    to 8) to its last, and the slow loop only the window's columns. Off by default, so nothing
+    changes without the zoom.
   - `vga_pico_hi_idle()` (new): true in chain-4 mode 13h with map mode 1, no bank and no VBE,
     where the VGA reaches only VRAM's first 64 KB. `t386_run_until` then lends the other 96 KB
     to the pager after 1 s (`pm_vram_lend`), which doubles its frames to 192. FastDoom on the

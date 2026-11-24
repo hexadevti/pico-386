@@ -28,6 +28,17 @@
 // accelerating while held) and Both (the arrows do both, for games that use the keyboard and the
 // mouse). In Mouse and Both, the two button keys (Alt and Right Shift unless the startup picks
 // others) are the mouse buttons and nothing else.
+//
+// Ctrl+Caps Lock toggles the zoom (pc_video.cpp shows a big picture 1:1 around the pointer). The
+// emulator only sends the guest relative moves, so where the pointer is gets estimated here by
+// adding up what was sent, clamped to the picture; it recentres when the picture's size changes
+// (Windows and INT 33h put the pointer in the middle). The pointer keeps its usual speed (a 2 px
+// cap was too slow for the user, 2026-11-18), but zoomed it goes as more packets of 2 px at most
+// (pckbd_mouse_poll, during the frame), below Windows 3.x's acceleration threshold, so the
+// estimate stays exact there; a
+// driver that scales moves (CTMOUSE: 2 mickeys a pixel down the screen) drifts until the pointer
+// meets an edge.
+// Zoomed with the arrows as keys, they move the pointer anyway (the saved mode is left alone).
 #include <string.h>
 #include <algorithm>
 #include "pc_internal.h"
@@ -128,6 +139,11 @@ bool s_needRepeatTime;
 uint8_t s_shiftKey;                 // the key that is a Shift for the arrows (lower case; 0 = none)
 
 int s_mouseMode;                    // MOUSE_*
+bool s_ctrlHeld;                    // Ctrl physically held (also when it is a button key)
+bool s_zoom;                        // Ctrl+Caps Lock: the 1:1 zoom (pc_video.cpp)
+int s_zoomCount;                    // bumped by every toggle
+int s_ptrX, s_ptrY, s_ptrW, s_ptrH; // the guest pointer as estimated, in a picture of W x H
+uint32_t s_ptrMoves;                // bumped by every move sent
 uint8_t s_button[2] = { KEY_ALT, KEY_SHIFT_R };   // the left and right button keys (0 = none)
 bool s_buttonDown[2];
 bool s_arrow[4];                    // the pointer's arrows held: left, right, up, down
@@ -135,6 +151,7 @@ bool s_arrowShifted[4];             // ...pressed as their Shift form (PgUp etc.
 int s_mouseButtons;
 uint32_t s_mouseHeldSince;
 uint32_t s_mouseSentAt;             // t386_instructions() at the last packet
+int s_oweX, s_oweY;                    // zoomed: movement still to send (pckbd_mouse_poll)
 uint32_t s_mouseInstr = 8500;       // guest instructions between packets (see pckbd_tick)
 #if PICO386_LOWMEM
 int s_mouseStep = 4;                // the most a packet moves, so a slow guest's pointer glides
@@ -225,6 +242,16 @@ int shiftedArrowOf(uint8_t code) {
   return -1;
 }
 
+// The mode the keys act in: zoomed, the arrows move the pointer even in Arrows.
+int mouseMode() { return s_zoom && s_mouseMode == MOUSE_ARROWS ? MOUSE_ON : s_mouseMode; }
+
+void trackPointer(int dx, int dy) {
+  if (dx || dy) s_ptrMoves++;
+  if (s_ptrW <= 0 || s_ptrH <= 0) return;
+  s_ptrX = std::max(0, std::min(s_ptrW - 1, s_ptrX + dx));
+  s_ptrY = std::max(0, std::min(s_ptrH - 1, s_ptrY + dy));
+}
+
 void mouseButtons() {
   const int b = (s_buttonDown[0] ? 1 : 0) | (s_buttonDown[1] ? 2 : 0);
   if (b != s_mouseButtons) {
@@ -266,6 +293,29 @@ void pckbd_set_mouse_mode(int mode) {
 }
 
 int pckbd_mouse_mode() { return s_mouseMode; }
+
+bool pckbd_zoom() { return s_zoom; }
+int pckbd_zoom_count() { return s_zoomCount; }
+
+void pckbd_pointer(int w, int h, int *x, int *y) {
+  if (w != s_ptrW || h != s_ptrH) {            // a new picture: the guest's pointer is in the middle
+    s_ptrW = w;
+    s_ptrH = h;
+    s_ptrX = w / 2;
+    s_ptrY = h / 2;
+  }
+  *x = s_ptrX;
+  *y = s_ptrY;
+}
+
+uint32_t pckbd_pointer_moves() { return s_ptrMoves; }
+
+void pckbd_pointer_seen(int w, int h, int x, int y) {
+  s_ptrW = w;
+  s_ptrH = h;
+  s_ptrX = std::max(0, std::min(w - 1, x));
+  s_ptrY = std::max(0, std::min(h - 1, y));
+}
 
 const char *pckbd_mouse_mode_name(int mode) {
   return mode == MOUSE_ON ? "Mouse" : mode == MOUSE_BOTH ? "Both" : "Arrows";
@@ -363,13 +413,25 @@ void pckbd_event(uint8_t code, uint8_t state) {
   // through as itself (or as a button press); the reset lets go of it.
   if (code == KEY_SHIFT_L) s_shiftL = down;
   if (code == KEY_SHIFT_R) s_shiftR = down;
+  if (code == KEY_CTRL) s_ctrlHeld = down;
   if (down && ((code == KEY_SHIFT_L && s_shiftR) || (code == KEY_SHIFT_R && s_shiftL) ||
                (code == KEY_TAB && s_down[KEY_CTRL]))) {
     pckbd_set_mouse_mode((s_mouseMode + 1) % 3);
     return;
   }
+  // Ctrl+Caps Lock: the zoom. Ctrl has reached the guest already; the reset lets go of it.
+  if (code == KEY_CAPS && s_ctrlHeld) {
+    if (down) {
+      pckbd_reset();
+      s_zoom = !s_zoom;
+      s_zoomCount++;
+      hal_log("kbd: zoom %s", s_zoom ? "on" : "off");
+    }
+    return;
+  }
 
-  if (s_mouseMode != MOUSE_ARROWS) {
+  const int mode = mouseMode();
+  if (mode != MOUSE_ARROWS) {
     const int b = buttonOf(code);
     if (b >= 0) {
       s_buttonDown[b] = down;
@@ -381,7 +443,7 @@ void pckbd_event(uint8_t code, uint8_t state) {
     const int sa = shiftedArrowOf(code);
     if (sa >= 0) {
       const bool shiftButton = (s_shiftL && buttonOf(KEY_SHIFT_L) >= 0) || (s_shiftR && buttonOf(KEY_SHIFT_R) >= 0);
-      const bool shifted = s_mouseMode == MOUSE_ON ? (s_shiftL || s_shiftR) : shiftButton;
+      const bool shifted = mode == MOUSE_ON ? (s_shiftL || s_shiftR) : shiftButton;
       if (down ? shifted : (shifted || s_arrowShifted[sa])) {
         if (down && !s_arrow[0] && !s_arrow[1] && !s_arrow[2] && !s_arrow[3]) s_mouseHeldSince = hal_millis();
         s_arrow[sa] = down;
@@ -394,7 +456,7 @@ void pckbd_event(uint8_t code, uint8_t state) {
       s_arrowShifted[a] = false;
       if (down && !s_arrow[0] && !s_arrow[1] && !s_arrow[2] && !s_arrow[3]) s_mouseHeldSince = hal_millis();
       s_arrow[a] = down;
-      if (s_mouseMode == MOUSE_ON) return;     // Both: the arrow key too
+      if (mode == MOUSE_ON) return;            // Both: the arrow key too
     }
   }
 
@@ -471,7 +533,7 @@ void pckbd_tick(uint32_t nowMs) {
     }
   }
 
-  if (s_mouseMode != MOUSE_ARROWS) {
+  if (mouseMode() != MOUSE_ARROWS) {
     const int dx = (s_arrow[1] ? 1 : 0) - (s_arrow[0] ? 1 : 0);
     const int dy = (s_arrow[3] ? 1 : 0) - (s_arrow[2] ? 1 : 0);
     if (dx || dy) {
@@ -486,11 +548,44 @@ void pckbd_tick(uint32_t nowMs) {
       // while it waits: big steps made the pointer jump (Windows accelerates them up to 4x), so a
       // slow guest gets a slower pointer that still glides. On the device 8.5k instructions gave
       // about 20 packets a second with no drift after release; 7.5k drifted 50 px, 5k 80 px.
-      const uint32_t ins = t386_instructions();
-      if (!t386_mouse_busy() && ins - s_mouseSentAt >= s_mouseInstr) {
-        t386_mouse(dx * speed, dy * speed, s_mouseButtons);
-        s_mouseSentAt = ins;
+      if (s_zoom) {
+        // Zoomed, this frame's step is owed and pckbd_mouse_poll sends it in packets of 2 px at
+        // most during the frame: Windows 3.x accelerates a packet over 2 px, which put the guest's
+        // pointer ahead of the estimate (back from an edge, the window moved before the pointer
+        // was in its middle). Queuing those packets all at once lost the pointer on the device
+        // (2026-11-18), so they still go one at a time. Capped, so nothing piles up to drift on.
+        s_oweX = std::max(-2 * speed, std::min(2 * speed, s_oweX + dx * speed));
+        s_oweY = std::max(-2 * speed, std::min(2 * speed, s_oweY + dy * speed));
+      } else {
+        const uint32_t ins = t386_instructions();
+        if (!t386_mouse_busy() && ins - s_mouseSentAt >= s_mouseInstr) {
+          t386_mouse(dx * speed, dy * speed, s_mouseButtons);
+          trackPointer(dx * speed, dy * speed);
+          s_mouseSentAt = ins;
+        }
       }
+    } else {
+      s_oweX = s_oweY = 0;                     // let go: stop at once
     }
+  } else {
+    s_oweX = s_oweY = 0;
   }
+}
+
+void pckbd_mouse_poll() {
+  if (!s_oweX && !s_oweY) return;
+  if (!s_zoom) {
+    s_oweX = s_oweY = 0;
+    return;
+  }
+  const uint32_t ins = t386_instructions();
+  // Half the usual gap: the packets are a quarter of the size, and the speed should not drop
+  // (the P4 at 1.5 MIPS: about 350 packets a second, 700 px/s, against 480 unzoomed).
+  if (t386_mouse_busy() || ins - s_mouseSentAt < s_mouseInstr / 2) return;
+  const int mx = std::max(-2, std::min(2, s_oweX)), my = std::max(-2, std::min(2, s_oweY));
+  t386_mouse(mx, my, s_mouseButtons);
+  trackPointer(mx, my);
+  s_oweX -= mx;
+  s_oweY -= my;
+  s_mouseSentAt = ins;
 }

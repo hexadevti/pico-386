@@ -14,6 +14,7 @@
 #include "ui.h"
 #include "browser.h"
 #include "settings.h"
+#include "netmenu.h"
 #include "../hal/hal.h"
 #include "../pc/pc_internal.h"
 #include "../pc/pc_glue.h"
@@ -113,16 +114,20 @@ static void settingsMenu(const EmuCore &core) {
   scr.subtitle = "Saved to /pico-386/pico386.cfg";
   scr.hints = "<>|Change;Esc|Back";
   for (;;) {
-    ui::Item items[5];
-    int rowOf[5];
+    ui::Item items[6];
+    int rowOf[6];
     int n = settingItems(core, items, rowOf);
     // BIOS folder: home menu only, it takes effect at the next power-on
     const std::string biosShown = "/" + g_settings.biosDir;
     const int biosRow = n;
     items[n++] = { "BIOS folder", biosShown.c_str(), ui::ICON_FOLDER, nullptr, -1, false };
+    const int netRow = hal_net_available() ? n : -1;   // the RP2350 has no radio
+    if (netRow >= 0)
+      items[n++] = { "Network", !g_settings.netOn ? "Off" : netBlocked() ? "No RAM" : "On", ui::ICON_CHART };
     const uint8_t k = ui::list(scr, items, n, &sel);
     if (k == KEY_ESC || k == KEY_BACKSPACE) break;
     if (sel == biosRow) { if (k == KEY_ENTER) chooseBiosDir(core); continue; }
+    if (sel == netRow) { if (k == KEY_ENTER) netMenu(); continue; }
     adjustSetting(rowOf[sel], k == KEY_ENTER ? KEY_RIGHT : k);
   }
   settingsSave();
@@ -354,6 +359,7 @@ void app_setup() {
   hal_panel_fill(0, 0, PANEL_W, PANEL_H, 0);
   if (hal_sd_mounted()) settingsLoad();
   hal_audio_volume(g_settings.volume);
+  netApply();                           // Wi-Fi first, while internal RAM is free
 }
 
 void app_loop() {

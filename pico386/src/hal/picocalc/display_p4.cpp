@@ -16,6 +16,8 @@
 #include <Arduino.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>
+#include <esp_cache.h>
+#include <esp_heap_caps.h>
 #include "hal/usb_serial_jtag_ll.h"
 #include <string.h>
 #include "../hal.h"
@@ -34,6 +36,7 @@ static spi_transaction_t s_trn[P4_NBUF];
 static uint8_t s_next = 0;               // next slot (the oldest in-flight one when all are busy)
 static uint8_t s_inflight = 0;
 static SemaphoreHandle_t s_lock = nullptr;   // the SPI device: video task vs. UI pushes
+static bool s_bncPsram = false;          // the bounce buffers moved to PSRAM (p4DisplayFreeInternal)
 
 static inline void dcCmd()  { gpio_set_level((gpio_num_t)LCD_DC_PIN, 0); }
 static inline void dcData() { gpio_set_level((gpio_num_t)LCD_DC_PIN, 1); }
@@ -53,6 +56,10 @@ static void slotQueue(uint8_t i, const void *buf, uint32_t px) {
   memset(&t, 0, sizeof(t));
   t.length = px * 16;
   t.tx_buffer = buf;
+  if (s_bncPsram) {                      // write the CPU's lines out of the cache for the DMA
+    t.flags = SPI_TRANS_DMA_USE_PSRAM;
+    esp_cache_msync((void *)buf, (px * 2 + 63) & ~63u, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+  }
   if (spi_device_queue_trans(s_dev, &t, portMAX_DELAY) != ESP_OK) return;
   s_inflight++;
   s_next = (uint8_t)((i + 1) % P4_NBUF);
@@ -105,6 +112,10 @@ static void wrBytes(const uint8_t *d, size_t n) {
     uint8_t *b = (uint8_t *)s_bnc[s_next];   // idle: wrBytes only runs after txWait()
     memcpy(b, d, n);
     t.tx_buffer = b;
+    if (s_bncPsram) {
+      t.flags = SPI_TRANS_DMA_USE_PSRAM;
+      esp_cache_msync(b, (n + 63) & ~(size_t)63, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    }
   }
   spi_device_polling_transmit(s_dev, &t);
 }
@@ -381,6 +392,35 @@ void p4Shot() {
   }
   Serial.println("@shot end");
   hal_free(pic);
+}
+
+// The bounce buffers take 64 KB of internal DMA RAM, which ESP-Hosted's buffers for the Wi-Fi
+// (about 90 KB in two blocks, net_p4.cpp) need too. So the Wi-Fi asks for them: they move to
+// PSRAM, which the P4's DMA reads after a cache write-back. Nothing waits on the panel there
+// (80 MHz SPI is 10 MB/s), but core 0's copies then go through the PSRAM too, so only then.
+bool p4DisplayFreeInternal() {
+  if (s_bncPsram) return true;
+  uint16_t *nb[P4_NBUF + 1];
+  for (int i = 0; i <= P4_NBUF; i++) {
+    nb[i] = (uint16_t *)heap_caps_aligned_alloc(64, P4_BOUNCE_PX * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!nb[i]) {
+      while (i--) heap_caps_free(nb[i]);
+      return false;
+    }
+  }
+  xSemaphoreTake(s_lock, portMAX_DELAY);
+  txWait();
+  for (int i = 0; i < P4_NBUF; i++) {
+    heap_caps_free(s_bnc[i]);
+    s_bnc[i] = nb[i];
+  }
+  heap_caps_free(s_solidBuf);
+  s_solidBuf = nb[P4_NBUF];
+  s_solidLen = 0;                        // refill the solid color in the new buffer
+  s_bncPsram = true;
+  xSemaphoreGive(s_lock);
+  hal_log("LCD: bounce buffers moved to PSRAM");
+  return true;
 }
 
 void p4DisplayInit() {

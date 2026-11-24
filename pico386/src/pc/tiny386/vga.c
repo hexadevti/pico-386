@@ -159,6 +159,9 @@ struct VGAState {
     VGAPicoLineFunc *pico_sink; /* T386_PAGED: where finished lines go */
     void *pico_sink_opaque;
     int pico_dy0, pico_dy1; /* picture lines [dy0, dy1) the last graphics refresh drew */
+    /* T386_PAGED: only lines [wy0, wy1) go to the sink, and only dots [wx0, wx1) of them need
+       be right (the zoom, pc_video.cpp); pico_win 0 = the whole picture */
+    int pico_win, pico_wx0, pico_wx1, pico_wy0, pico_wy1;
 #ifndef T386_PAGED
     /* pico-386: which planar words the guest wrote since the last refresh, one flag per 64
        words of the 64 KB window; see vga_graphic_refresh() */
@@ -1220,6 +1223,23 @@ static void vga_graphic_refresh(VGAState *s,
         int pico_y = y / pico_ydiv;
         int pico_w = (y % pico_ydiv) ? 0 : w; /* the repeat of a doubled scanline */
         int pico_x0 = 0;
+        int pico_xe = pico_w; /* the dots decoded: [pico_x0, pico_xe) */
+        int pico_fx0 = 0; /* the fast path's first dot (a multiple of 8) */
+#ifdef T386_PAGED
+        if (s->pico_win && pico_w) {
+            if (pico_y < s->pico_wy0 || pico_y >= s->pico_wy1) {
+                pico_w = pico_xe = 0;
+            } else {
+                int a = s->pico_wx0 < 0 ? 0 : s->pico_wx0;
+                int b = s->pico_wx1 > pico_w ? pico_w : s->pico_wx1;
+                if (b > a) {
+                    pico_x0 = a;
+                    pico_xe = b;
+                    pico_fx0 = a & ~7;
+                }
+            }
+        }
+#endif
 #ifndef T386_PAGED
         if (pico_part && pico_w) {
             uint32_t a = addr >> (2 + PICO_DIRTY_SHIFT);
@@ -1236,14 +1256,21 @@ static void vga_graphic_refresh(VGAState *s,
             }
         }
 #endif
+        if (!pico_w)
+            pico_xe = 0; /* not drawn at all (the dirty lines, the window) */
         if (pico_fast && pico_w) {
 #ifdef T386_PAGED
-            uint16_t *d = (uint16_t *)fb_dev->fb_data;
+            uint16_t *d = (uint16_t *)fb_dev->fb_data + pico_fx0;
+            const uint8_t *p = vram + addr + (pico_fx0 >> 1);
+            int fe = (pico_xe + 7) & ~7;
+            if (fe > (pico_w & ~7))
+                fe = pico_w & ~7;
+            for (int n = (fe - pico_fx0) >> 3; n > 0; n--, p += 4, d += 8) {
 #else
             uint16_t *d = (uint16_t *)fb_dev->fb_data + pico_y * fb_dev->width;
-#endif
             const uint8_t *p = vram + addr;
             for (int n = pico_w >> 3; n > 0; n--, p += 4, d += 8) {
+#endif
                 uint32_t v = pico_spread[p[0]] | pico_spread[p[1]] << 1 |
                              pico_spread[p[2]] << 2 | pico_spread[p[3]] << 3;
                 d[0] = pico_pal[v >> 28];
@@ -1256,8 +1283,9 @@ static void vga_graphic_refresh(VGAState *s,
                 d[7] = pico_pal[v & 15];
             }
             pico_x0 = pico_w & ~7;
+            if (pico_x0 < pico_fx0) pico_x0 = pico_fx0;   /* PAGED window: the tail only if shown */
         }
-        for (int x = pico_x0; x < pico_w; x++) {
+        for (int x = pico_x0; x < pico_xe; x++) {
 #else
         for (int x = 0; x < w; x++) {
 #endif
@@ -2476,6 +2504,15 @@ void vga_set_line_sink(VGAState *s, VGAPicoLineFunc *f, void *opaque)
 {
     s->pico_sink = f;
     s->pico_sink_opaque = opaque;
+}
+
+void vga_set_line_window(VGAState *s, int on, int x0, int x1, int y0, int y1)
+{
+    s->pico_win = on;
+    s->pico_wx0 = x0;
+    s->pico_wx1 = x1;
+    s->pico_wy0 = y0;
+    s->pico_wy1 = y1;
 }
 
 /* pico-386: in chain-4 mode with the A0000-AFFFF window and no VBE bank, the CPU reaches only

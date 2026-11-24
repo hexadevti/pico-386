@@ -406,6 +406,101 @@ started from on 2026-10-18, and **emu16** and **emu8**.
     and rerun it; never edit the header.
   - Settings > Font size (`fontsize` in pico386.cfg, also in the in-game menu) picks 4x12 (fills
     300 lines) or 4x8 (200 lines, centred). It caps the cell height in `renderText`.
+- **Zoom 1:1 (2026-11-18, branch `zoom-1to1`, the user asked):** Ctrl+Caps Lock (`pckbd_zoom`,
+  `pckbd_zoom_count`; `pc_core` shows a note) shows a graphics picture over 320x310 at 1:1 in
+  a 320x310 window (`kZoomH`) centred on the pointer and stopped at the picture's edges (a window
+  that went on past them, black there, was rejected by the user). The pointer's place is
+  estimated by summing the deltas sent (`pckbd_pointer`, clamped to the picture, recentred when
+  its size changes). While zoomed, ARROWS acts as MOUSE_ON at the usual speed (a 2 px cap was too
+  slow), but each frame's step is owed (`s_oweX/Y`) and `pckbd_mouse_poll` (from `audioHook`,
+  during the frame) sends it as 2 px packets, one at a time (queue empty, `s_mouseInstr / 2`
+  since the last): bigger packets were accelerated by Windows 3.x and the estimate fell behind.
+  Queuing the 2 px packets all at once lost the pointer on the device. On the desktop at
+  `PC_MIPS=1.5` the estimate matches the real pointer, also after an edge.
+  Windows 95 accelerates the pointer itself (short moves about 0.45x, long ones about 1.5x at
+  1.5 MIPS), so the estimate drifted and the pointer left the window on the P4 (2026-11-19). Now,
+  P4/desktop only, `syncPointer` (pc_video.cpp) looks for the standard arrow (black outline, white
+  fill, `isArrow`) in the last picture within 64 px of the estimate (the whole picture at most
+  twice a second) while the pointer moves, and `pckbd_pointer_seen` restarts the estimate there.
+  The window centres on the arrow found (`s_seenX/Y`), not on the estimate: the estimate runs up
+  to 24 px ahead of what the guest has drawn (moves not taken yet), and centring on it made the
+  window jump ahead and back every frame on the P4. Other shapes, or an arrow cut by the picture's
+  edge, are not found, and the estimate goes on alone. Desktop Win95 at `PC_MIPS=1.5`: the
+  pointer stays in the window through long and short moves and at every edge; on the P4 (2026-11-19)
+  the arrow is found in nearly every frame while it moves, and shots after each move show it centred. Held 3 s, straight and diagonal, the step guess found
+  it in nearly every frame; only an arrow cut by the bottom edge is missed.
+  `pc_video`'s `Geo` holds the layout; P4/desktop copy rows (`renderZoom`, dirty rows map by
+  `y - vy`), LOWMEM passes the window to `vga.c`
+  (`t386_set_line_window`, THIRD_PARTY.md) so it decodes only that. Tested on the desktop and
+  `build-lowmem` with Windows 3.1. On the P4 (2026-11-18) Ctrl+Caps arrives and MIPS look the
+  same with it on.
+- **Network (2026-11-18, the user asked; P4 and desktop, not the RP2350):** Settings > Network
+  (`netmenu.cpp`) turns on an NE2000 at 300h, IRQ 9 (`ne2000.c`, THIRD_PARTY.md) for machines
+  started after. `pc_net.cpp` is a slirp-like NAT: the guest is 10.0.2.15 by DHCP, gateway 10.0.2.2,
+  DNS 10.0.2.3. TCP ends in pc_net, one host socket per connection (SYN-ACK only once the host's
+  connect succeeds); UDP goes out per guest port; DNS runs on a resolver thread. The web proxy
+  (Protoweb by default, its line-speed ports, Protoweb 2, or a custom host:port) takes the guest's
+  port 80, rewrites requests to absolute URIs, and answers DNS with fake IPs (10.99.x.x) so names
+  reach the proxy unresolved. On the P4 the Wi-Fi is Arduino's WiFi.h (`net_p4.cpp`), started in
+  `app_setup` (`netApply`) while internal RAM is free; with no network chosen it joins the loader's
+  (`/picomultiloader.cfg`, see below). Settings: `net`, `wifi_ssid`, `wifi_pass`, `proxy`,
+  `proxy_speed`, `proxy_custom` in pico386.cfg.
+  - Desktop test: `nett.ini` (C: = DOSHDD.img, D: = the local folder `nettest/` with mTCP and the
+    Crynwr NE2000 packet driver). `NET.BAT` loads `NE2000 0x60 9 0x300`, runs DHCP and pings the
+    gateway; `W url file` is `HTGET -o`. With proxy off, example.com and an 87 KB www.google.com
+    came through intact. Run the exe with the sandbox off, or nothing gets out.
+  - Protoweb answers with bare LF line ends, which htget can't parse ("Timeout reading from
+    socket") although every byte arrives; test it with a real browser instead.
+  - **P4 Wi-Fi (2026-11-18):**
+    - Opening Settings > Network > Wi-Fi rebooted the device. ESP-Hosted 2.12.8's SDIO transport
+      wants 40 KB and 47 KB of DMA RAM and asserts without them (`transport_drv_common_mempool_create`,
+      `sdio_drv.c:255`). On the menu only about 47 KB of internal RAM is free, in pieces of 8 KB at
+      most: the boot took 149 KB to 49 KB, 70 of it the panel's 4 x 16 KB SPI bounce buffers.
+    - Now `radioOn` (net_p4.cpp) first moves the panel's bounce buffers to PSRAM
+      (`p4DisplayFreeInternal`: `SPI_TRANS_DMA_USE_PSRAM` plus an `esp_cache_msync` per send). It
+      also points `g_hosted_osi_funcs._h_malloc_align` at a PSRAM-first allocator: the newer
+      esp-hosted has `CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM` for this. It refuses (no assert)
+      under 72 KB free.
+      - **Block (2026-11-19, the user asked):** a refusal sets `HAL_NET_NO_RAM` (`hal_net_state`
+        says "no RAM: N KB free, 72 needed" until `hal_net_end`). `netApply` then returns false and
+        gives pc_net `on = false`, so machines get no NE2000. Turning the card on in the Network
+        menu shows the reason and leaves it Off; with `net=1` at boot, Settings and the card row
+        read "No RAM". Desktop test: `PC_NET_NORAM=1` fakes the refusal.
+      - Either change alone still asserted, or looped on `sdmmc_allocate_aligned_buf`.
+      - The radio still takes about 56 KB of internal RAM (106 to 49 KB).
+    - With 49 KB left, `hal_alloc_fast` (48 KB reserve) puts the PC's tables in PSRAM while the
+      network card is on. Measured on the device (2026-11-19), Win95 opening My Computer, Control
+      Panel and Multimedia three times (each round starts with a Mouse-mode click on the empty
+      desktop, since nothing has focus after a boot): card off, rebooted, 1.60 MIPS and 243.5c
+      (medians of 50 busy seconds); card on, 1.60 MIPS and 246c. No cost worth counting.
+    - The loader's network is PicoMultiLoader's: `/picomultiloader.cfg` on the card (`wifi_ssid=`,
+      `wifi_pass=`). The NVS is empty; esp32loader's NVS "loader" is only the fallback.
+    - Scan, join and joining at boot work on the device (192.168.0.100). MS-DOS 5.0 boots with it on.
+    - One cold join in two sat with no event at all. `hal_net_state` begins again after 15 s,
+      but only the Network menu calls it (`Screen::refreshMs` = 1 s redraws Status and Traffic).
+    - "Response not received for Req_GetCoprocessorFwVersion": the C6 has old firmware; harmless.
+    - Windows 95 browses through Protoweb on the device (2026-11-18, the user tested it).
+    - **Opening a website reset the device (2026-11-19):** `H_SDIO_DRV: sdio_write_task: Failed to
+      send data: 258`, then `Unrecoverable host sdio state` and `SW_CPU_RESET`. The SDMMC driver
+      (IDF 5.5) refuses a block-mode buffer whose address or size is not cache-line aligned (128
+      in PSRAM, 64 internal); byte mode (under 512) bounces by itself. ESP-Hosted's TX frames are
+      not aligned that way. `net_p4.cpp` now hooks `_h_sdio_write_block` and copies a misaligned
+      write of 512 or more into an aligned bounce buffer (and retries a refused one through it,
+      logging `wifi: SDIO write ... refused`). Win95's IE then loaded home.microsoft.com with its
+      pictures over about 20 connections, with no error.
+      - **Trap:** `g_hosted_osi_funcs`' layout depends on `H_USE_MEMPOOL` and `H_TRANSPORT_IN_USE`,
+        set only in `port/esp/freertos/include/port_esp_hosted_host_config.h`. Without that
+        include first, the table is 3 slots off, and the "write" hook landed on `_h_sdio_read_reg`
+        (it broke the init). `hookHosted` checks that the slot holds `hosted_sdio_write_block`
+        before hooking.
+  - **Windows 95 online (2026-11-18, desktop, then the P4):** `win95net.ini` (local; C: = `win95net.img`, a
+    copy of win95.img, CD = win95.iso, `net=1` in pico386.cfg). Control Panel > Network: Add >
+    Adapter > Novell/Anthem > NE2000 Compatible, Resources typed in (IRQ `9`, I/O `300 - 31F`:
+    the arrows do nothing, a partial I/O snaps to 220h), Add > Protocol > Microsoft > TCP/IP
+    (DHCP is the default); the files come off the CD by themselves. Remove the extra clients,
+    IPX and NetBEUI. After the restart, The Internet's wizard: Manual, LAN, no proxy. IE 3 then
+    showed www.yahoo.com through Protoweb. Keys: `alt+n` focuses the component list, `ctrl+o` is
+    IE's Open.
 - **`pc_keymap.cpp`:**
   - PicoCalc characters are mapped to US-layout Linux keycodes, with Shift faked as needed.
   - It handles typematic repeat and the keyboard mouse.
@@ -657,6 +752,7 @@ the repo root, because `PC_INI` paths are relative to the cwd.
   - `quit` exits
 - `PC_WAV=file` dumps the mono s16 44.1 kHz audio stream.
 - `PC_SD=dir` uses another SD folder. `PC_SHOT=N` takes a screenshot after N frames.
+- `bigshot` (in `PC_KEYS`) saves the guest's 800x600 framebuffer as `sdcard/shotN.bmp`, readable where `shot`'s 320x240 is not.
 - `PC_KEYS_FILE=path` (2026-11-16) watches a file: when the running script is done and the file is
   there, its text is the next `PC_KEYS` script and the file is deleted. It drives a long install a
   step at a time, with a look at each shot before the next keys. `ctrl+esc` is the in-game menu,
@@ -704,14 +800,18 @@ the repo root, because `PC_INI` paths are relative to the cwd.
     then took the rest: the job semaphores, made at the first frame, were NULL (assert in
     `xQueueSemaphoreTake` at Start). Fixed for good: `jobInit` in `hal_init`, and `hal_alloc_fast`
     leaves 48 KB of internal RAM free (`kInternalReserve`).
-  - `alt+f4` through `remote.py --p4` did not reach Windows on the device (it does on the
-    desktop), so a deploy cuts Windows off without a shutdown.
+  - `alt+f4` through `remote.py --p4` did not reach Windows on the device because the Windows 95
+    startup was in Mouse mode, where Alt is the left button. In Arrows mode (in-game menu) it
+    works, and `alt+f4` on the desktop then `enter` shuts down through APM (2026-11-19).
   - Setup needs 157 MB free even for Compact, so a 128 MB disk is refused.
   - It stopped with SU0152 ("0 bytes of memory") until the CMOS memory bytes were filled
     (THIRD_PARTY.md).
   - At the restart it says a disk is in the empty floppy drive; OK goes on.
   - The key's boxes move on by themselves: type all the digits in one run.
   - With the CD mounted at boot its autorun opens, so the ini leaves the CD empty.
+  - The pointer turned into an hourglass every few seconds (2026-11-18): the empty CD drive said
+    ready to TEST UNIT READY and then denied a disc to READ TOC, and Windows retried each poll
+    about 30 times. Fixed in `ide.c` (THIRD_PARTY.md); tested on the desktop, not yet on the P4.
 - `PC_MIPS=0.07 PC_MIPS_AT=100` caps the guest at 0.07 MIPS from 100 s of guest time on (boot
   fast, then run at the RP2350's Windows speed).
 

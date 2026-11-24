@@ -583,7 +583,8 @@ uint8_t list(const Screen &screen, const Item *items, int n, int *sel) {
     drawHints(screen.hints);
     present();
 
-    switch (const uint8_t k = waitKey()) {
+    switch (const uint8_t k = waitKey(screen.refreshMs)) {
+      case 0: return 0;                  // refreshMs passed with no key
       case KEY_UP:   *sel = *sel > 0 ? *sel - 1 : n - 1; break;
       case KEY_DOWN: *sel = *sel < n - 1 ? *sel + 1 : 0; break;
       case KEY_PGDN: *sel += rows; break;

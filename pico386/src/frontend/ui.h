@@ -98,12 +98,15 @@ struct Screen {
   int rowH = 0;                        // 0: 24, or 40 with a second line
   int pictureW = 0;
   void (*picture)(void *ctx, int i, int x, int y, bool on) = nullptr;
+  // Not 0: list returns 0 when no key comes for this long, so the caller can show rows that change
+  // by themselves (the network's status) and call it again.
+  uint32_t refreshMs = 0;
 };
 
 // Draws the list and handles Up/Down/PgDn/Home/End. Typing a letter or digit jumps to the next
 // row starting with it (letters typed within a second add up: "pr" finds "Prince"). Returns the
-// key that ends the interaction: KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_ESC or KEY_BACKSPACE; *sel
-// is updated.
+// key that ends the interaction: KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_ESC or KEY_BACKSPACE, or 0
+// after screen.refreshMs with no key; *sel is updated.
 uint8_t list(const Screen &screen, const Item *items, int n, int *sel);
 
 } // namespace ui

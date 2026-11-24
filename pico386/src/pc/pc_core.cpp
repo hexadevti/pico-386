@@ -63,6 +63,7 @@ std::string s_drive[DRIVE_COUNT];  // what each drive holds (relative paths, "" 
 std::string s_driveLabel[DRIVE_COUNT];
 int s_mouseSaved;                  // the keyboard mouse mode the .ini has
 uint32_t s_noteUntil;              // a note in the bottom strip until then (ms), 0 = none
+int s_zoomSeen;                    // pckbd_zoom_count() the last zoom note was for
 // A snapshot to save or start from once the menu has closed: on the RP2350 the menu's canvas
 // holds VRAM's place until then.
 std::string s_snapSave, s_snapReplace, s_snapLoad;   // the save's name, the snapshot it overwrites
@@ -151,6 +152,7 @@ bool pc_loadRom(const char *ini) {
   s_mouseSaved = atoi(pcini_get_in(s_ini, "pico", "mouse").c_str());
   pckbd_set_mouse_mode(s_mouseSaved);
   s_mouseSaved = pckbd_mouse_mode();
+  s_zoomSeen = pckbd_zoom_count();
   {
     // shift_key replaced shift_arrows and ctrl_arrows (2026-11-08): ctrl_arrows = 1 becomes Ctrl
     std::string k = pcini_get_in(s_ini, "pico", "shift_key");
@@ -231,6 +233,7 @@ void pc_audio() {
 // during a frame started at its end; frames run 17-35 ms on the RP2350, so a 240 Hz music driver
 // came out uneven, and a long frame let the output queue run dry (a click).
 void audioHook(int written) {
+  pckbd_mouse_poll();                          // the zoom's small mouse packets, one per read
   const uint32_t since = hal_micros() - s_lastAudioUs;
   if (since >= (written ? 1000u : 8000u)) pc_audio();
 }
@@ -305,6 +308,14 @@ void pc_runFrame(bool draw) {
     if (s_mouseSaved != MOUSE_ARROWS)
       note += std::string("   buttons: ") + pckbd_mouse_button_label(0) + " / " + pckbd_mouse_button_label(1);
     showNote(note.c_str());
+  }
+  if (pckbd_zoom_count() != s_zoomSeen) {      // Ctrl+Caps Lock
+    s_zoomSeen = pckbd_zoom_count();
+    VGAPicoInfo in;
+    t386_info(&in);
+    const bool big = in.mode == 2 && (in.gfx_w > SCREEN_W || in.gfx_h > SCREEN_H - 10);
+    showNote(!pckbd_zoom() ? "Zoom off" : big ? "Zoom 1:1 (Ctrl+Caps Lock: off)"
+                                              : "Zoom on: for pictures over 320x310");
   }
   if (s_noteUntil && (int32_t)(hal_millis() - s_noteUntil) >= 0) {
     s_noteUntil = 0;
@@ -549,6 +560,9 @@ bool pc_menuAction(int i, uint8_t key) {
 const char *pc_lastError() { return s_error[0] ? s_error : "Cannot start this machine"; }
 
 } // namespace
+
+// The desktop's bigshot (hal_sdl.cpp) saves the guest's 800x600 picture from here.
+uint16_t *pccore_fb() { return s_fb; }
 
 const EmuCore kPC386 = {
   "386 PC", "pc", ".img.ima.iso.vhd",
