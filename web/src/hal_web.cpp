@@ -16,6 +16,7 @@
 //     does on the desktop.
 //   * the PC's picture goes at its own resolution to a second buffer (hal_web_pc_frame), and the
 //     menus go out as JSON for the page to draw as touch screens (hal_web_ui_show; ui.cpp).
+//   * network: pc_net's TCP to Protoweb goes through WebSockets the page opens to the worker.
 //   * the SD card is /sdcard, an IndexedDB-backed folder the page mounts before main() starts and
 //     saves from time to time.
 #include "../../pico386/board.h"
@@ -24,12 +25,24 @@
 
 #include <emscripten.h>
 #include <emscripten/threading.h>
+#include <emscripten/wasmfs.h>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include "../../pico386/src/hal/hal.h"
 #include "../../pico386/src/pc/pc_glue.h"
 
@@ -220,6 +233,15 @@ bool hal_web_ui_take(uint32_t seq, int *key, int *sel) {
 
 const char *hal_web_ui_text() { return s_uiText; }
 
+// The Files screen is the page's own (app.js openFiles); the home menu waits for it, then lists the
+// startups again, since an upload may have brought new .ini files.
+static std::atomic<int> s_filesOpen{0};
+void hal_web_files() {
+  s_filesOpen.store(1);
+  MAIN_THREAD_ASYNC_EM_ASM({ if (Module.webFiles) Module.webFiles(); });
+  while (s_filesOpen.load()) emscripten_thread_sleep(30);
+}
+
 void hal_web_ui_pc() {
   if (s_uiIsPc) return;
   hal_web_ui_show("{\"t\":\"pc\"}");
@@ -349,13 +371,116 @@ uint32_t hal_audio_queued_us() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// network: pc_net needs a host's sockets, which a page doesn't have
+// network: pc_net's TCP to Protoweb, through WebSockets the page holds (app.js tun*) to the
+// worker's /api/tcp. A tunnel's bytes from the far end are appended here by the page's thread
+// (web_tun_data) and read by the PC's; what the PC writes goes to the page as a malloc'd copy, and
+// at most kTunPending bytes of it may be on their way, so a stuck socket pushes back on the guest.
 // ------------------------------------------------------------------------------------------------
-bool hal_net_available() { return false; }
+bool hal_net_available() { return true; }
 void hal_net_begin(const char *, const char *) {}
 void hal_net_end() {}
-int  hal_net_state(char *info, size_t n) { if (n) snprintf(info, n, "not in the browser"); return HAL_NET_OFF; }
-int  hal_net_scan(char (*)[33], int) { return -1; }
+int  hal_net_state(char *info, size_t n) { if (n) snprintf(info, n, "Through the browser"); return HAL_NET_UP; }
+int  hal_net_scan(char (*)[33], int) { return 0; }
+
+namespace {
+constexpr int kTuns = 16;
+constexpr int kTunPending = 65536;
+struct Tun { int id = -1, state = 0, pending = 0; bool eof = false; std::vector<uint8_t> in; };
+std::mutex s_tm;
+Tun s_tun[kTuns];
+int s_tunNext = 1;
+Tun *tunOf(int id) {                       // under s_tm
+  Tun &t = s_tun[id % kTuns];
+  return t.id == id ? &t : nullptr;
+}
+}
+
+int hal_tun_open(const char *host, int port) {
+  int id = -1;
+  {
+    std::lock_guard<std::mutex> lk(s_tm);
+    for (int k = 0; k < kTuns && id < 0; k++) {
+      const int cand = s_tunNext + k;
+      Tun &t = s_tun[cand % kTuns];
+      if (t.id >= 0) continue;
+      t = Tun();
+      t.id = id = cand;
+      s_tunNext = cand + 1;
+    }
+  }
+  if (id < 0) return -1;
+  MAIN_THREAD_ASYNC_EM_ASM({ Module.tunOpen($0, UTF8ToString($1), $2); _free($1); }, id, strdup(host), port);
+  return id;
+}
+
+int hal_tun_state(int id) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  const Tun *t = tunOf(id);
+  return !t ? -1 : t->state;
+}
+
+int hal_tun_read(int id, uint8_t *buf, int max) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  Tun *t = tunOf(id);
+  if (!t) return -1;
+  const int n = (int)std::min<size_t>(t->in.size(), (size_t)max);
+  if (!n) return t->eof ? -1 : 0;
+  memcpy(buf, t->in.data(), n);
+  t->in.erase(t->in.begin(), t->in.begin() + n);
+  return n;
+}
+
+int hal_tun_write(int id, const uint8_t *d, int n) {
+  uint8_t *copy;
+  {
+    std::lock_guard<std::mutex> lk(s_tm);
+    Tun *t = tunOf(id);
+    if (!t || t->state < 0 || t->eof) return -1;
+    if (t->state == 0) return 0;
+    n = std::min(n, kTunPending - t->pending);
+    if (n <= 0) return 0;
+    copy = (uint8_t *)malloc(n);
+    if (!copy) return 0;
+    t->pending += n;
+  }
+  memcpy(copy, d, n);
+  MAIN_THREAD_ASYNC_EM_ASM({ Module.tunSend($0, $1, $2); }, id, copy, n);
+  return n;
+}
+
+void hal_tun_shut(int id) { MAIN_THREAD_ASYNC_EM_ASM({ Module.tunShut($0); }, id); }
+
+void hal_tun_close(int id) {
+  {
+    std::lock_guard<std::mutex> lk(s_tm);
+    Tun *t = tunOf(id);
+    if (!t) return;
+    *t = Tun();
+  }
+  MAIN_THREAD_ASYNC_EM_ASM({ Module.tunClose($0); }, id);
+}
+
+extern "C" {
+// From the page: ev 1 = open, -1 = closed or failed (what came stays readable).
+EMSCRIPTEN_KEEPALIVE void web_tun_event(int id, int ev) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  Tun *t = tunOf(id);
+  if (!t) return;
+  if (ev > 0) { if (t->state == 0) t->state = 1; }
+  else { t->eof = true; if (t->state == 0) t->state = -1; }
+}
+EMSCRIPTEN_KEEPALIVE void web_tun_data(int id, const uint8_t *d, int n) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  Tun *t = tunOf(id);
+  if (!t) return;
+  if (t->state == 0) t->state = 1;
+  t->in.insert(t->in.end(), d, d + n);
+}
+EMSCRIPTEN_KEEPALIVE void web_tun_sent(int id, int n) {
+  std::lock_guard<std::mutex> lk(s_tm);
+  if (Tun *t = tunOf(id)) t->pending -= n;
+}
+}
 
 // ------------------------------------------------------------------------------------------------
 void hal_init() {
@@ -406,12 +531,144 @@ EMSCRIPTEN_KEEPALIVE void web_ui_reply(uint32_t seq, int key, int sel) {
 }
 // where the page writes an edit's text (UTF-8, 255 bytes at most) before answering it
 EMSCRIPTEN_KEEPALIVE char *web_ui_textbuf() { return s_uiText; }
+EMSCRIPTEN_KEEPALIVE void web_files_closed() { s_filesOpen.store(0); }
+// the page has moved the old card over, seeded it and written pc.ini (webFsInit)
+static std::atomic<int> s_fsReady{0};
+EMSCRIPTEN_KEEPALIVE void web_fs_ready() { s_fsReady.store(1); }
 // 1 while a PC is running (the page shows the mouse buttons then)
 EMSCRIPTEN_KEEPALIVE int web_pc_running() { return t386_mem_bytes() > 0; }
 }
 
+// ---- the page's file work ----
+// The page never calls the FS itself. With OPFS, a call from the browser's main thread blocks it
+// until OPFS's own thread answers, and a phone's browser hung there for good (2026-11-24, at the
+// first mkdir of the move from IDBFS; desktop Chrome was fine). So the page queues requests
+// (web_fs_req), fsThread does them in order, and Module.fsDone(id, result) answers on the main
+// thread. A path and a write's data are malloc'd by the page and freed here; a read's buffer stays
+// the page's.
+enum { FS_MKDIRS, FS_STAT, FS_OPEN, FS_PWRITE, FS_CLOSE, FS_UNLINK, FS_READTEXT, FS_LIST, FS_PREAD };
+struct FsReq { int id, op, a; char *path; uint8_t *buf; int len; double off; };
+static std::mutex s_fsMu;
+static std::condition_variable s_fsCv;
+static std::deque<FsReq> s_fsQ;
+
+static char *dupStr(const std::string &s) {
+  char *o = (char *)malloc(s.size() + 1);
+  if (o) { memcpy(o, s.data(), s.size()); o[s.size()] = 0; }
+  return o;
+}
+
+static double fsDo(const FsReq &r) {
+  switch (r.op) {
+  case FS_MKDIRS: {   // every folder on the way
+    std::string d;
+    for (const char *p = r.path; *p; p++) {
+      if (*p == '/' && !d.empty()) mkdir(d.c_str(), 0777);
+      d += *p;
+    }
+    mkdir(d.c_str(), 0777);
+    return 0;
+  }
+  case FS_STAT: {     // the size, -2 a folder, -1 nothing there
+    struct stat st;
+    if (stat(r.path, &st) != 0) return -1;
+    return S_ISDIR(st.st_mode) ? -2 : (double)st.st_size;
+  }
+  case FS_OPEN: {     // a: 1 write (made empty, then sized to off when off > 0), 0 read
+    int fd = open(r.path, r.a ? (O_WRONLY | O_CREAT | O_TRUNC) : O_RDONLY, 0666);
+    if (fd < 0) return -errno;
+    if (r.a && r.off > 0 && ftruncate(fd, (off_t)r.off) != 0) { int e = errno; close(fd); return -e; }
+    return fd;
+  }
+  case FS_PWRITE: case FS_PREAD: {
+    size_t done = 0;
+    while (done < (size_t)r.len) {
+      ssize_t n = r.op == FS_PWRITE ? pwrite(r.a, r.buf + done, r.len - done, (off_t)r.off + done)
+                                    : pread(r.a, r.buf + done, r.len - done, (off_t)r.off + done);
+      if (n < 0) return -errno;
+      if (n == 0) break;
+      done += n;
+    }
+    return (double)done;
+  }
+  case FS_CLOSE: return close(r.a) == 0 ? 0 : -errno;
+  case FS_UNLINK: return unlink(r.path) == 0 ? 0 : -errno;
+  case FS_READTEXT: { // a malloc'd string, 0 when missing
+    FILE *f = fopen(r.path, "rb");
+    if (!f) return 0;
+    std::string s;
+    char b[4096];
+    size_t n;
+    while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n);
+    fclose(f);
+    return (double)(uintptr_t)dupStr(s);
+  }
+  case FS_LIST: {     // a malloc'd "name<TAB>size<TAB>isdir<LF>" per entry
+    std::string s;
+    if (DIR *d = opendir(r.path)) {
+      while (dirent *e = readdir(d)) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        struct stat st;
+        if (stat((std::string(r.path) + "/" + e->d_name).c_str(), &st) != 0) continue;
+        s += e->d_name;
+        s += '\t';
+        s += std::to_string((long long)st.st_size);
+        s += '\t';
+        s += S_ISDIR(st.st_mode) ? '1' : '0';
+        s += '\n';
+      }
+      closedir(d);
+    }
+    return (double)(uintptr_t)dupStr(s);
+  }
+  }
+  return -EINVAL;
+}
+
+static void *fsThread(void *) {
+  for (;;) {
+    FsReq r;
+    {
+      std::unique_lock<std::mutex> l(s_fsMu);
+      s_fsCv.wait(l, [] { return !s_fsQ.empty(); });
+      r = s_fsQ.front();
+      s_fsQ.pop_front();
+    }
+    const double res = fsDo(r);
+    free(r.path);
+    if (r.op == FS_PWRITE) free(r.buf);
+    MAIN_THREAD_ASYNC_EM_ASM({ Module.fsDone($0, $1); }, r.id, res);
+  }
+  return nullptr;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void web_fs_req(int id, int op, int a, char *path, uint8_t *buf, int len, double off) {
+  {
+    std::lock_guard<std::mutex> l(s_fsMu);
+    s_fsQ.push_back({ id, op, a, path, buf, len, off });
+  }
+  s_fsCv.notify_one();
+}
+
+// The card (/sdcard) lives in the browser's private file system (OPFS): files stay on the phone's
+// storage and are read a piece at a time. With IDBFS every file sat in the tab's memory, and the
+// phone killed the tab once a big disk image came in (2026-11-24). OPFS's backend must be made on a
+// pthread (main() runs on one, PROXY_TO_PTHREAD); without OPFS the card is in memory and not kept.
+static void mountCard() {
+  const int opfs = EM_ASM_INT({
+    return (typeof FileSystemSyncAccessHandle !== 'undefined' && navigator.storage && navigator.storage.getDirectory) ? 1 : 0;
+  });
+  backend_t b = opfs ? wasmfs_create_opfs_backend() : wasmfs_create_memory_backend();
+  if (wasmfs_create_directory("/sdcard", 0777, b) != 0) printf("sdcard: mount failed\n");
+  pthread_t t;
+  pthread_create(&t, nullptr, fsThread, nullptr);
+  MAIN_THREAD_ASYNC_EM_ASM({ Module.webFsInit(Module, $0); }, opfs);
+  while (!s_fsReady.load()) emscripten_thread_sleep(20);
+}
+
 int main(int, char **) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
+  mountCard();
   setup();
   for (;;) loop();
 }

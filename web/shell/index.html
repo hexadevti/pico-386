@@ -33,6 +33,7 @@
     <button data-act="mouse" data-i18n-title="tb.mouse">🖱</button>
     <button data-act="sound" data-i18n-title="tb.sound">🔊</button>
     <button data-act="fs" data-i18n-title="tb.fs">⛶</button>
+    <button data-act="only" data-i18n-title="tb.only">🖥</button>
   </div>
 
   <!-- the trackpad (🖱): takes the keyboard's place; the touchpad's buttons below it -->
@@ -47,40 +48,30 @@
   <div id="kbd" hidden></div>
 </div>
 
+<!-- screen only (🖥, landscape): the way back, and the in-game menu, over the picture's corner -->
+<div id="only-btns" hidden>
+  <button data-act="menu" data-i18n-title="tb.menu">☰</button>
+  <button data-act="only" data-i18n-title="tb.onlyexit">✕</button>
+</div>
+
 <!-- the emulator's menus, drawn by the page as touch screens (ui.cpp publishes them as JSON) -->
 <div id="ui" hidden>
   <div class="ui-head">
     <button class="ui-btn" id="ui-back" data-i18n-title="ui.back">‹</button>
     <div class="ui-titles"><b id="ui-title"></b><small id="ui-sub"></small></div>
     <button class="ui-btn" id="ui-close" data-i18n-title="ui.close" hidden>✕</button>
-    <button class="ui-btn" id="ui-files" data-i18n-title="tb.files">📁</button>
     <button class="ui-btn" id="ui-fs" data-i18n-title="tb.fs">⛶</button>
   </div>
   <div class="ui-body" id="ui-body"></div>
 </div>
 
-<div id="files" class="dialog" hidden>
-  <div class="dlg-body">
-    <div class="dlg-head"><b data-i18n="files.title"></b><button data-close>✕</button></div>
-    <p class="hint" data-i18n-html="files.hint"></p>
-    <div class="row">
-      <label><span data-i18n="files.folder"></span> <select id="folder"></select></label>
-      <label class="btn"><span data-i18n="files.upload"></span><input id="upload" type="file" multiple hidden></label>
-    </div>
-    <div id="upload-status" class="hint"></div>
-    <div class="row"><button id="btn-recv" data-i18n="recv.start"></button></div>
-    <div id="recv" hidden>
-      <p class="hint" data-i18n-html="recv.how"></p>
-      <div class="recv-url" id="recv-url"></div>
-      <div class="recv-code" id="recv-code"></div>
-      <div class="row"><span id="recv-status" class="hint"></span><button id="btn-recv-stop" data-i18n="recv.stop"></button></div>
-    </div>
-    <ul id="file-list"></ul>
-    <div class="row">
-      <button id="btn-reboot" data-i18n="files.reboot"></button>
-      <label><span data-i18n="files.lang"></span> <select id="lang"></select></label>
-    </div>
+<div id="files" hidden>
+  <div class="ui-head">
+    <button class="ui-btn" id="files-back" data-i18n-title="ui.back">‹</button>
+    <div class="ui-titles"><b id="files-title"></b><small id="files-sub"></small></div>
   </div>
+  <div class="ui-body" id="files-body"></div>
+  <input id="upload" type="file" multiple hidden>
 </div>
 
 <div id="boot" class="dialog">

@@ -2,7 +2,8 @@
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "pico-386",
   "compatibility_date": "2026-11-24",
-  // static site in dist/; the worker only answers /api/relay/* (send files from a PC to the phone)
+  // static site in dist/; the worker answers /api/relay/* (send files from a PC to the phone) and
+  // /api/tcp (the PC's web traffic, to Protoweb only)
   "main": "./worker/relay.js",
   "assets": { "directory": "./dist", "binding": "ASSETS" },
   "durable_objects": { "bindings": [{ "name": "RELAY", "class_name": "Relay" }] },

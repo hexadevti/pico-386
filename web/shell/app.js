@@ -1,5 +1,5 @@
 // pico-386 -- the browser shell (emu8's web techniques). It owns the page: the layout (portrait /
-// landscape beside / landscape over), the PC's picture at its own resolution and the 320x320 panel
+// landscape), the PC's picture at its own resolution and the 320x320 panel
 // read out of the wasm memory, the emulator's menus drawn as touch screens (ui.cpp sends them as
 // JSON, a tap answers with the key it stands for), the physical
 // keyboard and an on-screen PC keyboard (both as PicoCalc key codes, so pc_keymap does the rest
@@ -13,6 +13,7 @@ const $ = (s) => document.querySelector(s);
 const app = $('#app'), canvas = $('#screen'), ctx = canvas.getContext('2d', { alpha: false });
 const bootMsg = $('#boot-msg');
 let M = null;                 // the Emscripten module once running
+let cardOpfs = false;         // /sdcard is the browser's private file system (fsInit)
 
 const FOLDERS = ['pico-386', 'pico-386/disks', 'pico-386/games', 'pico-386/roms'];
 
@@ -47,70 +48,273 @@ if (!self.crossOriginIsolated) {
   bootMsg.textContent = t('boot.noSAB');
 }
 
-// ======================= persistence (IDBFS) =======================
-let syncBusy = false, syncAgain = false, syncTimer = 0;
-function persist(cb) {
-  if (!M) return cb && cb();
-  if (syncBusy) { syncAgain = true; if (cb) setTimeout(() => persist(cb), 200); return; }
-  syncBusy = true;
-  M.FS.syncfs(false, (err) => {
-    syncBusy = false;
-    if (err) console.warn('syncfs', err);
-    if (syncAgain) { syncAgain = false; schedulePersist(); }
-    cb && cb();
+// ======================= the card (OPFS) =======================
+// /sdcard is the browser's private file system (hal_web.cpp mountCard): every write is already on
+// the phone's storage, so there is nothing to save any more. persist() stays as the place a save
+// would go, for the callers that wait on one (Restart).
+function persist(cb) { if (cb) cb(); }
+const isDirMode = (m) => (m & 0o170000) === 0o040000;
+
+// The page never calls Module.FS: on OPFS a call from this (the browser's main) thread blocks until
+// OPFS's own thread answers, and a phone hung there for good. Each request goes to a C thread
+// instead (hal_web.cpp fsThread, web_fs_req), which answers through Module.fsDone. Requests are
+// done in the order sent. A path and a write's data are copied into the wasm heap; C frees them.
+const FSOP = { MKDIRS: 0, STAT: 1, OPEN: 2, PWRITE: 3, CLOSE: 4, UNLINK: 5, READTEXT: 6, LIST: 7, PREAD: 8 };
+let fsMod = null, fsSeq = 0;
+const fsWait = new Map();
+const enc = new TextEncoder();
+function heapCopy(bytes, nul) {
+  const p = fsMod._malloc(bytes.length + (nul ? 1 : 0) || 1);
+  if (!p) throw new Error('out of memory');
+  fsMod.HEAPU8.set(bytes, p);
+  if (nul) fsMod.HEAPU8[p + bytes.length] = 0;
+  return p;
+}
+function fsCall(op, path, a = 0, off = 0, data = null, len = 0) {
+  const p = path == null ? 0 : heapCopy(enc.encode(path), true);
+  let buf = 0;
+  try { if (data) { buf = heapCopy(data, false); len = data.length; } } catch (e) { fsMod._free(p); throw e; }
+  const id = ++fsSeq;
+  return new Promise((res) => { fsWait.set(id, res); fsMod._web_fs_req(id, op, a, p, buf, len, off); });
+}
+function fsDone(id, r) { const f = fsWait.get(id); fsWait.delete(id); if (f) f(r); }
+const fsCheck = (r, what) => { if (r < 0) throw new Error(what + ': error ' + -r); return r; };
+const fsMkdirs = (path) => fsCall(FSOP.MKDIRS, path);
+const fsStat = (path) => fsCall(FSOP.STAT, path);            // the size; -1 missing; -2 a folder
+const fsExists = async (path) => (await fsStat(path)) !== -1;
+const fsUnlink = (path) => fsCall(FSOP.UNLINK, path);
+// for writing: made empty, and sized first when size > 0 (no regrowing as the pieces come)
+const fsOpenW = async (path, size) => fsCheck(await fsCall(FSOP.OPEN, path, 1, size || 0), path);
+const fsOpenR = async (path) => fsCheck(await fsCall(FSOP.OPEN, path, 0), path);
+const fsClose = (fd) => fsCall(FSOP.CLOSE, null, fd);
+async function fsPwrite(fd, data, off) {
+  if ((await fsCall(FSOP.PWRITE, null, fd, off, data)) !== data.length) throw new Error('write failed');
+}
+async function fsPread(fd, len, off) {
+  const p = fsMod._malloc(len || 1);
+  if (!p) throw new Error('out of memory');
+  try {
+    const n = fsCheck(await fsCall(FSOP.PREAD, null, fd, off, null, len), 'read');
+    return fsMod.HEAPU8.slice(p, p + n);
+  } finally { fsMod._free(p); }
+}
+// a C string the thread malloc'd, or null
+function takeStr(ptr) {
+  if (!ptr) return null;
+  const s = fsMod.UTF8ToString(ptr);
+  fsMod._free(ptr);
+  return s;
+}
+const fsReadText = async (path) => takeStr(await fsCall(FSOP.READTEXT, path));
+// A fetch's body into a file of the given size, PIECE by PIECE; the file is removed if it falls short.
+async function streamTo(path, body, size, onPct) {
+  const fd = await fsOpenW(path, size);
+  let off = 0, buf = new Uint8Array(0);
+  try {
+    const rd = body.getReader();
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (value) { const b = new Uint8Array(buf.length + value.length); b.set(buf); b.set(value, buf.length); buf = b; }
+      while (buf.length >= PIECE || (done && buf.length)) {
+        const n = Math.min(PIECE, buf.length);
+        await fsPwrite(fd, buf.subarray(0, n), off);
+        off += n; buf = buf.slice(n);
+        if (onPct) onPct(Math.floor(100 * off / Math.max(1, size)));
+      }
+      if (done) break;
+    }
+  } finally { await fsClose(fd); }
+  if (off !== size) { await fsUnlink(path); throw new Error(path + ': short'); }
+}
+async function fsList(dir) {
+  const s = takeStr(await fsCall(FSOP.LIST, dir)) || '';
+  return s.split('\n').filter(Boolean).map((l) => {
+    const [name, size, d] = l.split('\t');
+    return { name, size: Number(size), dir: d === '1' };
   });
 }
-function schedulePersist() { clearTimeout(syncTimer); syncTimer = setTimeout(() => persist(), 400); }
-
-function exists(FS, p) { try { FS.stat(p); return true; } catch (e) { return false; } }
-function mkdirs(FS, path) {
-  const parts = path.split('/'); let d = '';
-  for (let i = 1; i < parts.length; i++) { d += '/' + parts[i]; try { FS.mkdir(d); } catch (e) {} }
+// Data goes in a PIECE at a time: each piece is copied through the wasm heap, which has no room
+// for a whole disk image.
+const PIECE = 4 * 1024 * 1024;
+async function fsWriteAll(path, data) {
+  const fd = await fsOpenW(path, data.length);
+  try { for (let off = 0; off < data.length; off += PIECE) await fsPwrite(fd, data.subarray(off, off + PIECE), off); }
+  finally { await fsClose(fd); }
 }
 
 // ======================= module =======================
+// The last lines the emulator and the page wrote, for Files > More > Log: a phone has no console to read.
+const LOG = [], LOG_MAX = 400;
+function logLine(s) {
+  LOG.push(new Date().toISOString().slice(11, 19) + ' ' + s);
+  if (LOG.length > LOG_MAX) LOG.splice(0, LOG.length - LOG_MAX);
+}
+window.addEventListener('error', (e) => logLine('page error: ' + e.message + ' (' + (e.filename || '') + ':' + (e.lineno || 0) + ')'));
+window.addEventListener('unhandledrejection', (e) => logLine('page error: ' + (e.reason && (e.reason.stack || e.reason.message) || e.reason)));
+function logText() {
+  let st = '';
+  try {
+    st = 'ui ' + uiMode + ', screen ' + screenKind + ', picture ' + (M ? M._web_pc_w() + 'x' + M._web_pc_h() + ' frame ' + M._web_pc_frame_no() : '-') +
+      ', drawn ' + lastPcFrame + ', sound ' + (actx ? actx.state + ' ' + actx.sampleRate + ' Hz' : 'off');
+  } catch (e) { st = String(e); }
+  return ['pico-386 ' + location.href, navigator.userAgent, 'isolated ' + self.crossOriginIsolated + ', ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio, st, ''].concat(LOG).join(String.fromCharCode(10));
+}
+function showLog() {
+  const box = el('div', 'log-box');
+  const pre = el('pre', null, logText());
+  const bar = el('div', 'log-bar');
+  const copy = el('button', null, t('log.copy')), close = el('button', null, t('log.close'));
+  // the clipboard API wants a secure context; without it, select the text and copy that
+  const selectPre = () => { const r = document.createRange(); r.selectNodeContents(pre); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand('copy'); copy.textContent = t('log.copied'); };
+  copy.addEventListener('click', () => {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(pre.textContent).then(() => { copy.textContent = t('log.copied'); }, selectPre);
+    else selectPre();
+  });
+  close.addEventListener('click', () => box.remove());
+  bar.append(copy, close);
+  box.append(bar, pre);
+  document.body.append(box);
+  pre.scrollTop = pre.scrollHeight;
+}
+
 const moduleCfg = {
-  print: (s) => console.log(s),
-  printErr: (s) => console.warn(s),
+  print: (s) => { logLine(s); console.log(s); },
+  printErr: (s) => { logLine(s); console.warn(s); },
   // hal_reboot / hal_reboot_to_loader (home menu Restart, Ctrl+PgUp, Ctrl+F8): save, then reload
   webReboot: () => persist(() => location.reload()),
-  preRun: [(mod) => {
-    const FS = mod.FS, IDBFS = mod.IDBFS || (FS.filesystems && FS.filesystems.IDBFS);
-    try { FS.mkdir('/sdcard'); } catch (e) {}
-    FS.mount(IDBFS, {}, '/sdcard');
-    mod.addRunDependency('idbfs');
-    FS.syncfs(true, async (err) => {
-      if (err) console.warn('syncfs load', err);
-      for (const f of FOLDERS) mkdirs(FS, '/sdcard/' + f);
-      try {
-        if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) await devPreload(FS);
-        let n = await seed(FS);
-        if (!exists(FS, '/sdcard/pico-386/pc.ini')) FS.writeFile('/sdcard/pico-386/pc.ini', DEFAULT_INI);
-        else {
-          // pc.ini seeded before 64 MB was the web's default: raise its old 32 MB once.
-          const ini = FS.readFile('/sdcard/pico-386/pc.ini', { encoding: 'utf8' });
-          const old = /^mem_size *= *32M\b/m;
-          if (old.test(ini)) {
-            FS.writeFile('/sdcard/pico-386/pc.ini', ini.replace(old, 'mem_size = 64M'));
-            n++;
-          }
-        }
-        if (n) await new Promise((res) => FS.syncfs(false, () => res()));
-      } catch (e) { console.warn('seed', e); }
-      mod.removeRunDependency('idbfs');
-    });
-  }],
+  webFiles: () => openFiles(),   // the home menu's Files row (hal_web_files)
+  // main() mounted /sdcard (hal_web.cpp mountCard) and waits for this to call web_fs_ready
+  webFsInit: (mod, opfs) => fsInit(mod, opfs),
+  fsDone,                        // the file thread's answers (hal_web.cpp fsThread)
+  tunOpen, tunSend, tunShut, tunClose,   // the PC's network (hal_web.cpp hal_tun_*)
 };
+
+// ---- the PC's network: one WebSocket per guest TCP connection, to the worker's /api/tcp, which
+// connects only to Protoweb's proxies (worker/relay.js). Binary frames are the stream; the worker
+// says "open" once its socket is up, and our "shut" is the guest's FIN.
+const tuns = new Map();
+function tunOpen(id, host, port) {
+  const mod = fsMod;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // testing: web/serve.py has no worker, so localStorage 'pico386-tun' can name one (wrangler dev)
+  const base = localStorage.getItem('pico386-tun') || `${proto}//${location.host}`;
+  let ws;
+  try {
+    ws = new WebSocket(`${base}/api/tcp?host=${encodeURIComponent(host)}&port=${port}`);
+  } catch (e) { mod._web_tun_event(id, -1); return; }
+  ws.binaryType = 'arraybuffer';
+  tuns.set(id, ws);
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') { if (ev.data === 'open') mod._web_tun_event(id, 1); return; }
+    const d = new Uint8Array(ev.data);
+    if (!d.length) return;
+    const p = mod._malloc(d.length);
+    if (!p) return;
+    mod.HEAPU8.set(d, p);
+    mod._web_tun_data(id, p, d.length);
+    mod._free(p);
+  };
+  ws.onclose = () => { tuns.delete(id); mod._web_tun_event(id, -1); };
+}
+function tunSend(id, p, n) {
+  const mod = fsMod;
+  const ws = tuns.get(id);
+  if (ws && ws.readyState === 1) ws.send(mod.HEAPU8.slice(p, p + n));
+  mod._free(p);
+  mod._web_tun_sent(id, n);
+}
+function tunShut(id) { const ws = tuns.get(id); if (ws && ws.readyState === 1) ws.send('shut'); }
+function tunClose(id) {
+  const ws = tuns.get(id);
+  tuns.delete(id);
+  if (ws) { ws.onclose = null; ws.onmessage = null; try { ws.close(); } catch (e) {} }
+}
+
+async function fsInit(mod, opfs) {
+  fsMod = mod;
+  cardOpfs = !!opfs;
+  $('#boot').hidden = false;
+  bootMsg.removeAttribute('data-i18n');
+  bootMsg.textContent = t('boot.card');   // past this, a hang is in the page; before it, in mountCard
+  try {
+    if (opfs && navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    if (opfs) await migrateIdb();
+    for (const f of FOLDERS) await fsMkdirs('/sdcard/' + f);
+    if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) await devPreload();
+    await seed();
+    const INI = '/sdcard/pico-386/pc.ini';
+    const ini = await fsReadText(INI);
+    if (ini === null) await fsWriteAll(INI, enc.encode(DEFAULT_INI));
+    else {
+      // pc.ini seeded before 64 MB was the web's default: raise its old 32 MB once.
+      const old = /^mem_size *= *32M\b/m;
+      if (old.test(ini)) await fsWriteAll(INI, enc.encode(ini.replace(old, 'mem_size = 64M')));
+    }
+  } catch (e) { console.warn('card', e); }
+  $('#boot').hidden = true;
+  mod._web_fs_ready();
+}
+
+// The card used to be IDBFS (an IndexedDB named "/sdcard", one record a file). Its files move into
+// OPFS once, and the database is then deleted. A record is read whole, and a phone can die reading a
+// big one, reload and die again on it: so each record is deleted as soon as it is copied (a reload
+// goes on from there), and the one being read is noted in localStorage; found there at the next
+// start, it is dropped unread and named on the boot screen.
+const MIG_KEY = 'pico386-migrating';
+async function migrateIdb() {
+  if (!self.indexedDB) return;
+  if (indexedDB.databases) {
+    try { if (!(await indexedDB.databases()).some((d) => d.name === '/sdcard')) return; } catch (e) {}
+  }
+  const req = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  let db;
+  try {
+    db = await new Promise((res, rej) => {
+      const r = indexedDB.open('/sdcard');
+      r.onupgradeneeded = () => r.transaction.abort();   // it wasn't there: make nothing
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+  } catch (e) { return; }
+  const lost = [];
+  if (db.objectStoreNames.contains('FILE_DATA')) {
+    const store = (m) => db.transaction('FILE_DATA', m || 'readonly').objectStore('FILE_DATA');
+    const drop = (k) => req(store('readwrite').delete(k)).catch(() => {});
+    const died = localStorage.getItem(MIG_KEY);
+    if (died) { await drop(died); lost.push(died.slice(8)); localStorage.removeItem(MIG_KEY); }
+    const keys = (await req(store().getAllKeys())).map(String).sort((x, y) => x.length - y.length);
+    for (const k of keys) {
+      if (!k.startsWith('/sdcard/')) continue;
+      bootMsg.removeAttribute('data-i18n');
+      bootMsg.textContent = t('boot.moving', k.slice(8));
+      localStorage.setItem(MIG_KEY, k);
+      const e = await req(store().get(k)).catch(() => null);
+      if (e && isDirMode(e.mode)) await fsMkdirs(k);
+      else if (e) {
+        await fsMkdirs(k.slice(0, k.lastIndexOf('/')));
+        await fsWriteAll(k, e.contents instanceof Uint8Array ? e.contents : new Uint8Array(e.contents || 0));
+      }
+      // directories stay until the end: their files are deleted first, and a reload must still find them
+      if (!e || !isDirMode(e.mode)) await drop(k);
+      localStorage.removeItem(MIG_KEY);
+    }
+  }
+  db.close();
+  await new Promise((res) => { const r = indexedDB.deleteDatabase('/sdcard'); r.onsuccess = r.onerror = r.onblocked = () => res(); });
+  if (lost.length) {   // say which file could not be moved, long enough to read
+    bootMsg.textContent = t('boot.lost', lost.join(', '));
+    await new Promise((r) => setTimeout(r, 6000));
+  }
+}
 
 // The files a new visitor starts with (web/build.py writes seed/index.json): the BIOS, and the
 // FreeDOS disk gzipped. Copied only where missing, so the visitor's own changes stay.
-async function seed(FS) {
+async function seed() {
   let list;
   try { const r = await fetch('seed/index.json', { cache: 'no-cache' }); if (!r.ok) return 0; list = await r.json(); } catch (e) { return 0; }
   let n = 0;
   for (const f of list) {
     const dst = '/sdcard/' + f.path;
-    if (exists(FS, dst)) continue;
+    if (await fsExists(dst)) continue;
     bootMsg.removeAttribute('data-i18n');
     bootMsg.textContent = t('boot.seeding', f.path.split('/').pop());
     const r = await fetch(f.url);
@@ -118,8 +322,8 @@ async function seed(FS) {
     const body = f.gz ? r.body.pipeThrough(new DecompressionStream('gzip')) : r.body;
     const data = new Uint8Array(await new Response(body).arrayBuffer());
     if (data.length !== f.size) { console.warn('seed', f.path, 'size', data.length, '!=', f.size); continue; }
-    mkdirs(FS, dst.slice(0, dst.lastIndexOf('/')));
-    FS.writeFile(dst, data);
+    await fsMkdirs(dst.slice(0, dst.lastIndexOf('/')));
+    await fsWriteAll(dst, data);
     n++;
   }
   return n;
@@ -127,27 +331,24 @@ async function seed(FS) {
 
 // Local test server only (web/serve.py): copy the repo's sdcard/ files that are missing here.
 // Never over a file the emulator may have changed (the .ini files, the disks).
-async function devPreload(FS) {
+async function devPreload() {
   let list;
   try { const r = await fetch('/__sdcard_list'); if (!r.ok) return; list = await r.json(); } catch (e) { return; }
   for (const f of list) {
     const dst = '/sdcard/' + f.path;
-    if (exists(FS, dst)) continue;
+    if (await fsExists(dst)) continue;
     bootMsg.removeAttribute('data-i18n');
     bootMsg.textContent = t('boot.copying', f.path);
     const r = await fetch('/__sdcard/' + f.path.split('/').map(encodeURIComponent).join('/'));
     if (!r.ok) continue;
-    mkdirs(FS, dst.slice(0, dst.lastIndexOf('/')));
-    FS.writeFile(dst, new Uint8Array(await r.arrayBuffer()));
+    await fsMkdirs(dst.slice(0, dst.lastIndexOf('/')));
+    await streamTo(dst, r.body, f.size, (p) => { bootMsg.textContent = t('boot.copying', f.path) + ' ' + p + '%'; });
   }
 }
 
 createPico386(moduleCfg).then((mod) => {
   M = mod;
-  $('#boot').hidden = true;
   requestAnimationFrame(frame);
-  // the guest's disk writes, snapshots and settings: saved every 15 s, and when the page hides
-  setInterval(() => { if (!document.hidden) persist(); }, 15000);
 }).catch((e) => { bootMsg.removeAttribute('data-i18n'); bootMsg.textContent = t('boot.fail', e); });
 
 // Hidden (tab switched, app minimised, phone locked): the emulator and the audio pause, so the phone
@@ -157,9 +358,9 @@ function setHidden(h) {
   if (actx) { if (h) actx.suspend().catch(() => {}); else actx.resume().catch(() => {}); }
   if (h) releaseAll();
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) persist(); setHidden(document.hidden); });
+document.addEventListener('visibilitychange', () => setHidden(document.hidden));
 window.addEventListener('pageshow', () => setHidden(document.hidden));
-window.addEventListener('pagehide', () => { persist(); setHidden(true); });
+window.addEventListener('pagehide', () => setHidden(true));
 
 // ======================= video =======================
 // Two pictures: the PC at its own resolution (pc_video.cpp's pcvid_native: 720x400 text with the
@@ -216,6 +417,9 @@ function fitPc() {
   if (!r.width || !r.height) return;
   let w = r.width, h = w * 3 / 4;
   if (h > r.height) { h = r.height; w = h * 4 / 3; }
+  // landscape: the picture fills its whole area, stretched if need be (drawPc scales x and y apart, in
+  // device pixels, so it stays as sharp as it can)
+  if (app.classList.contains('land')) { w = r.width; h = r.height; }
   pcCanvas.style.width = w + 'px'; pcCanvas.style.height = h + 'px';
   boxW = Math.max(1, Math.round(w * devicePixelRatio));
   boxH = Math.max(1, Math.round(h * devicePixelRatio));
@@ -323,7 +527,6 @@ function setHead(title, sub, backKey, backLabel, closeToo) {
 }
 uiBack.addEventListener('click', () => { if (uiBackKey) uiReply(uiBackKey); });
 uiClose.addEventListener('click', () => uiReply(K.ESC));
-$('#ui-files').addEventListener('click', () => openFiles());
 $('#ui-fs').addEventListener('click', () => toggleFullscreen());
 
 // hints are "Enter|Select;Bs|Up;Esc|Back": which keys the screen takes, and what they mean
@@ -457,40 +660,67 @@ function renderEdit(j) {
 let kbdOn = true;
 let padOn = false;                    // 🖱: the trackpad in the keyboard's place
 let gameOn = false;                   // 🎮: the game keyboard in the PC keyboard's place
+let wasLand = null;                   // the last layout was landscape (null: none yet)
+// 🖥 screen only (landscape): no toolbar, keys or trackpad, the picture over the whole screen, for a
+// keyboard and mouse plugged into the phone or tablet. Upright it is set aside, and back on turning.
+let onlyOn = false;
 function layout() {
   const W = window.innerWidth, H = window.innerHeight;
-  app.classList.remove('portrait', 'side', 'overlay', 'gsplit');
+  // fitKbdRows: the PC keyboard's row height from its box (flex: 1, so the box is what is left)
+  const fitKbdRows = () => {
+    const rows = kbd.querySelectorAll('.krow').length || 6;
+    const cs = getComputedStyle(kbd);
+    const gap = parseFloat(cs.rowGap) || 4;
+    const inner = kbd.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    const kh = Math.floor((inner - gap * (rows - 1)) / rows);
+    if (kh > 0) app.style.setProperty('--kh', Math.max(20, Math.min(62, kh)) + 'px');
+  };
+  // sideways starts with the PC keyboard hidden (it would cover the screen; ⌨ shows it), the game
+  // keys stay; upright brings it back
+  if ((W > H) !== wasLand) {
+    wasLand = W > H;
+    if (wasLand && !gameOn) kbdOn = false;
+    else if (!wasLand && !padOn) kbdOn = true;
+  }
+  app.classList.remove('portrait', 'land', 'lgame', 'lkbd', 'only');
+  $('#only-btns').hidden = !(onlyOn && W > H);
   // the screen's box: square for the panel, 4:3 for the PC's picture
   const ar = screenKind === 'pc' ? 4 / 3 : 1;
-  app.style.setProperty('--ar', ar === 1 ? '1' : '4 / 3');
-  if (H < W && gameOn && kbdOn && !padOn) {
-    // landscape game keys: the screen in the middle, half the keys on each side of it
-    app.classList.add('gsplit');
-    const side = Math.max(150, (W - H * ar) / 2);
-    app.style.setProperty('--scrw', Math.max(200, W - 2 * side) + 'px');
-  } else if (H >= W) {
+  app.style.setProperty('--ar', String(ar));
+  let pad = padOn;
+  if (H >= W) {
     app.classList.add('portrait');
-    // the keyboard's rows share what the screen leaves (at least 40% of the height)
-    const scr = Math.min(W / ar, H * (kbdOn || padOn ? 0.6 : 0.85));
+    // the screen at the full width in every mode (only a very short window caps it, at 70% of the
+    // height); the keyboard's rows, the game keys or the trackpad share what it leaves
+    const scr = Math.min(W / ar, H * 0.7);
     app.style.setProperty('--scrh', scr + 'px');
-    app.style.setProperty('--kh', Math.max(30, Math.min(46, (H - scr - 100) / 6.4)) + 'px');
-  } else if (W - H * ar >= 300) {
-    app.classList.add('side');
-    app.style.setProperty('--scrw', H * ar + 'px');
-    app.style.setProperty('--kh', Math.max(26, Math.min(46, (H - 100) / 6.6)) + 'px');
+    app.style.setProperty('--kh', Math.max(30, Math.min(62, (H - scr - 100) / 6.4)) + 'px');
   } else {
-    app.classList.add('overlay');
-    app.style.setProperty('--kh', Math.max(24, Math.min(36, H / 13)) + 'px');
+    // landscape: the picture is stretched to its whole area (fitPc). Game keys: the screen in the
+    // middle, the action keys at its left, the toolbar and the arrow pad at its right. Otherwise: the
+    // screen at the left in 3/4 of the width, the toolbar, the mouse buttons and the trackpad in the
+    // quarter at its right; the PC keyboard lies over the screen's bottom (⌨ hides it and shows it again)
+    app.classList.add('land');
+    app.classList.toggle('only', onlyOn);
+    const game = gameOn && kbdOn && !padOn && !onlyOn;
+    const side = Math.round(game ? Math.max(110, W * 0.15) : W / 4);
+    app.style.setProperty('--side', side + 'px');
+    app.classList.toggle('lgame', game);
+    app.classList.toggle('lkbd', kbdOn && !gameOn && !padOn);
+    app.style.setProperty('--kh', Math.max(26, Math.min(38, H / 11)) + 'px');
+    pad = !game && !onlyOn;
   }
-  // narrow landscape lays everything over the screen, which is already a touchpad: no pad there
-  const pad = padOn && !app.classList.contains('overlay');
   app.classList.toggle('padmode', pad);
   $('#pad').hidden = !pad;
-  kbd.hidden = !kbdOn || padOn;
+  kbd.hidden = !kbdOn || padOn || app.classList.contains('only');
   if (kbd.classList.contains('game') !== gameOn) buildKbd();
   $('[data-act=kbd]').classList.toggle('on', kbdOn && !padOn && !gameOn);
   $('[data-act=game]').classList.toggle('on', kbdOn && gameOn && !padOn);
   $('[data-act=mouse]').classList.toggle('on', padOn);
+  // upright, fit the PC keyboard's rows to the height it really got: the estimate above knows neither
+  // the toolbar's and mouse buttons' heights nor iOS's safe areas, and rows taller than the box
+  // overflowed upwards (it is aligned to the bottom), so Esc/F1-F10 lay over the toolbar
+  if (H >= W && !kbd.hidden && !gameOn) fitKbdRows();
   requestAnimationFrame(fitPc);
 }
 window.addEventListener('resize', layout);
@@ -521,6 +751,13 @@ const downByCode = new Map();          // e.code -> the code its press sent
 function codeOf(e) {
   if (e.key === 'Shift') return e.code === 'ShiftRight' ? K.SHIFT_R : K.SHIFT_L;
   if (SPECIAL[e.key] !== undefined) return SPECIAL[e.key];
+  // With Alt (a Mac or iPad keyboard's Option) the key gives another character (Option+F is "ƒ",
+  // Option+E a dead key), which was dropped, so Alt+F and the like never reached the guest: the
+  // physical key's letter or digit is sent instead.
+  if (e.altKey && !(e.getModifierState && e.getModifierState('AltGraph'))) {   // AltGr's characters stay
+    const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code || '');
+    if (m) return (m[1] ? (e.shiftKey ? m[1] : m[1].toLowerCase()) : m[2]).charCodeAt(0);
+  }
   if (e.key && e.key.length === 1) {
     let c = e.key;
     if (/[a-z]/i.test(c)) c = e.shiftKey ? c.toUpperCase() : c.toLowerCase();
@@ -572,28 +809,42 @@ const ROWS = [
 
 // The game keyboard (🎮): the keys games use, big, about where they sit on a real keyboard (WASD at
 // the left, the arrows at the right), on a 14-column grid: x, y and the width in columns. Its Ctrl,
-// Shift and Alt are held while the finger stays on them (fire, run), not latched. The arrows are a
-// 3x3 pad whose corners hold two arrows at once (codes), for diagonal moves; its middle is a
-// second Down, so all four arrows sit in an inverted T as on a keyboard. A finger that slides from
-// one arrow to another changes the direction (pad keys), as on a game pad's cross.
-// In landscape (gsplit) the keys split to both sides of the screen, for two thumbs: S() gives each
-// its place there, left (WASD side, 8 columns) or right (arrows, 6 columns). Keys marked 'split'
-// show only then: a second Shift and Space by the arrows.
+// Shift and Alt are held while the finger stays on them (fire, run), not latched; Click is the mouse's
+// left button (mb), for the games that fire with it. The arrows are a 3x3 pad whose corners hold two
+// arrows at once (codes), for diagonal moves; its middle is a second Down, so all four arrows sit in
+// an inverted T as on a keyboard. A finger that slides from one arrow to another changes the
+// direction (pad keys), as on a game pad's cross.
+// In landscape (lgame) a simpler set of big keys sits at both sides of the screen: S() gives each its
+// side and place there, 'r' at the left (2 columns: Esc ⇄, Shift Ctrl, Alt Enter, Click, Space) and 'l'
+// at the right (the 3x3 pad, which ⇄ turns into letters, under the toolbar). The keys with no S() are
+// upright only.
 const GK = (l, code, x, y, w = 2, cls) => ({ l, code, x, y, w, cls });
-const GC = (c, x, y) => ({ l: c.toUpperCase(), c, x, y, w: 2 });
-const GD = (l, a, b, x, y) => ({ l, codes: [a, b], x, y, w: 2, cls: 'diag', pad: true });
-const GA = (l, code, x, y) => ({ l, codes: [code], x, y, w: 2, pad: true });
+// dirs: the pad key's directions (0 up, 1 left, 2 down, 3 right), for the letter pad (gameSwap)
+const GD = (l, a, b, x, y, dirs) => ({ l, arrow: l, codes: [a, b], arrows: [a, b], dirs, x, y, w: 2, cls: 'diag', pad: true });
+const GA = (l, code, x, y, dir) => ({ l, arrow: l, codes: [code], arrows: [code], dirs: [dir], x, y, w: 2, pad: true });
 const S = (k, side, x, y, w = 2) => Object.assign(k, { side, sx: x, sy: y, sw: w });
+// The four movement letters (dir: up, left, down, right) follow MOVE_SETS[moveSet]; the ⇄ key steps
+// through them (kept in localStorage): WASD, ESDF (the home row), IJKL, ZQSD (AZERTY's WASD) and
+// QAOP (Q up, A down, O left, P right, as many 8-bit games).
+const GM = (dir, x, y) => ({ dir, x, y, w: 2 });
+const MOVE_SETS = [
+  { name: 'WASD', keys: 'wasd' }, { name: 'ESDF', keys: 'esdf' }, { name: 'IJKL', keys: 'ijkl' },
+  { name: 'ZQSD', keys: 'zqsd' }, { name: 'QAOP', keys: 'qoap' },
+];
+let moveSet = Math.max(0, MOVE_SETS.findIndex((m) => m.name === localStorage.getItem('pico386-move')));
+// A tap on ⇄ turns the arrow pad into the movement letters (↑ W, ← A, ↓ S, → D, the corners two
+// letters) and back; a 2 s hold steps the letters instead. Both are kept.
+let gameSwap = localStorage.getItem('pico386-gswap') === '1';
 const GAME = [
-  S(GK('Esc', K.ESC, 1, 1, 2, 'mod'), 'l', 1, 1), S(GC('w', 5, 1), 'l', 5, 1),
-  S(GK('⌫', K.BS, 9, 1, 2, 'mod'), 'r', 1, 1), S(GK('Enter', K.ENTER, 11, 1, 4, 'mod'), 'r', 3, 1, 4),
-  S(GK('Tab', K.TAB, 1, 2, 2, 'mod'), 'l', 1, 2), S(GC('a', 3, 2), 'l', 3, 2), S(GC('s', 5, 2), 'l', 5, 2), S(GC('d', 7, 2), 'l', 7, 2),
-  S(GD('↖', K.UP, K.LEFT, 9, 2), 'r', 1, 2), S(GA('↑', K.UP, 11, 2), 'r', 3, 2), S(GD('↗', K.UP, K.RIGHT, 13, 2), 'r', 5, 2),
-  S(GK('Shift', K.SHIFT_L, 1, 3, 4, 'mod'), 'l', 1, 3, 4),
-  S(GA('←', K.LEFT, 9, 3), 'r', 1, 3), S(GA('↓', K.DOWN, 11, 3), 'r', 3, 3), S(GA('→', K.RIGHT, 13, 3), 'r', 5, 3),
-  S(GK('Ctrl', K.CTRL, 1, 4, 2, 'mod'), 'l', 1, 4), S(GK('Alt', K.ALT, 3, 4, 2, 'mod'), 'l', 3, 4), S(GK('Space', 0x20, 5, 4, 4), 'l', 5, 4, 4),
-  S(GD('↙', K.DOWN, K.LEFT, 9, 4), 'r', 1, 4), S(GA('↓', K.DOWN, 11, 4), 'r', 3, 4), S(GD('↘', K.DOWN, K.RIGHT, 13, 4), 'r', 5, 4),
-  S(GK('Shift', K.SHIFT_R, 0, 0, 2, 'mod split'), 'r', 1, 5, 3), S(GK('Space', 0x20, 0, 0, 2, 'split'), 'r', 4, 5, 3),
+  S(GK('Esc', K.ESC, 1, 1, 2, 'mod'), 'r', 1, 1, 1), S({ l: '', top: '⇄', cycle: true, x: 3, y: 1, w: 2, cls: 'mod cyc' }, 'r', 2, 1, 1), GM(0, 5, 1),
+  S({ l: 'Click', mb: 1, x: 7, y: 1, w: 2, cls: 'mod' }, 'r', 1, 4, 2),
+  GK('⌫', K.BS, 9, 1, 2, 'mod'), S(GK('Enter', K.ENTER, 11, 1, 4, 'mod'), 'r', 2, 3, 1),
+  GK('Tab', K.TAB, 1, 2, 2, 'mod'), GM(1, 3, 2), GM(2, 5, 2), GM(3, 7, 2),
+  S(GD('↖', K.UP, K.LEFT, 9, 2, [0, 1]), 'l', 1, 1, 1), S(GA('↑', K.UP, 11, 2, 0), 'l', 2, 1, 1), S(GD('↗', K.UP, K.RIGHT, 13, 2, [0, 3]), 'l', 3, 1, 1),
+  S(GK('Shift', K.SHIFT_L, 1, 3, 4, 'mod'), 'r', 1, 2, 1), S(GK('Ctrl', K.CTRL, 5, 3, 4, 'mod'), 'r', 2, 2, 1),
+  S(GA('←', K.LEFT, 9, 3, 1), 'l', 1, 2, 1), S(GA('↓', K.DOWN, 11, 3, 2), 'l', 2, 2, 1), S(GA('→', K.RIGHT, 13, 3, 3), 'l', 3, 2, 1),
+  S(GK('Alt', K.ALT, 1, 4, 2, 'mod'), 'r', 1, 3, 1), S(GK('Space', 0x20, 3, 4, 6), 'r', 1, 5, 2),
+  S(GD('↙', K.DOWN, K.LEFT, 9, 4, [2, 1]), 'l', 1, 3, 1), S(GA('↓', K.DOWN, 11, 4, 2), 'l', 2, 3, 1), S(GD('↘', K.DOWN, K.RIGHT, 13, 4, [2, 3]), 'l', 3, 3, 1),
 ];
 
 const kbd = $('#kbd');
@@ -618,7 +869,41 @@ function makeKey(k) {
   b.className = 'k' + (k.cls ? ' ' + k.cls : '');
   if (k.top) { const s = document.createElement('small'); s.textContent = k.top; b.appendChild(s); }
   const m = document.createElement('span'); m.textContent = k.l; b.appendChild(m);
-  if (k.latch) {
+  if (k.cycle) {
+    let hold = 0;
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { b.setPointerCapture(e.pointerId); } catch (_) {}
+      b.classList.add('down');
+      clearTimeout(hold);
+      hold = setTimeout(() => {
+        hold = 0;
+        moveSet = (moveSet + 1) % MOVE_SETS.length;
+        try { localStorage.setItem('pico386-move', MOVE_SETS[moveSet].name); } catch (_) {}
+        buildKbd();
+      }, 2000);
+    });
+    const up = (e) => {
+      b.classList.remove('down');
+      if (!hold) return;                 // the hold already changed the letters
+      clearTimeout(hold); hold = 0;
+      if (e.type !== 'pointerup') return;
+      gameSwap = !gameSwap;
+      try { localStorage.setItem('pico386-gswap', gameSwap ? '1' : '0'); } catch (_) {}
+      buildKbd();
+    };
+    b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
+  } else if (k.mb) {
+    // a mouse button, held while the finger stays on it (as the touchpad's buttons)
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { b.setPointerCapture(e.pointerId); } catch (_) {}
+      b.classList.add('down');
+      setButtons(btnHeld | k.mb);
+    });
+    const up = () => { b.classList.remove('down'); setButtons(btnHeld & ~k.mb); };
+    b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
+  } else if (k.latch) {
     b.dataset.latch = k.code;
     b.addEventListener('pointerdown', (e) => { e.preventDefault(); setLatch(k.code, !latched.has(k.code)); });
   } else {
@@ -669,16 +954,27 @@ function buildKbd() {
   kbd.innerHTML = '';
   kbd.classList.toggle('game', gameOn);
   if (gameOn) {
-    // both places are set; the CSS picks one (the portrait grid, or gsplit's two side grids)
+    // both places are set; the CSS picks one (the portrait grid, or lgame's two side grids)
     const half = { l: document.createElement('div'), r: document.createElement('div') };
     half.l.className = 'gl'; half.r.className = 'gr';
+    const set = MOVE_SETS[moveSet];
     for (const k of GAME) {
+      if (k.dir !== undefined) { k.c = set.keys[k.dir]; k.l = k.c.toUpperCase(); }
+      if (k.cycle) k.l = set.name;
+      if (k.dirs) {
+        // the letter pad: each key sends its directions' letters, with its arrow above them
+        const ch = k.dirs.map((d) => set.keys[d]);
+        k.codes = gameSwap ? ch.map((c) => c.charCodeAt(0)) : k.arrows;
+        k.l = gameSwap ? ch.join('').toUpperCase() : k.arrow;
+        k.top = gameSwap ? k.arrow : undefined;
+      }
       const b = makeKey(k);
       b.style.setProperty('--pc', `${k.x} / span ${k.w}`);
       b.style.setProperty('--pr', String(k.y));
       b.style.setProperty('--sc', `${k.sx} / span ${k.sw}`);
       b.style.setProperty('--sr', String(k.sy));
-      half[k.side].appendChild(b);
+      if (!k.side) b.classList.add('pt');          // upright only
+      half[k.side || 'l'].appendChild(b);
     }
     kbd.append(half.l, half.r);
     return;
@@ -697,6 +993,14 @@ buildKbd();
 layout();
 
 // ======================= mouse =======================
+// No text selection from a drag or a long press: a gesture on the screen, the trackpad or the keys must
+// not start one (phones do, despite user-select). Only fields and the receive code may be selected.
+const selectable = (n) => n && n.closest && n.closest('input, textarea, .recv-url, .recv-code, .log-box pre');
+document.addEventListener('selectstart', (e) => {
+  if (!selectable(e.target.nodeType === 1 ? e.target : e.target.parentElement)) e.preventDefault();
+});
+function clearSelection() { const s = window.getSelection && window.getSelection(); if (s && s.rangeCount) s.removeAllRanges(); }
+
 // The canvas, and the trackpad 🖱 puts in the keyboard's place, are touchpads: a finger's moves are
 // sent relative (web_mouse), a quick tap is a left click and a two-finger tap a right click; the
 // Left/Right buttons below hold for drags, and a pinch on the screen zooms. With a real
@@ -727,9 +1031,19 @@ function touchMove(dxCss, dyCss) {
 // mouseToo: a real mouse dragging on el acts as a finger (the trackpad; the screen locks instead).
 // zoomable: two fingers that spread, close or move together zoom and pan the PC's picture instead
 // (back to the whole picture below 1.03x); they move no pointer and click nothing.
+// The longest gap between a tap and the next touch for a double tap (and a tap-and-drag), in ms: Files >
+// More > Double tap. Too short and a double tap is hard to make; too long and two taps meant apart become one.
+const TAP_GAPS = [200, 250, 300, 350, 400, 450, 500];
+let tapGap = +(localStorage.getItem('pico386-tapgap') || 300);
+if (!TAP_GAPS.includes(tapGap)) tapGap = 300;
+function stepTapGap(d) {
+  tapGap = TAP_GAPS[Math.min(TAP_GAPS.length - 1, Math.max(0, TAP_GAPS.indexOf(tapGap) + d))];
+  try { localStorage.setItem('pico386-tapgap', String(tapGap)); } catch (_) {}
+}
 function bindTouchpad(el, mouseToo, zoomable) {
   const touches = new Map();          // pointerId -> { x, y, t, moved }
   let multi = false, lastTap = 0, drag = false;
+  const TAP_LEN = 300, STILL = 9;   // ms a tap may last, px a tap may slip (the gap between taps: tapGap)
   let pinch = null, gesture = false;  // two fingers down / they zoomed or panned since the first went down
   const twoOf = () => {
     const [p, q] = [...touches.values()], r = pcCanvas.getBoundingClientRect();
@@ -740,18 +1054,20 @@ function bindTouchpad(el, mouseToo, zoomable) {
     e.preventDefault();
     if (!M || uiMode !== 'pc' || !M._web_pc_running()) return;
     if (e.pointerType === 'mouse' && !mouseToo) {
-      if (document.pointerLockElement !== wrap) { wrap.requestPointerLock && wrap.requestPointerLock(); return; }
+      if (!canLock()) { freeMouseDown(e); return; }
+      if (document.pointerLockElement !== wrap) { wrap.requestPointerLock(); return; }
       return;                         // locked: the window's mouse events below take it
     }
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
-    touches.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0 });
+    clearSelection();
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0, hx: 0, hy: 0 });
     if (touches.size > 1) {
       multi = true;
       if (zoomable && touches.size === 2 && screenKind === 'pc') {
         const g = twoOf();
         pinch = { d0: g.d, mx0: g.mx, my0: g.my, s0: zoom, a: zu + g.mx / zoom, b: zv + g.my / zoom };
       }
-    } else if (performance.now() - lastTap < 300) { drag = true; setButtons(btnHeld | 1); }
+    } else if (performance.now() - lastTap < tapGap) { drag = true; setButtons(btnHeld | 1); }
     el.classList.add('touch');
   });
   el.addEventListener('pointermove', (e) => {
@@ -774,22 +1090,26 @@ function bindTouchpad(el, mouseToo, zoomable) {
     }
     if (gesture) return;              // a finger left over from a pinch moves nothing
     // two fingers: only the first one steers
-    if (touches.keys().next().value === e.pointerId) touchMove(dx, dy);
+    if (touches.keys().next().value !== e.pointerId) return;
+    // A finger that has barely moved may still be a tap: its slip is held back, so the two clicks of
+    // a double tap land on the same spot (Windows wants them within 4 px), and sent once it moves on.
+    if (p.moved < STILL) { p.hx += dx; p.hy += dy; return; }
+    if (p.hx || p.hy) { dx += p.hx; dy += p.hy; p.hx = p.hy = 0; }
+    touchMove(dx, dy);
   });
   for (const ev of ['pointerup', 'pointercancel']) el.addEventListener(ev, (e) => {
     const p = touches.get(e.pointerId);
     if (!p) return;
     touches.delete(e.pointerId);
     pinch = null;
-    const tap = ev === 'pointerup' && performance.now() - p.t < 250 && p.moved < 10;
+    const tap = ev === 'pointerup' && performance.now() - p.t < TAP_LEN && p.moved < STILL;
     if (touches.size === 0) {
       el.classList.remove('touch');
       if (gesture) {                  // a pinch: no click
         gesture = false; lastTap = 0;
         if (drag) { drag = false; setButtons(btnHeld & ~1); }
-      } else if (drag) {                     // the end of a drag; a quick second tap is a double click
-        drag = false; setButtons(btnHeld & ~1);
-        if (tap) click(1);
+      } else if (drag) {                     // the end of a drag; a quick second tap was the double click's second
+        drag = false; setButtons(btnHeld & ~1);   // its press went at the touch, its release goes now
         lastTap = 0;
       } else if (tap) {
         click(multi ? 2 : 1);
@@ -804,6 +1124,37 @@ bindTouchpad(wrap, false, true);
 bindTouchpad($('#pad'), true, false);
 
 document.addEventListener('pointerlockchange', () => wrap.classList.toggle('locked', document.pointerLockElement === wrap));
+
+// A real mouse where the screen can't be locked: iPadOS's Safari may lack pointer lock or refuse it,
+// and the mouse then did nothing. It now steers the guest's pointer by its moves over the screen
+// (hover too, not only drags; scaled as a finger is, so across the screen is across the picture),
+// and its buttons are the guest's. The host's pointer is hidden there (.free) so only one shows.
+let lockFailed = false;
+document.addEventListener('pointerlockerror', () => { lockFailed = true; });
+const canLock = () => !!wrap.requestPointerLock && !lockFailed;
+let freeX = null, freeY = null;
+const mouseBit = (e) => (e.button === 0 ? 1 : e.button === 2 ? 2 : 0);
+function freeMouseDown(e) {
+  try { wrap.setPointerCapture(e.pointerId); } catch (_) {}
+  freeX = e.clientX; freeY = e.clientY;
+  const bit = mouseBit(e);
+  if (bit) setButtons(btnHeld | bit);
+}
+wrap.addEventListener('pointermove', (e) => {
+  if (e.pointerType !== 'mouse' || canLock() || uiMode !== 'pc') return;
+  wrap.classList.add('free');
+  // a second button pressed or let go while one is held comes only as a move (no pointerdown/up)
+  const b = e.buttons & 3;
+  if (b !== (btnHeld & 3)) setButtons((btnHeld & ~3) | b);
+  if (freeX !== null) touchMove(e.clientX - freeX, e.clientY - freeY);
+  freeX = e.clientX; freeY = e.clientY;
+});
+wrap.addEventListener('pointerup', (e) => {
+  if (e.pointerType !== 'mouse' || canLock()) return;
+  const bit = mouseBit(e);
+  if (bit) setButtons(btnHeld & ~bit);
+});
+wrap.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') freeX = freeY = null; });
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === wrap) sendMouse(e.movementX, e.movementY);
 });
@@ -828,7 +1179,7 @@ document.querySelectorAll('.mb').forEach((b) => {
 // (the touchpad's buttons show only while a PC runs: setMode)
 
 // ======================= toolbar =======================
-$('#toolbar').addEventListener('click', (e) => {
+function toolbarClick(e) {
   const b = e.target.closest('button'); if (!b) return;
   startAudio();
   switch (b.dataset.act) {
@@ -839,8 +1190,38 @@ $('#toolbar').addEventListener('click', (e) => {
     case 'mouse': padOn = !padOn; if (padOn) gameOn = false; else kbdOn = true; layout(); break;   // the trackpad instead of the keyboard
     case 'sound': toggleMute(); break;
     case 'fs': toggleFullscreen(); break;
+    case 'only': toggleOnly(); break;
   }
-});
+  b.blur();                           // or a real keyboard's Space/Enter would press it again
+}
+$('#toolbar').addEventListener('click', toolbarClick);
+$('#only-btns').addEventListener('click', toolbarClick);
+// Screen only: where the browser has a real full screen (not iOS) it is asked for too, and left
+// again on the way back if this asked for it.
+let onlyFs = false;
+function toggleOnly() {
+  onlyOn = !onlyOn;
+  const d = document, fsNow = !!(d.fullscreenElement || d.webkitFullscreenElement);
+  if (onlyOn && !fsNow && (d.fullscreenEnabled || d.webkitFullscreenEnabled)) { onlyFs = true; toggleFullscreen(); }
+  else if (!onlyOn && onlyFs) { onlyFs = false; if (fsNow) toggleFullscreen(); }
+  layout();
+  showOnlyBtns();
+}
+// its two buttons fade after a few seconds, and come back when the screen is touched or the mouse moves
+let onlyFade = 0;
+function showOnlyBtns() {
+  const g = $('#only-btns');
+  g.classList.remove('dim');
+  clearTimeout(onlyFade);
+  onlyFade = setTimeout(() => g.classList.add('dim'), 3000);
+}
+for (const ev of ['pointerdown', 'pointermove']) document.addEventListener(ev, () => { if (onlyOn) showOnlyBtns(); }, { passive: true });
+// iOS has no full screen for a page: no button for it there. Landscape adds 🖥, so the toolbar has 7
+// or 8 buttons there, in rows of 4 (n7)
+if (!(document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+  $('[data-act=fs]').hidden = true; $('#ui-fs').hidden = true;
+}
+$('#toolbar').classList.add('n7');
 function toggleFullscreen() {
   const d = document;
   if (!d.fullscreenElement && !d.webkitFullscreenElement) {
@@ -880,63 +1261,197 @@ function toggleMute() {
 for (const ev of ['pointerdown', 'touchend', 'keydown']) document.addEventListener(ev, () => { if (M) startAudio(); }, true);
 
 // ======================= files =======================
-const folderSel = $('#folder');
-FOLDERS.forEach((f) => { const o = document.createElement('option'); o.value = o.textContent = f; folderSel.appendChild(o); });
-folderSel.value = 'pico-386/disks';
-folderSel.addEventListener('change', refreshFiles);
+// The Files screen: the home menu's first row (hal_web_files), the toolbar's 📁 and the menus' 📁.
+// It is drawn like the emulator's menus (#ui's cards): the top level has Upload, Receive from a PC,
+// the folders, the language and Restart; a folder lists its files with Download and Delete.
+// Closing it tells the home menu (web_files_closed), which then lists the startups again.
+let filesDir = null;                   // null: the top level; else one of FOLDERS
+let upTarget = null;                   // where the next upload goes; null: by its extension
+let upStatus = '';
+const filesEl = $('#files'), filesBody = $('#files-body');
 
-function listDir(dir) {
-  try {
-    return M.FS.readdir(dir).filter((n) => n !== '.' && n !== '..').map((n) => {
-      const st = M.FS.stat(dir + '/' + n);
-      return { name: n, size: st.size, dir: M.FS.isDir(st.mode) };
-    });
-  } catch (e) { return []; }
-}
+// a folder's own files: the dot files (.unzipped, temporaries) are the emulator's
+const filesIn = async (f) => (await fsList('/sdcard/' + f)).filter((it) => !it.dir && !it.name.startsWith('.'))
+  .sort((a, b) => a.name.localeCompare(b.name));
+let filesGen = 0;   // a newer renderFiles wins over one still waiting for its lists
+const folderName = (f) => f.replace(/^pico-386\/?/, '') || 'pico-386';
 function fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B'; }
-function refreshFiles() {
-  const ul = $('#file-list'); ul.innerHTML = '';
-  if (!M) return;
-  const dir = '/sdcard/' + folderSel.value;
-  // the folders have their own entry in the select; the dot folders (.unzipped, temporaries) are the emulator's
-  const items = listDir(dir).filter((it) => !it.dir && !it.name.startsWith('.')).sort((a, b) => a.name.localeCompare(b.name));
-  if (!items.length) { const li = document.createElement('li'); li.innerHTML = '<span class="hint"></span>'; li.firstChild.textContent = t('files.empty'); ul.appendChild(li); }
-  for (const it of items) {
-    const li = document.createElement('li');
-    const s = document.createElement('span'); s.textContent = it.name;
-    const sm = document.createElement('small'); sm.textContent = fmtSize(it.size); s.appendChild(sm);
-    // a disk the guest wrote to can be taken home again
-    const dl = document.createElement('button'); dl.textContent = t('files.download');
-    dl.onclick = () => {
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([M.FS.readFile(dir + '/' + it.name)]));
-      a.download = it.name; a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    };
-    const del = document.createElement('button'); del.textContent = t('files.delete');
-    del.onclick = () => {
-      if (!confirm(t('files.confirmDelete', it.name))) return;
-      try { M.FS.unlink(dir + '/' + it.name); } catch (e) { alert(t('files.deleteFail', e)); }
-      refreshFiles(); schedulePersist();
-    };
-    li.append(s, dl, del); ul.appendChild(li);
+const FILE_ICON = { img: '💾', ima: '💾', vfd: '💾', iso: '💿', zip: '📦', ini: '⚙️', bin: '🧩' };
+
+// one card in the menus' style: icon, label, small line, then a value and chevron, or buttons
+function fRow(o) {
+  const b = el('div', 'ui-row' + (o.click ? '' : ' static'));
+  if (o.click) { b.setAttribute('role', 'button'); b.addEventListener('click', o.click); }
+  if (o.ico) b.append(el('div', 'ui-ico', o.ico));
+  const tx = el('div', 'ui-txt');
+  tx.append(el('b', null, o.label));
+  if (o.sub) { const sm = el('small', null, o.sub); if (o.subId) sm.id = o.subId; tx.append(sm); }
+  b.append(tx);
+  if (o.acts) {
+    const a = el('div', 'ui-adj');
+    for (const [txt, title, fn] of o.acts) {
+      const x = el('button', null, txt); x.title = title;
+      x.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+      a.append(x);
+    }
+    b.append(a);
+  } else if (o.click) {
+    if (o.val) b.append(el('span', 'ui-val', o.val));
+    b.append(el('span', 'ui-chev', '›'));
   }
+  return b;
 }
-function openFiles() { releaseAll(); $('#files').hidden = false; refreshFiles(); }
-$('#files [data-close]').addEventListener('click', () => { $('#files').hidden = true; recvStop(); });
+
+async function renderFiles() {
+  if (filesEl.hidden || !fsMod) return;
+  const gen = ++filesGen, lists = {};
+  for (const f of filesDir === null ? FOLDERS : [filesDir]) lists[f] = await filesIn(f);
+  if (gen !== filesGen || filesEl.hidden) return;
+  const keep = filesBody.scrollTop;
+  filesBody.innerHTML = '';
+  const w = el('div', 'ui-wrap');
+  filesBody.append(w);
+  if (filesDir === null) {
+    $('#files-title').textContent = t('files.title');
+    $('#files-sub').textContent = t('files.sub');
+    w.append(fRow({ ico: '⬆️', label: t('files.upload'), sub: upStatus || t('files.uploadSub'), subId: 'up-status',
+      click: () => { upTarget = null; $('#upload').click(); } }));
+    if (!recv) {
+      w.append(fRow({ ico: '💻', label: t('recv.start'), sub: t('recv.sub'), click: () => { recvStart(); renderFiles(); } }));
+    } else {
+      // receiving: the code for the PC's /send page, the progress and Stop
+      const c = el('div', 'ui-row static recv-card');
+      const tx = el('div', 'ui-txt');
+      tx.append(el('b', null, t('recv.start')));
+      const how = el('small', 'wrap'); how.innerHTML = t('recv.how'); tx.append(how);
+      const st = el('small', 'wrap', recv.status || ''); st.id = 'recv-status';
+      tx.append(el('div', 'recv-url', location.origin + '/send?c=' + recv.code), el('div', 'recv-code', recv.code), st);
+      const a = el('div', 'ui-adj');
+      const stop = el('button', 'wide', t('recv.stop'));
+      stop.addEventListener('click', () => { recvStop(); renderFiles(); });
+      a.append(stop);
+      c.append(el('div', 'ui-ico', '💻'), tx, a);
+      w.append(c);
+    }
+    w.append(el('div', 'ui-sec', t('files.folders')));
+    for (const f of FOLDERS) {
+      const items = lists[f];
+      const total = items.reduce((n, it) => n + it.size, 0);
+      w.append(fRow({ ico: '📂', label: folderName(f), sub: f + '/',
+        val: items.length ? t('files.count', items.length, fmtSize(total)) : t('files.empty'),
+        click: () => { filesDir = f; upStatus = ''; filesBody.scrollTop = 0; renderFiles(); } }));
+    }
+    w.append(el('div', 'ui-sec', t('files.more')));
+    const langs = Object.keys(I18N);
+    const stepLang = (d) => setLang(langs[(langs.indexOf(LANG) + d + langs.length) % langs.length]);
+    w.append(fRow({ ico: '🌐', label: t('files.lang'), sub: I18N[LANG]._name,
+      acts: [['◀', t('files.lang'), () => stepLang(-1)], ['▶', t('files.lang'), () => stepLang(1)]] }));
+    w.append(fRow({ ico: '👆', label: t('files.tapgap'), sub: t('files.tapgapSub', tapGap),
+      acts: [['◀', t('files.tapgap'), () => { stepTapGap(-1); renderFiles(); }],
+             ['▶', t('files.tapgap'), () => { stepTapGap(1); renderFiles(); }]] }));
+    w.append(fRow({ ico: '📜', label: t('files.log'), sub: t('files.logSub'), click: showLog }));
+    w.append(fRow({ ico: '🔄', label: t('files.reboot'), sub: t('files.rebootSub'),
+      click: () => { if (confirm(t('confirm.reboot'))) M.webReboot(); } }));
+    const hint = el('p', 'ui-note'); hint.innerHTML = t('files.hint'); w.append(hint);
+  } else {
+    const dir = '/sdcard/' + filesDir;
+    const items = lists[filesDir];
+    $('#files-title').textContent = folderName(filesDir);
+    $('#files-sub').textContent = filesDir + '/';
+    w.append(fRow({ ico: '⬆️', label: t('files.uploadHere'), sub: upStatus || t('files.uploadHereSub'), subId: 'up-status',
+      click: () => { upTarget = filesDir; $('#upload').click(); } }));
+    if (!items.length) w.append(fRow({ ico: '·', label: t('files.empty') }));
+    for (const it of items) {
+      const ext = ((it.name.match(/\.([^.]+)$/) || [])[1] || '').toLowerCase();
+      w.append(fRow({ ico: FILE_ICON[ext] || '📄', label: it.name, sub: fmtSize(it.size), acts: [
+        // a disk the guest wrote to can be taken home again
+        ['⬇️', t('files.download'), () => {
+          const a = document.createElement('a');
+          fileBlob(dir + '/' + it.name).then((b) => {
+            a.href = URL.createObjectURL(b);
+            a.download = it.name; a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+          }).catch((e) => alert(String(e)));
+        }],
+        ['🗑️', t('files.delete'), () => {
+          if (!confirm(t('files.confirmDelete', it.name))) return;
+          fsUnlink(dir + '/' + it.name).then((r) => {
+            if (r < 0) alert(t('files.deleteFail', 'error ' + -r));
+            renderFiles();
+          });
+        }],
+      ] }));
+    }
+  }
+  filesBody.scrollTop = keep;
+}
+const refreshFiles = renderFiles;
+function setUpStatus(txt) { upStatus = txt; const e = $('#up-status'); if (e) e.textContent = txt; }
+
+function openFiles(dir = null) {
+  releaseAll();
+  filesDir = dir; upStatus = '';
+  filesEl.hidden = false; filesBody.scrollTop = 0;
+  renderFiles();
+}
+function closeFiles() {
+  if (filesDir !== null) { filesDir = null; upStatus = ''; renderFiles(); return; }   // a folder: back to the top
+  filesEl.hidden = true;
+  recvStop();
+  if (M) M._web_files_closed();   // the home menu waits in hal_web_files
+}
+$('#files-back').addEventListener('click', closeFiles);
+// Big files (disk images up to MAX_FILE) go into the FS a piece at a time: the file is sized once
+// (truncate makes MEMFS allocate exactly that, with no regrowing copies), then each piece is
+// written at its place. A whole 512 MB file read at once, and copied by writeFile, would need
+// twice its size, more than a phone gives a tab.
+const MAX_FILE = 512 * 1024 * 1024;
+// A download. On OPFS the browser's own File for it, which stays on disk; otherwise read a piece at a
+// time (readFile would want the whole file in the wasm heap).
+async function fileBlob(path) {
+  if (cardOpfs && path.startsWith('/sdcard/')) {
+    try {
+      const parts = path.slice(8).split('/'), name = parts.pop();
+      let d = await navigator.storage.getDirectory();
+      for (const p of parts) d = await d.getDirectoryHandle(p);
+      return await (await d.getFileHandle(name)).getFile();
+    } catch (e) { console.warn('opfs file', e); }
+  }
+  const size = await fsStat(path);
+  if (size < 0) throw new Error(path);
+  const fd = await fsOpenR(path), parts = [];
+  try {
+    for (let off = 0; off < size; off += PIECE) parts.push(await fsPread(fd, Math.min(PIECE, size - off), off));
+  } finally { await fsClose(fd); }
+  return new Blob(parts);
+}
+async function writeUpload(path, f, onPct) {
+  if (f.size > MAX_FILE) throw new Error(t('send.tooBig'));
+  const fd = await fsOpenW(path, f.size);
+  try {
+    for (let off = 0; off < f.size; off += PIECE) {
+      const b = new Uint8Array(await f.slice(off, off + PIECE).arrayBuffer());
+      await fsPwrite(fd, b, off);
+      onPct(Math.floor(100 * (off + b.length) / Math.max(1, f.size)));
+    }
+  } catch (e) { await fsClose(fd); await fsUnlink(path); throw e; }
+  await fsClose(fd);
+}
 $('#upload').addEventListener('change', async (e) => {
   const files = [...e.target.files]; e.target.value = '';
   if (!M || !files.length) return;
-  const st = $('#upload-status');
-  const dir = '/sdcard/' + folderSel.value;
-  let n = 0;
+  let n = 0, last = '';
   for (const f of files) {
-    st.textContent = t('files.uploading', f.name);
-    try { M.FS.writeFile(dir + '/' + f.name, new Uint8Array(await f.arrayBuffer())); n++; }
-    catch (err) { alert(t('files.uploadFail', f.name, err)); }
+    const folder = upTarget || recvFolder(f.name);
+    setUpStatus(t('files.uploading', f.name));
+    try {
+      await fsMkdirs('/sdcard/' + folder);
+      await writeUpload('/sdcard/' + folder + '/' + f.name, f, (p) => setUpStatus(t('files.uploading', f.name) + ' ' + p + '%'));
+      n++; last = folder;
+    } catch (err) { alert(t('files.uploadFail', f.name, err)); }
   }
-  persist(() => { st.textContent = t('files.saved', n, folderSel.value); });
-  refreshFiles();
+  upStatus = n ? t('files.saved', n, last) : '';
+  renderFiles();
 });
 
 // ---- receive from PC: the phone opens a relay room (worker/relay.js) under a short code; the
@@ -944,19 +1459,24 @@ $('#upload').addEventListener('change', async (e) => {
 // {"t":"end"}. Each file is written to /sdcard/<folder> and answered with {"t":"saved",path}.
 const EXT_FOLDER = { img: 'pico-386/disks', ima: 'pico-386/disks', vfd: 'pico-386/disks', iso: 'pico-386/disks',
   zip: 'pico-386/games', bin: 'pico-386/roms', ini: 'pico-386' };
-const RECV_IDLE_MS = 10 * 60 * 1000, RECV_MAX = 128 * 1024 * 1024;
-let recv = null;   // { ws, code, idle, cur:{name,size,folder,buf,got} }
+const RECV_IDLE_MS = 10 * 60 * 1000, RECV_MAX = 512 * 1024 * 1024, ACK_EVERY = 1024 * 1024;
+let recv = null;   // { ws, code, idle, chain, cur:{name,size,folder,path,fd,got,acked} }: fd is the file thread's
 
 function recvCode() {
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', r = crypto.getRandomValues(new Uint8Array(5));
   return [...r].map((b) => A[b % A.length]).join('');
 }
-function recvStatus(k, ...a) { $('#recv-status').textContent = t(k, ...a); }
+// kept on recv, so the Files screen shows it again when it is drawn anew
+function recvStatus(k, ...a) {
+  if (!recv) return;
+  recv.status = t(k, ...a);
+  const e = $('#recv-status'); if (e) e.textContent = recv.status;
+}
 function recvTouch() { clearTimeout(recv.idle); recv.idle = setTimeout(recvStop, RECV_IDLE_MS); }
 function recvFolder(name, asked) {
   if (FOLDERS.includes(asked)) return asked;
   const ext = (name.match(/\.([^.]+)$/) || [])[1];
-  return EXT_FOLDER[(ext || '').toLowerCase()] || folderSel.value;
+  return EXT_FOLDER[(ext || '').toLowerCase()] || filesDir || 'pico-386/disks';
 }
 
 function recvStart() {
@@ -965,10 +1485,7 @@ function recvStart() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/api/relay/${code}?role=recv`);
   ws.binaryType = 'arraybuffer';
-  recv = { ws, code, idle: 0, cur: null };
-  $('#recv').hidden = false; $('#btn-recv').hidden = true;
-  $('#recv-code').textContent = code;
-  $('#recv-url').textContent = location.origin + '/send?c=' + code;
+  recv = { ws, code, idle: 0, cur: null, chain: Promise.resolve() };
   recvStatus('recv.connecting');
   recvTouch();
   const reply = (o) => { try { ws.send(JSON.stringify(o)); } catch (e) {} };
@@ -977,54 +1494,65 @@ function recvStart() {
   ws.onmessage = (e) => {
     if (!recv || recv.ws !== ws) return;
     recvTouch();
-    const c = recv.cur;
-    if (typeof e.data !== 'string') {           // a chunk of the current file
-      if (!c || c.bad) return;
-      const b = new Uint8Array(e.data);
-      if (c.got + b.length > c.size) { c.bad = 'size'; return; }
-      c.buf.set(b, c.got); c.got += b.length;
-      recvStatus('recv.getting', c.name, Math.floor(100 * c.got / Math.max(1, c.size)));
-      return;
-    }
-    let m; try { m = JSON.parse(e.data); } catch (err) { return; }
-    if (m.t === 'peer') recvStatus(m.on ? 'recv.pc' : 'recv.waiting');
-    else if (m.t === 'file') {
-      const name = String(m.name || '').replace(/[\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 120);
-      const size = Number(m.size) | 0;
-      if (!name || size < 0 || size > RECV_MAX) { recv.cur = { name: name || '?', bad: 'size' }; return; }
-      recv.cur = { name, size, folder: recvFolder(name, m.folder), buf: new Uint8Array(size), got: 0 };
-      recvStatus('recv.getting', name, 0);
-    } else if (m.t === 'end' && c) {
-      recv.cur = null;
-      if (c.bad || c.got !== c.size) { reply({ t: 'error', name: c.name, msg: t('recv.badFile') }); return; }
-      const dir = '/sdcard/' + c.folder;
-      try {
-        mkdirs(M.FS, dir);
-        M.FS.writeFile(dir + '/' + c.name, c.buf);
-      } catch (err) { reply({ t: 'error', name: c.name, msg: String(err) }); return; }
-      reply({ t: 'saved', name: c.name, path: c.folder + '/' + c.name });
-      recvStatus('recv.saved', c.name, c.folder);
-      refreshFiles(); schedulePersist();
-    }
+    // one message at a time, in order: each waits for the file thread's answer to the one before
+    const R = recv;
+    R.chain = R.chain.then(() => recvMsg(R, e.data, reply)).catch((err) => console.warn('recv', err));
   };
+}
+async function recvMsg(R, data, reply) {
+  if (recv !== R) return;
+  const c = R.cur;
+  if (typeof data !== 'string') {             // a chunk of the current file
+    const b = new Uint8Array(data);
+    if (c && c.bad) { c.got = (c.got || 0) + b.length; reply({ t: 'ack', got: c.got }); return; }   // keep /send moving to its end, which gets the error
+    if (!c) return;
+    if (c.got + b.length > c.size) { c.bad = 'size'; return; }
+    try { await fsPwrite(c.fd, b, c.got); } catch (err) { c.bad = String(err); return; }
+    c.got += b.length;
+    // acked only once written, so /send never runs more than its WINDOW ahead of the phone's storage
+    if (c.got - c.acked >= ACK_EVERY || c.got === c.size) { c.acked = c.got; reply({ t: 'ack', got: c.got }); }
+    if (recv === R) recvStatus('recv.getting', c.name, Math.floor(100 * c.got / Math.max(1, c.size)));
+    return;
+  }
+  let m; try { m = JSON.parse(data); } catch (err) { return; }
+  if (m.t === 'peer') recvStatus(m.on ? 'recv.pc' : 'recv.waiting');
+  else if (m.t === 'file') {
+    const name = String(m.name || '').replace(/[\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 120);
+    const size = Number(m.size) | 0;
+    if (c && c.fd != null) { R.cur = null; await fsClose(c.fd); await fsUnlink(c.path); }
+    if (!name || size < 0 || size > RECV_MAX) { R.cur = { name: name || '?', bad: 'size' }; return; }
+    // straight into the file as it arrives (sized first), not into a buffer the file's size
+    const folder = recvFolder(name, m.folder), path = '/sdcard/' + folder + '/' + name;
+    try {
+      await fsMkdirs('/sdcard/' + folder);
+      R.cur = { name, size, folder, path, fd: await fsOpenW(path, size), got: 0, acked: 0 };
+      reply({ t: 'ack', got: 0 });   // tells /send this phone acks: it then keeps under its WINDOW in flight
+    } catch (err) { R.cur = { name, bad: String(err) }; reply({ t: 'error', name, msg: String(err) }); return; }
+    recvStatus('recv.getting', name, 0);
+  } else if (m.t === 'end' && c) {
+    R.cur = null;
+    if (c.fd != null) await fsClose(c.fd);
+    if (c.bad || c.got !== c.size) {
+      if (c.fd != null) await fsUnlink(c.path);
+      reply({ t: 'error', name: c.name, msg: t('recv.badFile') }); return;
+    }
+    reply({ t: 'saved', name: c.name, path: c.folder + '/' + c.name });
+    recvStatus('recv.saved', c.name, c.folder);
+    refreshFiles();
+  }
 }
 function recvStop() {
   if (!recv) return;
-  clearTimeout(recv.idle);
-  if (recv.ws) { recv.ws.onclose = null; try { recv.ws.close(); } catch (e) {} }
+  const R = recv;
   recv = null;
-  $('#recv').hidden = true; $('#btn-recv').hidden = false;
+  clearTimeout(R.idle);
+  if (R.ws) { R.ws.onclose = null; try { R.ws.close(); } catch (e) {} }
+  // a file cut off halfway is not kept: dropped once the write in progress is done
+  R.chain.then(async () => {
+    const c = R.cur;
+    R.cur = null;
+    if (c && c.fd != null) { await fsClose(c.fd); await fsUnlink(c.path); }
+  });
 }
-$('#btn-recv').addEventListener('click', () => { if (M) recvStart(); });
-$('#btn-recv-stop').addEventListener('click', recvStop);
-$('#btn-reboot').addEventListener('click', () => { if (M && confirm(t('confirm.reboot'))) M.webReboot(); });
-
-// language picker (Files dialog): re-label everything built in JS, too
-const langSel = $('#lang');
-for (const [k, d] of Object.entries(I18N)) { const o = document.createElement('option'); o.value = k; o.textContent = d._name; langSel.appendChild(o); }
-langSel.value = LANG;
-langSel.addEventListener('change', () => setLang(langSel.value));
-document.addEventListener('pico386-lang', () => {
-  if (!$('#files').hidden) refreshFiles();
-  $('#upload-status').textContent = '';
-});
+// a new language re-labels what JS built, too
+document.addEventListener('pico386-lang', () => { upStatus = ''; renderFiles(); });

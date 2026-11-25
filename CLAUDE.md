@@ -736,17 +736,84 @@ Old cards need their `/pc-386` moved and the .ini drive paths edited (README say
 **Web (2026-11-24, the user asked: "a web version for phones, with emu8's techniques").** `web/`:
 - `python web/build.py` (emsdk in `~/emsdk`; objects in `build-web/`, output in `web/dist/`). It builds
   the desktop sources (`BOARD_DESKTOP` + `EMU_WEB`) with `web/src/hal_web.cpp` in place of the SDL HAL:
-  pthreads + `PROXY_TO_PTHREAD`, 256 MB fixed memory, IDBFS at `/sdcard`. Guest RAM goes up to 64 MB
+  pthreads + `PROXY_TO_PTHREAD`, 256 MB fixed memory, WASMFS with `/sdcard` on OPFS (see the card below). Guest RAM goes up to 64 MB
   there (`T386_MEM_MAX_MB` under `EMU_WEB`, 2026-11-24, the user asked; a phone ran about 50 MIPS);
   the page's seed `pc.ini` asks for 64M and raises an old `mem_size = 32M` in `pc.ini` once. FreeDOS's
   `mem` shows 65,536K in headless Chrome. `kHardware` is `web`, the home
-  menu's Exit is "Restart" (reloads the page). Network: none.
+  menu's Exit is "Restart" (reloads the page).
+- **Network (2026-11-24, the user asked: "only Protoweb").** A page has no sockets, so on the web
+  `pc_net.cpp` (EMU_WEB) sends only the proxy's port-80 connections out, each as a WebSocket to the
+  Worker's `/api/tcp?host=&port=` (`hal_tun_*` in hal_web.cpp, `tunOpen` in app.js). The Worker
+  (`relay.js`, `connect()` from `cloudflare:sockets`) takes only `TCP_ALLOW`: Protoweb's hosts and
+  ports (403 otherwise), so it is no open proxy. Binary frames are the stream; the Worker sends
+  text "open" once connected, the page sends "shut" for the guest's FIN, and the proxy's EOF
+  closes the WebSocket. The Worker ignores "shut": on Cloudflare (not wrangler dev) a half-close, even
+  with `allowHalfOpen`, left Protoweb answering nothing (0 bytes; htget sends a FIN after its request). Workerd hands binary messages to the Worker as a Blob (`arrayBuffer()`
+  first). Other TCP is refused, UDP goes nowhere, DNS answers only with fake addresses. The
+  Network menu has no Wi-Fi rows there, and the proxy is Protoweb or Protoweb 2 (Off/Custom read
+  as Protoweb). Dev: `localStorage['pico386-tun'] = 'ws://127.0.0.1:8787'` sends the tunnels to
+  `wrangler dev` while the page comes from serve.py. Tested in headless Chrome (FreeDOS, D: =
+  `nettest/`, `echo PACKETINT 0x60 > mtcp.cfg`, NET.BAT): DHCP, ping 10.0.2.2, and htget of
+  www.yahoo.com brought all 8315 bytes (htget then fails on Protoweb's bare LFs, as on the desktop).
+  The same run on https://386.hexadevit.com (2026-11-24) also brought 8315 bytes.
+- **pico-mac's shell ported (2026-11-25, the user asked: its navigation, keyboard, portrait/landscape and
+  usability).** `style.css` is pico-mac's, adapted; the layouts are `portrait`, `land`, `lgame`, `lkbd` and
+  `padmode` (`gsplit`/`side`/overlay are gone). In landscape the picture fills the area left of the
+  column (`fitPc`); the column is W/4, or 15% on each side with the game keys, whose toolbar is rows of 3
+  that may shrink (7 buttons ran off the edge). Game keys: move sets WASD/ESDF/IJKL/ZQSD/QAOP
+  (`pico386-move`); a tap on ⇄ switches the pad between arrows and the set's letters (`pico386-gswap`),
+  and a 2 s hold steps the set; Click holds the left mouse button. Files > More > Log shows the page's
+  console (copy button). The full-screen buttons hide where the browser has no full screen (iOS).
+  Not ported: the Mac's absolute pointer, one button, page Caps Lock and Mac keyboard rows. Tested in
+  headless Chrome (portrait, landscape, game keys, ⇄, back to portrait); never on a phone.
+- **Screen only (2026-11-25, the user asked: for a keyboard and mouse plugged into the phone).** 🖥 in
+  the landscape toolbar (`onlyOn`, `#app.land.only`) hides everything but the picture, stretched to the
+  whole screen less the notch's side; ☰ and ✕ (`#only-btns`) float top-right and fade after 3 s. It
+  asks for the browser's full screen too where there is one. Upright it is set aside. Also: a mouse
+  with no pointer lock (iPadOS Safari may lack it or refuse it, `pointerlockerror`) steers the guest by
+  its hover moves over the screen (`freeMouseDown`), where before it did nothing; and Alt/Option +
+  letter or digit sends the physical key (`e.code`), as iOS turns Option+F into "ƒ". Tested in headless
+  Chrome at 844x390 (FreeDOS, on and off); the mouse and the Alt key never tested on an iPhone/iPad.
+- Touch: Files > More > Double tap (`pico386-tapgap` in localStorage, 200-500 ms, default 300) is the
+  longest gap between a tap and the next touch; a finger's first 9 px are held back so both clicks
+  land on one spot. Text selection is blocked everywhere but fields and the receive code (`selectstart`).
 - `web/shell/` is the page (copied into dist): `app.js` reads the 320x320 RGBA frame from wasm memory,
   sends keys as PicoCalc codes (`web_key`; letters lower case unless Shift, Caps Lock sent, no browser
   repeats), the canvas is a touchpad (`web_mouse`: drag, tap = left, two-finger tap = right; pointer
   lock with a mouse), an on-screen PC keyboard, ☰ = Ctrl+Esc, 🖱 = a trackpad in the keyboard's place (2026-11-24, the user asked; tap, two-finger tap, double-tap-drag; none in the overlay layout, whose screen is the touchpad; Ctrl+Tab is on the on-screen keyboard), 🎮 = a game keyboard (2026-11-24, the user asked: Esc, Tab, Bs, Enter, WASD, Shift, Ctrl, Alt, Space and a 3x3 arrow pad whose corners press two arrows and whose middle is a second Down, where a finger sliding to another arrow changes the direction, big, on a 14-column grid; its modifiers are held, not latched); in landscape (`gsplit`, 2026-11-24, the user asked) the screen sits in the middle with WASD, Esc, Tab, Shift, Ctrl, Alt and Space on the left and the arrows, Enter, Backspace, a second Shift and Space on the right, a pinch on the screen zooms up to 8x (`zoom`/`zu`/`zv`: `drawPc` scales only the part in view, so it stays sharp), an AudioWorklet on the
-  ring (`web_audio_ring`), Files (upload, download, delete) and "receive from PC" through
-  `worker/relay.js` (Cloudflare Durable Object, `wrangler.jsonc`, `/send`). pt/en/es in `i18n.js`.
+  ring (`web_audio_ring`), Files (upload, download, delete; 2026-11-24, the user asked: the home menu's first row under EMU_WEB, `hal_web_files` waits
+  until the page calls `web_files_closed`, and the screen is `#files` in `#ui`'s card style: Upload (by extension), Receive,
+  the folders as rows, each with its files and Download/Delete, Language, Restart) and "receive from PC" through
+  `worker/relay.js` (Cloudflare Durable Object, `wrangler.jsonc`, `/send`). Files up to 512 MB (2026-11-24, the user asked; it was 128) go into the FS a 4 MB piece at a time, sized first with `ftruncate` (`openSized`), never whole in memory; a 300 MB upload passed a reload in headless Chrome. pt/en/es in `i18n.js`.
+- **The card on OPFS (2026-11-24, the user asked: a big file received from a PC reloaded the page on
+  the phone).** IDBFS kept the whole card in the tab's memory, loaded every file at start and cloned a
+  file again on each save (desktop Chrome's JS heap was 648 MB after a 300 MB receive). Now
+  `-sWASMFS=1` and `mountCard` (hal_web.cpp) mounts `/sdcard` on the OPFS backend from main()'s
+  pthread (memory backend if the browser lacks `FileSystemSyncAccessHandle`), then waits for the
+  page's `webFsInit` (app.js `fsInit`: migrate, seed, pc.ini) to call `web_fs_ready`. Every write is
+  on disk, so `persist()`/`syncfs` are gone. `migrateIdb` moves an old IDBFS card (database
+  `/sdcard`, store `FILE_DATA`) once, a record at a time, then deletes it. The first deploy hung a
+  phone on "Loading": a record is read whole, and a big one kills a phone's tab, which reloads and
+  dies on it again. Now each record is deleted once copied, the one being read is kept in
+  localStorage (`pico386-migrating`) and, found at the next start, is dropped unread and named on the
+  boot screen (`boot.lost`). `boot.card` ("Opening the files…") shows once the page has the card:
+  a hang on "Loading" with it never shown is in `mountCard`, not the page. WASMFS has no `FS.isDir`
+  (`isDirMode`), and its `FS.read`/`write`/`readFile` go through the 256 MB wasm heap, so writes are
+  in 4 MB pieces (`writeAll`) and a download is OPFS's own disk-backed `File` (`fileBlob`).
+  Receive is flow-controlled: the phone acks the header and every 1 MB written (`{t:'ack',got}`),
+  and `/send` keeps at most 8 MB unacked (`WINDOW`; a page that never acks is sent to as before).
+  Tested with `wrangler dev` and a node sender: 200 MB received, byte-exact after a reload, page
+  heap peak 18 MB, never more than 8 MB ahead; download and delete work; an old IDBFS card migrated
+  (snapshot included) and FreeDOS booted from OPFS. Never tested on a phone. The 📁 button in the
+  home menu's header was removed (the user asked); Files is the menu's first row.
+  **The page never calls `Module.FS` (2026-11-24):** with OPFS, a WASMFS call from the browser's main
+  thread blocks it until OPFS's thread answers, and a phone hung for good at the first `mkdir` of the
+  IDBFS move ("Moving to the new storage: pico-386"); desktop Chrome never did. Every page file op
+  (boot, seed, Files, upload, receive, download's fallback) goes to `fsThread` (hal_web.cpp) through
+  `web_fs_req`, answered by `Module.fsDone`; app.js's `fsCall` and its `fs*` helpers are async.
+  Receive handles messages in order (`recv.chain`) and acks only what is written. Pool size 6.
+  Tested in headless Chrome: migration, 200 MB receive byte-exact, upload, delete, Files in-game,
+  FreeDOS boot. Works on the user's phone (2026-11-24): the move finished and the menu came up.
 - **Native picture and touch menus (2026-11-24, the user asked):** the page shows the PC at its own
   resolution, not the panel: `pcvid_native` (pc_video.cpp, EMU_WEB) hands graphics modes from the fb
   and draws text at 9 (or 8) dots a cell with the guest's font (720x400 for 80x25) through
@@ -760,7 +827,7 @@ Old cards need their `/pc-386` moved and the .ini drive paths edited (README say
   work. Screens drawn on the panel (`present`) send `{"t":"panel"}` and show the 320 canvas;
   `pc_runFrame` sends `{"t":"pc"}`. `showNote` and the FPS meter go to `hal_web_status`. Tested in
   headless Chrome: home menu, drives screen, FreeDOS in 720x400, the in-game menu, Save snapshot's
-  name field, the Load list with its picture, landscape. Mode 13h (`m13.img`, a named copy of `m13.ini` written into IDBFS) checked at dpr 1 and 3.
+  name field, the Load list with its picture, landscape. Mode 13h (`m13.img`, a named copy of `m13.ini` written into the card) checked at dpr 1 and 3.
 - A new visitor is seeded (missing files only) with the BIOS and `freedos-hdd-32mb.img` (gzipped in
   `dist/seed/`), and a `pc.ini` named FreeDOS.
 - Test: `python web/serve.py [--all]` (http://localhost:8766, COOP/COEP; on localhost the page also

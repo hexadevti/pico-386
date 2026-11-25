@@ -205,19 +205,28 @@ bool pcprof_home(std::string &iniOut) {
   for (;;) {
     const std::vector<Startup> startups = listStartups();
     const int ns = (int)startups.size();
-    const int rowNew = ns, rowCreate = ns + 1, rowSettings = ns + 2, rowExit = ns + 3, rows = ns + 4;
+#if defined(EMU_WEB)
+    const int top = 1;                    // the browser's Files row comes first: disks arrive there
+#else
+    const int top = 0;
+#endif
+    const int rowNew = top + ns, rowCreate = rowNew + 1, rowSettings = rowNew + 2, rowExit = rowNew + 3,
+              rows = rowNew + 4;
     if (sel < 0) {                        // the startup last chosen
-      sel = 0;
+      sel = top;
       for (int i = 0; i < ns; i++)
-        if (startups[i].file == g_settings.startup) sel = i;
+        if (startups[i].file == g_settings.startup) sel = top + i;
     }
     if (sel >= rows) sel = rows - 1;
     std::vector<std::string> drives(ns);
     std::vector<ui::Item> items(rows);
     for (int i = 0; i < ns; i++) {
       drives[i] = drivesLine(startups[i].ini);
-      items[i] = { startups[i].name.c_str(), nullptr, ui::ICON_PLAY, drives[i].c_str() };
+      items[top + i] = { startups[i].name.c_str(), nullptr, ui::ICON_PLAY, drives[i].c_str() };
     }
+#if defined(EMU_WEB)
+    items[0] = { "Files", nullptr, ui::ICON_FOLDER, "Upload, receive from a PC, download, delete" };
+#endif
     items[rowNew] = { "Create new startup", nullptr, ui::ICON_FOLDER, "A named set of drives (C:, a CD, a zip...)" };
     items[rowCreate] = { "Create a hard disk", nullptr, ui::ICON_SAVE, "A new, formatted C: drive (32-504 MB)" };
     items[rowSettings] = { "Settings", nullptr, ui::ICON_GEAR, "Volume, FPS meter" };
@@ -235,10 +244,14 @@ bool pcprof_home(std::string &iniOut) {
     scr.logo = true;
     const uint8_t k = ui::list(scr, items.data(), rows, &sel);
     if (k != KEY_ENTER) continue;
-    if (sel < ns) {
-      g_settings.startup = startups[sel].file;
+#if defined(EMU_WEB)
+    if (sel == 0) { hal_web_files(); continue; }
+#endif
+    if (sel >= top && sel < top + ns) {
+      const Startup &st = startups[sel - top];
+      g_settings.startup = st.file;
       settingsSave();
-      if (openStartup(startups[sel], iniOut)) return true;
+      if (openStartup(st, iniOut)) return true;
       sel = -1;                           // renamed (re-sorted) or deleted: find it again
       continue;
     }

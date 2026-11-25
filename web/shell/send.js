@@ -6,7 +6,11 @@
 
 const $ = (s) => document.querySelector(s);
 const FOLDERS = ['pico-386', 'pico-386/disks', 'pico-386/games', 'pico-386/roms'];
-const CHUNK = 256 * 1024, HIGH_WATER = 4 * 1024 * 1024, MAX_SIZE = 128 * 1024 * 1024;
+const CHUNK = 256 * 1024, HIGH_WATER = 4 * 1024 * 1024, MAX_SIZE = 512 * 1024 * 1024;
+// A phone writes slower than a PC sends: past WINDOW bytes it hasn't acked, wait. A phone page from
+// before acks never sends one, and is sent to as before.
+const WINDOW = 8 * 1024 * 1024;
+let acked = -1;   // what the phone has written of this file; -1: it doesn't ack
 
 let ws = null, peerOn = false, busy = false, waiter = null;
 const queue = [];
@@ -53,7 +57,8 @@ function connect() {
       setState(m.on ? 'send.connected' : 'send.noPhone', m.on ? 'on' : 'off');
       setReady(m.on);
       if (!m.on && waiter) waiter({ t: 'error', msg: t('send.phoneGone') });
-    } else if ((m.t === 'saved' || m.t === 'error') && waiter) waiter(m);
+    } else if (m.t === 'ack') acked = Number(m.got) || 0;
+    else if ((m.t === 'saved' || m.t === 'error') && waiter) waiter(m);
   };
   ws.onclose = () => {
     setState('send.closed', 'off'); setReady(false); ws = null;
@@ -107,9 +112,12 @@ async function sendOne(job) {
   info.textContent = t('send.sending');
   const done = new Promise((res) => { waiter = res; });
   try {
+    acked = -1;
     ws.send(JSON.stringify({ t: 'file', name: file.name, size: file.size, folder: job.folder }));
+    for (let i = 0; i < 100 && acked < 0 && ws && ws.readyState === 1; i++) await pause(20);   // 2 s for the first ack
     for (let off = 0; off < file.size; off += CHUNK) {
       while (ws && ws.bufferedAmount > HIGH_WATER) await pause(20);
+      while (ws && ws.readyState === 1 && peerOn && acked >= 0 && off - acked > WINDOW) await pause(20);
       if (!ws || ws.readyState !== 1) break;
       ws.send(await file.slice(off, off + CHUNK).arrayBuffer());
       fill.style.width = Math.round(100 * Math.min(file.size, off + CHUNK) / file.size) + '%';
