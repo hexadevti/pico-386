@@ -1,5 +1,5 @@
 // pico-386 -- the browser shell (emu8's web techniques). It owns the page: the layout (portrait /
-// landscape beside / landscape over), the PC's picture at its own resolution and the 320x320 panel
+// landscape), the PC's picture at its own resolution and the 320x320 panel
 // read out of the wasm memory, the emulator's menus drawn as touch screens (ui.cpp sends them as
 // JSON, a tap answers with the key it stands for), the physical
 // keyboard and an on-screen PC keyboard (both as PicoCalc key codes, so pc_keymap does the rest
@@ -106,6 +106,26 @@ function takeStr(ptr) {
   return s;
 }
 const fsReadText = async (path) => takeStr(await fsCall(FSOP.READTEXT, path));
+// A fetch's body into a file of the given size, PIECE by PIECE; the file is removed if it falls short.
+async function streamTo(path, body, size, onPct) {
+  const fd = await fsOpenW(path, size);
+  let off = 0, buf = new Uint8Array(0);
+  try {
+    const rd = body.getReader();
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (value) { const b = new Uint8Array(buf.length + value.length); b.set(buf); b.set(value, buf.length); buf = b; }
+      while (buf.length >= PIECE || (done && buf.length)) {
+        const n = Math.min(PIECE, buf.length);
+        await fsPwrite(fd, buf.subarray(0, n), off);
+        off += n; buf = buf.slice(n);
+        if (onPct) onPct(Math.floor(100 * off / Math.max(1, size)));
+      }
+      if (done) break;
+    }
+  } finally { await fsClose(fd); }
+  if (off !== size) { await fsUnlink(path); throw new Error(path + ': short'); }
+}
 async function fsList(dir) {
   const s = takeStr(await fsCall(FSOP.LIST, dir)) || '';
   return s.split('\n').filter(Boolean).map((l) => {
@@ -123,9 +143,43 @@ async function fsWriteAll(path, data) {
 }
 
 // ======================= module =======================
+// The last lines the emulator and the page wrote, for Files > More > Log: a phone has no console to read.
+const LOG = [], LOG_MAX = 400;
+function logLine(s) {
+  LOG.push(new Date().toISOString().slice(11, 19) + ' ' + s);
+  if (LOG.length > LOG_MAX) LOG.splice(0, LOG.length - LOG_MAX);
+}
+window.addEventListener('error', (e) => logLine('page error: ' + e.message + ' (' + (e.filename || '') + ':' + (e.lineno || 0) + ')'));
+window.addEventListener('unhandledrejection', (e) => logLine('page error: ' + (e.reason && (e.reason.stack || e.reason.message) || e.reason)));
+function logText() {
+  let st = '';
+  try {
+    st = 'ui ' + uiMode + ', screen ' + screenKind + ', picture ' + (M ? M._web_pc_w() + 'x' + M._web_pc_h() + ' frame ' + M._web_pc_frame_no() : '-') +
+      ', drawn ' + lastPcFrame + ', sound ' + (actx ? actx.state + ' ' + actx.sampleRate + ' Hz' : 'off');
+  } catch (e) { st = String(e); }
+  return ['pico-386 ' + location.href, navigator.userAgent, 'isolated ' + self.crossOriginIsolated + ', ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio, st, ''].concat(LOG).join(String.fromCharCode(10));
+}
+function showLog() {
+  const box = el('div', 'log-box');
+  const pre = el('pre', null, logText());
+  const bar = el('div', 'log-bar');
+  const copy = el('button', null, t('log.copy')), close = el('button', null, t('log.close'));
+  // the clipboard API wants a secure context; without it, select the text and copy that
+  const selectPre = () => { const r = document.createRange(); r.selectNodeContents(pre); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand('copy'); copy.textContent = t('log.copied'); };
+  copy.addEventListener('click', () => {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(pre.textContent).then(() => { copy.textContent = t('log.copied'); }, selectPre);
+    else selectPre();
+  });
+  close.addEventListener('click', () => box.remove());
+  bar.append(copy, close);
+  box.append(bar, pre);
+  document.body.append(box);
+  pre.scrollTop = pre.scrollHeight;
+}
+
 const moduleCfg = {
-  print: (s) => console.log(s),
-  printErr: (s) => console.warn(s),
+  print: (s) => { logLine(s); console.log(s); },
+  printErr: (s) => { logLine(s); console.warn(s); },
   // hal_reboot / hal_reboot_to_loader (home menu Restart, Ctrl+PgUp, Ctrl+F8): save, then reload
   webReboot: () => persist(() => location.reload()),
   webFiles: () => openFiles(),   // the home menu's Files row (hal_web_files)
@@ -288,7 +342,7 @@ async function devPreload() {
     const r = await fetch('/__sdcard/' + f.path.split('/').map(encodeURIComponent).join('/'));
     if (!r.ok) continue;
     await fsMkdirs(dst.slice(0, dst.lastIndexOf('/')));
-    await fsWriteAll(dst, new Uint8Array(await r.arrayBuffer()));
+    await streamTo(dst, r.body, f.size, (p) => { bootMsg.textContent = t('boot.copying', f.path) + ' ' + p + '%'; });
   }
 }
 
@@ -363,6 +417,9 @@ function fitPc() {
   if (!r.width || !r.height) return;
   let w = r.width, h = w * 3 / 4;
   if (h > r.height) { h = r.height; w = h * 4 / 3; }
+  // landscape: the picture fills its whole area, stretched if need be (drawPc scales x and y apart, in
+  // device pixels, so it stays as sharp as it can)
+  if (app.classList.contains('land')) { w = r.width; h = r.height; }
   pcCanvas.style.width = w + 'px'; pcCanvas.style.height = h + 'px';
   boxW = Math.max(1, Math.round(w * devicePixelRatio));
   boxH = Math.max(1, Math.round(h * devicePixelRatio));
@@ -603,40 +660,67 @@ function renderEdit(j) {
 let kbdOn = true;
 let padOn = false;                    // 🖱: the trackpad in the keyboard's place
 let gameOn = false;                   // 🎮: the game keyboard in the PC keyboard's place
+let wasLand = null;                   // the last layout was landscape (null: none yet)
+// 🖥 screen only (landscape): no toolbar, keys or trackpad, the picture over the whole screen, for a
+// keyboard and mouse plugged into the phone or tablet. Upright it is set aside, and back on turning.
+let onlyOn = false;
 function layout() {
   const W = window.innerWidth, H = window.innerHeight;
-  app.classList.remove('portrait', 'side', 'overlay', 'gsplit');
+  // fitKbdRows: the PC keyboard's row height from its box (flex: 1, so the box is what is left)
+  const fitKbdRows = () => {
+    const rows = kbd.querySelectorAll('.krow').length || 6;
+    const cs = getComputedStyle(kbd);
+    const gap = parseFloat(cs.rowGap) || 4;
+    const inner = kbd.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    const kh = Math.floor((inner - gap * (rows - 1)) / rows);
+    if (kh > 0) app.style.setProperty('--kh', Math.max(20, Math.min(62, kh)) + 'px');
+  };
+  // sideways starts with the PC keyboard hidden (it would cover the screen; ⌨ shows it), the game
+  // keys stay; upright brings it back
+  if ((W > H) !== wasLand) {
+    wasLand = W > H;
+    if (wasLand && !gameOn) kbdOn = false;
+    else if (!wasLand && !padOn) kbdOn = true;
+  }
+  app.classList.remove('portrait', 'land', 'lgame', 'lkbd', 'only');
+  $('#only-btns').hidden = !(onlyOn && W > H);
   // the screen's box: square for the panel, 4:3 for the PC's picture
   const ar = screenKind === 'pc' ? 4 / 3 : 1;
-  app.style.setProperty('--ar', ar === 1 ? '1' : '4 / 3');
-  if (H < W && gameOn && kbdOn && !padOn) {
-    // landscape game keys: the screen in the middle, half the keys on each side of it
-    app.classList.add('gsplit');
-    const side = Math.max(150, (W - H * ar) / 2);
-    app.style.setProperty('--scrw', Math.max(200, W - 2 * side) + 'px');
-  } else if (H >= W) {
+  app.style.setProperty('--ar', String(ar));
+  let pad = padOn;
+  if (H >= W) {
     app.classList.add('portrait');
-    // the keyboard's rows share what the screen leaves (at least 40% of the height)
-    const scr = Math.min(W / ar, H * (kbdOn || padOn ? 0.6 : 0.85));
+    // the screen at the full width in every mode (only a very short window caps it, at 70% of the
+    // height); the keyboard's rows, the game keys or the trackpad share what it leaves
+    const scr = Math.min(W / ar, H * 0.7);
     app.style.setProperty('--scrh', scr + 'px');
-    app.style.setProperty('--kh', Math.max(30, Math.min(46, (H - scr - 100) / 6.4)) + 'px');
-  } else if (W - H * ar >= 300) {
-    app.classList.add('side');
-    app.style.setProperty('--scrw', H * ar + 'px');
-    app.style.setProperty('--kh', Math.max(26, Math.min(46, (H - 100) / 6.6)) + 'px');
+    app.style.setProperty('--kh', Math.max(30, Math.min(62, (H - scr - 100) / 6.4)) + 'px');
   } else {
-    app.classList.add('overlay');
-    app.style.setProperty('--kh', Math.max(24, Math.min(36, H / 13)) + 'px');
+    // landscape: the picture is stretched to its whole area (fitPc). Game keys: the screen in the
+    // middle, the action keys at its left, the toolbar and the arrow pad at its right. Otherwise: the
+    // screen at the left in 3/4 of the width, the toolbar, the mouse buttons and the trackpad in the
+    // quarter at its right; the PC keyboard lies over the screen's bottom (⌨ hides it and shows it again)
+    app.classList.add('land');
+    app.classList.toggle('only', onlyOn);
+    const game = gameOn && kbdOn && !padOn && !onlyOn;
+    const side = Math.round(game ? Math.max(110, W * 0.15) : W / 4);
+    app.style.setProperty('--side', side + 'px');
+    app.classList.toggle('lgame', game);
+    app.classList.toggle('lkbd', kbdOn && !gameOn && !padOn);
+    app.style.setProperty('--kh', Math.max(26, Math.min(38, H / 11)) + 'px');
+    pad = !game && !onlyOn;
   }
-  // narrow landscape lays everything over the screen, which is already a touchpad: no pad there
-  const pad = padOn && !app.classList.contains('overlay');
   app.classList.toggle('padmode', pad);
   $('#pad').hidden = !pad;
-  kbd.hidden = !kbdOn || padOn;
+  kbd.hidden = !kbdOn || padOn || app.classList.contains('only');
   if (kbd.classList.contains('game') !== gameOn) buildKbd();
   $('[data-act=kbd]').classList.toggle('on', kbdOn && !padOn && !gameOn);
   $('[data-act=game]').classList.toggle('on', kbdOn && gameOn && !padOn);
   $('[data-act=mouse]').classList.toggle('on', padOn);
+  // upright, fit the PC keyboard's rows to the height it really got: the estimate above knows neither
+  // the toolbar's and mouse buttons' heights nor iOS's safe areas, and rows taller than the box
+  // overflowed upwards (it is aligned to the bottom), so Esc/F1-F10 lay over the toolbar
+  if (H >= W && !kbd.hidden && !gameOn) fitKbdRows();
   requestAnimationFrame(fitPc);
 }
 window.addEventListener('resize', layout);
@@ -667,6 +751,13 @@ const downByCode = new Map();          // e.code -> the code its press sent
 function codeOf(e) {
   if (e.key === 'Shift') return e.code === 'ShiftRight' ? K.SHIFT_R : K.SHIFT_L;
   if (SPECIAL[e.key] !== undefined) return SPECIAL[e.key];
+  // With Alt (a Mac or iPad keyboard's Option) the key gives another character (Option+F is "ƒ",
+  // Option+E a dead key), which was dropped, so Alt+F and the like never reached the guest: the
+  // physical key's letter or digit is sent instead.
+  if (e.altKey && !(e.getModifierState && e.getModifierState('AltGraph'))) {   // AltGr's characters stay
+    const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code || '');
+    if (m) return (m[1] ? (e.shiftKey ? m[1] : m[1].toLowerCase()) : m[2]).charCodeAt(0);
+  }
   if (e.key && e.key.length === 1) {
     let c = e.key;
     if (/[a-z]/i.test(c)) c = e.shiftKey ? c.toUpperCase() : c.toLowerCase();
@@ -718,28 +809,42 @@ const ROWS = [
 
 // The game keyboard (🎮): the keys games use, big, about where they sit on a real keyboard (WASD at
 // the left, the arrows at the right), on a 14-column grid: x, y and the width in columns. Its Ctrl,
-// Shift and Alt are held while the finger stays on them (fire, run), not latched. The arrows are a
-// 3x3 pad whose corners hold two arrows at once (codes), for diagonal moves; its middle is a
-// second Down, so all four arrows sit in an inverted T as on a keyboard. A finger that slides from
-// one arrow to another changes the direction (pad keys), as on a game pad's cross.
-// In landscape (gsplit) the keys split to both sides of the screen, for two thumbs: S() gives each
-// its place there, left (WASD side, 8 columns) or right (arrows, 6 columns). Keys marked 'split'
-// show only then: a second Shift and Space by the arrows.
+// Shift and Alt are held while the finger stays on them (fire, run), not latched; Click is the mouse's
+// left button (mb), for the games that fire with it. The arrows are a 3x3 pad whose corners hold two
+// arrows at once (codes), for diagonal moves; its middle is a second Down, so all four arrows sit in
+// an inverted T as on a keyboard. A finger that slides from one arrow to another changes the
+// direction (pad keys), as on a game pad's cross.
+// In landscape (lgame) a simpler set of big keys sits at both sides of the screen: S() gives each its
+// side and place there, 'r' at the left (2 columns: Esc ⇄, Shift Ctrl, Alt Enter, Click, Space) and 'l'
+// at the right (the 3x3 pad, which ⇄ turns into letters, under the toolbar). The keys with no S() are
+// upright only.
 const GK = (l, code, x, y, w = 2, cls) => ({ l, code, x, y, w, cls });
-const GC = (c, x, y) => ({ l: c.toUpperCase(), c, x, y, w: 2 });
-const GD = (l, a, b, x, y) => ({ l, codes: [a, b], x, y, w: 2, cls: 'diag', pad: true });
-const GA = (l, code, x, y) => ({ l, codes: [code], x, y, w: 2, pad: true });
+// dirs: the pad key's directions (0 up, 1 left, 2 down, 3 right), for the letter pad (gameSwap)
+const GD = (l, a, b, x, y, dirs) => ({ l, arrow: l, codes: [a, b], arrows: [a, b], dirs, x, y, w: 2, cls: 'diag', pad: true });
+const GA = (l, code, x, y, dir) => ({ l, arrow: l, codes: [code], arrows: [code], dirs: [dir], x, y, w: 2, pad: true });
 const S = (k, side, x, y, w = 2) => Object.assign(k, { side, sx: x, sy: y, sw: w });
+// The four movement letters (dir: up, left, down, right) follow MOVE_SETS[moveSet]; the ⇄ key steps
+// through them (kept in localStorage): WASD, ESDF (the home row), IJKL, ZQSD (AZERTY's WASD) and
+// QAOP (Q up, A down, O left, P right, as many 8-bit games).
+const GM = (dir, x, y) => ({ dir, x, y, w: 2 });
+const MOVE_SETS = [
+  { name: 'WASD', keys: 'wasd' }, { name: 'ESDF', keys: 'esdf' }, { name: 'IJKL', keys: 'ijkl' },
+  { name: 'ZQSD', keys: 'zqsd' }, { name: 'QAOP', keys: 'qoap' },
+];
+let moveSet = Math.max(0, MOVE_SETS.findIndex((m) => m.name === localStorage.getItem('pico386-move')));
+// A tap on ⇄ turns the arrow pad into the movement letters (↑ W, ← A, ↓ S, → D, the corners two
+// letters) and back; a 2 s hold steps the letters instead. Both are kept.
+let gameSwap = localStorage.getItem('pico386-gswap') === '1';
 const GAME = [
-  S(GK('Esc', K.ESC, 1, 1, 2, 'mod'), 'l', 1, 1), S(GC('w', 5, 1), 'l', 5, 1),
-  S(GK('⌫', K.BS, 9, 1, 2, 'mod'), 'r', 1, 1), S(GK('Enter', K.ENTER, 11, 1, 4, 'mod'), 'r', 3, 1, 4),
-  S(GK('Tab', K.TAB, 1, 2, 2, 'mod'), 'l', 1, 2), S(GC('a', 3, 2), 'l', 3, 2), S(GC('s', 5, 2), 'l', 5, 2), S(GC('d', 7, 2), 'l', 7, 2),
-  S(GD('↖', K.UP, K.LEFT, 9, 2), 'r', 1, 2), S(GA('↑', K.UP, 11, 2), 'r', 3, 2), S(GD('↗', K.UP, K.RIGHT, 13, 2), 'r', 5, 2),
-  S(GK('Shift', K.SHIFT_L, 1, 3, 4, 'mod'), 'l', 1, 3, 4),
-  S(GA('←', K.LEFT, 9, 3), 'r', 1, 3), S(GA('↓', K.DOWN, 11, 3), 'r', 3, 3), S(GA('→', K.RIGHT, 13, 3), 'r', 5, 3),
-  S(GK('Ctrl', K.CTRL, 1, 4, 2, 'mod'), 'l', 1, 4), S(GK('Alt', K.ALT, 3, 4, 2, 'mod'), 'l', 3, 4), S(GK('Space', 0x20, 5, 4, 4), 'l', 5, 4, 4),
-  S(GD('↙', K.DOWN, K.LEFT, 9, 4), 'r', 1, 4), S(GA('↓', K.DOWN, 11, 4), 'r', 3, 4), S(GD('↘', K.DOWN, K.RIGHT, 13, 4), 'r', 5, 4),
-  S(GK('Shift', K.SHIFT_R, 0, 0, 2, 'mod split'), 'r', 1, 5, 3), S(GK('Space', 0x20, 0, 0, 2, 'split'), 'r', 4, 5, 3),
+  S(GK('Esc', K.ESC, 1, 1, 2, 'mod'), 'r', 1, 1, 1), S({ l: '', top: '⇄', cycle: true, x: 3, y: 1, w: 2, cls: 'mod cyc' }, 'r', 2, 1, 1), GM(0, 5, 1),
+  S({ l: 'Click', mb: 1, x: 7, y: 1, w: 2, cls: 'mod' }, 'r', 1, 4, 2),
+  GK('⌫', K.BS, 9, 1, 2, 'mod'), S(GK('Enter', K.ENTER, 11, 1, 4, 'mod'), 'r', 2, 3, 1),
+  GK('Tab', K.TAB, 1, 2, 2, 'mod'), GM(1, 3, 2), GM(2, 5, 2), GM(3, 7, 2),
+  S(GD('↖', K.UP, K.LEFT, 9, 2, [0, 1]), 'l', 1, 1, 1), S(GA('↑', K.UP, 11, 2, 0), 'l', 2, 1, 1), S(GD('↗', K.UP, K.RIGHT, 13, 2, [0, 3]), 'l', 3, 1, 1),
+  S(GK('Shift', K.SHIFT_L, 1, 3, 4, 'mod'), 'r', 1, 2, 1), S(GK('Ctrl', K.CTRL, 5, 3, 4, 'mod'), 'r', 2, 2, 1),
+  S(GA('←', K.LEFT, 9, 3, 1), 'l', 1, 2, 1), S(GA('↓', K.DOWN, 11, 3, 2), 'l', 2, 2, 1), S(GA('→', K.RIGHT, 13, 3, 3), 'l', 3, 2, 1),
+  S(GK('Alt', K.ALT, 1, 4, 2, 'mod'), 'r', 1, 3, 1), S(GK('Space', 0x20, 3, 4, 6), 'r', 1, 5, 2),
+  S(GD('↙', K.DOWN, K.LEFT, 9, 4, [2, 1]), 'l', 1, 3, 1), S(GA('↓', K.DOWN, 11, 4, 2), 'l', 2, 3, 1), S(GD('↘', K.DOWN, K.RIGHT, 13, 4, [2, 3]), 'l', 3, 3, 1),
 ];
 
 const kbd = $('#kbd');
@@ -764,7 +869,41 @@ function makeKey(k) {
   b.className = 'k' + (k.cls ? ' ' + k.cls : '');
   if (k.top) { const s = document.createElement('small'); s.textContent = k.top; b.appendChild(s); }
   const m = document.createElement('span'); m.textContent = k.l; b.appendChild(m);
-  if (k.latch) {
+  if (k.cycle) {
+    let hold = 0;
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { b.setPointerCapture(e.pointerId); } catch (_) {}
+      b.classList.add('down');
+      clearTimeout(hold);
+      hold = setTimeout(() => {
+        hold = 0;
+        moveSet = (moveSet + 1) % MOVE_SETS.length;
+        try { localStorage.setItem('pico386-move', MOVE_SETS[moveSet].name); } catch (_) {}
+        buildKbd();
+      }, 2000);
+    });
+    const up = (e) => {
+      b.classList.remove('down');
+      if (!hold) return;                 // the hold already changed the letters
+      clearTimeout(hold); hold = 0;
+      if (e.type !== 'pointerup') return;
+      gameSwap = !gameSwap;
+      try { localStorage.setItem('pico386-gswap', gameSwap ? '1' : '0'); } catch (_) {}
+      buildKbd();
+    };
+    b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
+  } else if (k.mb) {
+    // a mouse button, held while the finger stays on it (as the touchpad's buttons)
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { b.setPointerCapture(e.pointerId); } catch (_) {}
+      b.classList.add('down');
+      setButtons(btnHeld | k.mb);
+    });
+    const up = () => { b.classList.remove('down'); setButtons(btnHeld & ~k.mb); };
+    b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
+  } else if (k.latch) {
     b.dataset.latch = k.code;
     b.addEventListener('pointerdown', (e) => { e.preventDefault(); setLatch(k.code, !latched.has(k.code)); });
   } else {
@@ -815,16 +954,27 @@ function buildKbd() {
   kbd.innerHTML = '';
   kbd.classList.toggle('game', gameOn);
   if (gameOn) {
-    // both places are set; the CSS picks one (the portrait grid, or gsplit's two side grids)
+    // both places are set; the CSS picks one (the portrait grid, or lgame's two side grids)
     const half = { l: document.createElement('div'), r: document.createElement('div') };
     half.l.className = 'gl'; half.r.className = 'gr';
+    const set = MOVE_SETS[moveSet];
     for (const k of GAME) {
+      if (k.dir !== undefined) { k.c = set.keys[k.dir]; k.l = k.c.toUpperCase(); }
+      if (k.cycle) k.l = set.name;
+      if (k.dirs) {
+        // the letter pad: each key sends its directions' letters, with its arrow above them
+        const ch = k.dirs.map((d) => set.keys[d]);
+        k.codes = gameSwap ? ch.map((c) => c.charCodeAt(0)) : k.arrows;
+        k.l = gameSwap ? ch.join('').toUpperCase() : k.arrow;
+        k.top = gameSwap ? k.arrow : undefined;
+      }
       const b = makeKey(k);
       b.style.setProperty('--pc', `${k.x} / span ${k.w}`);
       b.style.setProperty('--pr', String(k.y));
       b.style.setProperty('--sc', `${k.sx} / span ${k.sw}`);
       b.style.setProperty('--sr', String(k.sy));
-      half[k.side].appendChild(b);
+      if (!k.side) b.classList.add('pt');          // upright only
+      half[k.side || 'l'].appendChild(b);
     }
     kbd.append(half.l, half.r);
     return;
@@ -845,7 +995,7 @@ layout();
 // ======================= mouse =======================
 // No text selection from a drag or a long press: a gesture on the screen, the trackpad or the keys must
 // not start one (phones do, despite user-select). Only fields and the receive code may be selected.
-const selectable = (n) => n && n.closest && n.closest('input, textarea, .recv-url, .recv-code');
+const selectable = (n) => n && n.closest && n.closest('input, textarea, .recv-url, .recv-code, .log-box pre');
 document.addEventListener('selectstart', (e) => {
   if (!selectable(e.target.nodeType === 1 ? e.target : e.target.parentElement)) e.preventDefault();
 });
@@ -904,7 +1054,8 @@ function bindTouchpad(el, mouseToo, zoomable) {
     e.preventDefault();
     if (!M || uiMode !== 'pc' || !M._web_pc_running()) return;
     if (e.pointerType === 'mouse' && !mouseToo) {
-      if (document.pointerLockElement !== wrap) { wrap.requestPointerLock && wrap.requestPointerLock(); return; }
+      if (!canLock()) { freeMouseDown(e); return; }
+      if (document.pointerLockElement !== wrap) { wrap.requestPointerLock(); return; }
       return;                         // locked: the window's mouse events below take it
     }
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
@@ -973,6 +1124,37 @@ bindTouchpad(wrap, false, true);
 bindTouchpad($('#pad'), true, false);
 
 document.addEventListener('pointerlockchange', () => wrap.classList.toggle('locked', document.pointerLockElement === wrap));
+
+// A real mouse where the screen can't be locked: iPadOS's Safari may lack pointer lock or refuse it,
+// and the mouse then did nothing. It now steers the guest's pointer by its moves over the screen
+// (hover too, not only drags; scaled as a finger is, so across the screen is across the picture),
+// and its buttons are the guest's. The host's pointer is hidden there (.free) so only one shows.
+let lockFailed = false;
+document.addEventListener('pointerlockerror', () => { lockFailed = true; });
+const canLock = () => !!wrap.requestPointerLock && !lockFailed;
+let freeX = null, freeY = null;
+const mouseBit = (e) => (e.button === 0 ? 1 : e.button === 2 ? 2 : 0);
+function freeMouseDown(e) {
+  try { wrap.setPointerCapture(e.pointerId); } catch (_) {}
+  freeX = e.clientX; freeY = e.clientY;
+  const bit = mouseBit(e);
+  if (bit) setButtons(btnHeld | bit);
+}
+wrap.addEventListener('pointermove', (e) => {
+  if (e.pointerType !== 'mouse' || canLock() || uiMode !== 'pc') return;
+  wrap.classList.add('free');
+  // a second button pressed or let go while one is held comes only as a move (no pointerdown/up)
+  const b = e.buttons & 3;
+  if (b !== (btnHeld & 3)) setButtons((btnHeld & ~3) | b);
+  if (freeX !== null) touchMove(e.clientX - freeX, e.clientY - freeY);
+  freeX = e.clientX; freeY = e.clientY;
+});
+wrap.addEventListener('pointerup', (e) => {
+  if (e.pointerType !== 'mouse' || canLock()) return;
+  const bit = mouseBit(e);
+  if (bit) setButtons(btnHeld & ~bit);
+});
+wrap.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') freeX = freeY = null; });
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === wrap) sendMouse(e.movementX, e.movementY);
 });
@@ -997,7 +1179,7 @@ document.querySelectorAll('.mb').forEach((b) => {
 // (the touchpad's buttons show only while a PC runs: setMode)
 
 // ======================= toolbar =======================
-$('#toolbar').addEventListener('click', (e) => {
+function toolbarClick(e) {
   const b = e.target.closest('button'); if (!b) return;
   startAudio();
   switch (b.dataset.act) {
@@ -1008,8 +1190,38 @@ $('#toolbar').addEventListener('click', (e) => {
     case 'mouse': padOn = !padOn; if (padOn) gameOn = false; else kbdOn = true; layout(); break;   // the trackpad instead of the keyboard
     case 'sound': toggleMute(); break;
     case 'fs': toggleFullscreen(); break;
+    case 'only': toggleOnly(); break;
   }
-});
+  b.blur();                           // or a real keyboard's Space/Enter would press it again
+}
+$('#toolbar').addEventListener('click', toolbarClick);
+$('#only-btns').addEventListener('click', toolbarClick);
+// Screen only: where the browser has a real full screen (not iOS) it is asked for too, and left
+// again on the way back if this asked for it.
+let onlyFs = false;
+function toggleOnly() {
+  onlyOn = !onlyOn;
+  const d = document, fsNow = !!(d.fullscreenElement || d.webkitFullscreenElement);
+  if (onlyOn && !fsNow && (d.fullscreenEnabled || d.webkitFullscreenEnabled)) { onlyFs = true; toggleFullscreen(); }
+  else if (!onlyOn && onlyFs) { onlyFs = false; if (fsNow) toggleFullscreen(); }
+  layout();
+  showOnlyBtns();
+}
+// its two buttons fade after a few seconds, and come back when the screen is touched or the mouse moves
+let onlyFade = 0;
+function showOnlyBtns() {
+  const g = $('#only-btns');
+  g.classList.remove('dim');
+  clearTimeout(onlyFade);
+  onlyFade = setTimeout(() => g.classList.add('dim'), 3000);
+}
+for (const ev of ['pointerdown', 'pointermove']) document.addEventListener(ev, () => { if (onlyOn) showOnlyBtns(); }, { passive: true });
+// iOS has no full screen for a page: no button for it there. Landscape adds 🖥, so the toolbar has 7
+// or 8 buttons there, in rows of 4 (n7)
+if (!(document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+  $('[data-act=fs]').hidden = true; $('#ui-fs').hidden = true;
+}
+$('#toolbar').classList.add('n7');
 function toggleFullscreen() {
   const d = document;
   if (!d.fullscreenElement && !d.webkitFullscreenElement) {
@@ -1137,6 +1349,7 @@ async function renderFiles() {
     w.append(fRow({ ico: '👆', label: t('files.tapgap'), sub: t('files.tapgapSub', tapGap),
       acts: [['◀', t('files.tapgap'), () => { stepTapGap(-1); renderFiles(); }],
              ['▶', t('files.tapgap'), () => { stepTapGap(1); renderFiles(); }]] }));
+    w.append(fRow({ ico: '📜', label: t('files.log'), sub: t('files.logSub'), click: showLog }));
     w.append(fRow({ ico: '🔄', label: t('files.reboot'), sub: t('files.rebootSub'),
       click: () => { if (confirm(t('confirm.reboot'))) M.webReboot(); } }));
     const hint = el('p', 'ui-note'); hint.innerHTML = t('files.hint'); w.append(hint);

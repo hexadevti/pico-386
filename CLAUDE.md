@@ -756,6 +756,24 @@ Old cards need their `/pc-386` moved and the .ini drive paths edited (README say
   `nettest/`, `echo PACKETINT 0x60 > mtcp.cfg`, NET.BAT): DHCP, ping 10.0.2.2, and htget of
   www.yahoo.com brought all 8315 bytes (htget then fails on Protoweb's bare LFs, as on the desktop).
   The same run on https://386.hexadevit.com (2026-11-24) also brought 8315 bytes.
+- **pico-mac's shell ported (2026-11-25, the user asked: its navigation, keyboard, portrait/landscape and
+  usability).** `style.css` is pico-mac's, adapted; the layouts are `portrait`, `land`, `lgame`, `lkbd` and
+  `padmode` (`gsplit`/`side`/overlay are gone). In landscape the picture fills the area left of the
+  column (`fitPc`); the column is W/4, or 15% on each side with the game keys, whose toolbar is rows of 3
+  that may shrink (7 buttons ran off the edge). Game keys: move sets WASD/ESDF/IJKL/ZQSD/QAOP
+  (`pico386-move`); a tap on ⇄ switches the pad between arrows and the set's letters (`pico386-gswap`),
+  and a 2 s hold steps the set; Click holds the left mouse button. Files > More > Log shows the page's
+  console (copy button). The full-screen buttons hide where the browser has no full screen (iOS).
+  Not ported: the Mac's absolute pointer, one button, page Caps Lock and Mac keyboard rows. Tested in
+  headless Chrome (portrait, landscape, game keys, ⇄, back to portrait); never on a phone.
+- **Screen only (2026-11-25, the user asked: for a keyboard and mouse plugged into the phone).** 🖥 in
+  the landscape toolbar (`onlyOn`, `#app.land.only`) hides everything but the picture, stretched to the
+  whole screen less the notch's side; ☰ and ✕ (`#only-btns`) float top-right and fade after 3 s. It
+  asks for the browser's full screen too where there is one. Upright it is set aside. Also: a mouse
+  with no pointer lock (iPadOS Safari may lack it or refuse it, `pointerlockerror`) steers the guest by
+  its hover moves over the screen (`freeMouseDown`), where before it did nothing; and Alt/Option +
+  letter or digit sends the physical key (`e.code`), as iOS turns Option+F into "ƒ". Tested in headless
+  Chrome at 844x390 (FreeDOS, on and off); the mouse and the Alt key never tested on an iPhone/iPad.
 - Touch: Files > More > Double tap (`pico386-tapgap` in localStorage, 200-500 ms, default 300) is the
   longest gap between a tap and the next touch; a finger's first 9 px are held back so both clicks
   land on one spot. Text selection is blocked everywhere but fields and the receive code (`selectstart`).

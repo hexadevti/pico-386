@@ -1,7 +1,7 @@
 /* pico-386 -- the page's layout: the screen (the PicoCalc's 320x320 panel, or the PC at its own resolution
    in a 4:3 box), a toolbar, the touchpad's two buttons, a PC keyboard and the menus as touch screens.
-   Portrait stacks them; landscape puts the screen at the left and the rest beside it, or (no room)
-   lays the keyboard over the screen. */
+   Portrait stacks them; landscape puts the trackpad at the right of the screen and lays the PC keyboard
+   over the screen, or puts the game keys at both sides of it. */
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 input, textarea { user-select: text; -webkit-user-select: text; }
 html, body { margin: 0; height: 100%; background: #000; color: #ddd; overflow: hidden;
@@ -59,43 +59,65 @@ button { font: inherit; color: inherit; }
 #kbd.game .k.diag { background: #25252c; color: #aab; }
 #kbd.game .gl, #kbd.game .gr { display: contents; }
 #kbd.game .k { grid-column: var(--pc); grid-row: var(--pr); }
-#kbd.game .k.split { display: none; }
-
-/* ---------- landscape game keys: screen in the middle, the keys split to both sides ---------- */
-#app.gsplit { display: grid; grid-template-columns: 1fr var(--scrw) 1fr; grid-template-rows: auto 1fr; }
-#app.gsplit #screen-wrap { grid-column: 2; grid-row: 1 / span 2; height: 100%; }
-#app.gsplit #toolbar { grid-column: 1; grid-row: 1; padding: 6px 4px 0; gap: 4px; }
-#app.gsplit #toolbar button { width: 38px; height: 32px; font-size: 15px; }
-#app.gsplit #mbtns { grid-column: 3; grid-row: 1; padding: 6px 6px 0; align-self: start; }
-#app.gsplit #kbd { display: contents; }
-#app.gsplit #kbd .gl, #app.gsplit #kbd .gr { display: grid; grid-row: 2; gap: 5px; padding: 6px; min-height: 0; background: #15151a; }
-#app.gsplit #kbd .gl { grid-column: 1; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(4, 1fr); }
-#app.gsplit #kbd .gr { grid-column: 3; grid-template-columns: repeat(6, 1fr); grid-template-rows: repeat(5, 1fr); }
-#app.gsplit #kbd .k { grid-column: var(--sc); grid-row: var(--sr); font-size: 18px; }
-#app.gsplit #kbd .k.mod { font-size: 13px; }
-#app.gsplit #kbd .k.split { display: flex; }
 
 /* ---------- portrait: screen on top, then the toolbar, the buttons and the keyboard ---------- */
 #app.portrait { flex-direction: column; }
-#app.portrait #screen-wrap { width: 100%; aspect-ratio: var(--ar, 1); flex: 0 1 auto; min-height: 0; max-height: var(--scrh, 60vh); }
+/* the screen keeps the whole width in every mode (keyboard, game keys, trackpad): the rest shares what is left */
+#app.portrait #screen-wrap { width: 100%; flex: 0 0 auto; height: var(--scrh, 60vh); }
 #app.portrait #toolbar { padding: 6px 0; }
-#app.portrait #kbd { flex: 1; justify-content: flex-end; }
+#app.portrait #kbd { flex: 1; min-height: 0; justify-content: flex-end; }
+#app.portrait #pad { min-height: 60px; }
+#app.portrait #kbd.game { grid-template-rows: repeat(4, minmax(0, 1fr)); }   /* the rows fit what is left */
 
-/* ---------- landscape (side): the square screen at the left, the rest in a column beside it ---------- */
-#app.side { display: grid; grid-template-columns: var(--scrw) 1fr; grid-template-rows: auto auto 1fr; }
-#app.side #screen-wrap { grid-row: 1 / span 3; grid-column: 1; height: 100%; }
-#app.side #toolbar { grid-column: 2; padding: 6px 0; }
-#app.side #mbtns { grid-column: 2; }
-#app.side.padmode { grid-template-rows: auto 1fr auto; }
-#app.side #pad { grid-column: 2; }
-#app.side #kbd { grid-column: 2; justify-content: flex-end; }
+/* ---------- landscape (land): the screen at the left in up to 3/4, a column at its right ----------
+   the column: the toolbar, the mouse buttons and the trackpad. The PC keyboard (lkbd) lies over the
+   screen's bottom. With the game keys (lgame) the screen is in the middle: the action keys (.gr) at
+   its left, the toolbar and the pad (.gl) at its right; the keys are kept small, at the bottom. */
+#app.land { display: grid; grid-template-columns: 1fr var(--side); grid-template-rows: auto auto 1fr; }
+/* the screen uses the whole height, under the safe areas' top and bottom too */
+#app.land { padding-top: 0; padding-bottom: 0; }
+#app.land > :not(#screen-wrap) { margin-bottom: env(safe-area-inset-bottom); }
+#app.land #screen-wrap { grid-column: 1; grid-row: 1 / span 3; height: 100%; }
+/* the toolbar: big buttons (two rows of 3), away from the very top edge, which iOS
+   keeps for its own gestures */
+#app.land #toolbar { grid-column: 2; grid-row: 1; padding: 14px 6px 6px; gap: 6px; margin-bottom: 0;
+  display: grid; grid-template-columns: repeat(3, 1fr); }
+#app.land #toolbar button { width: auto; height: 42px; font-size: 18px; }
+/* with the full-screen button too (not on iOS, which has no full screen): 7 buttons, rows of 4 */
+#app.land #toolbar.n7 { grid-template-columns: repeat(4, 1fr); }
+#app.land #mbtns { grid-column: 2; grid-row: 2; padding: 0 6px; margin-bottom: 0; }
+#app.land #mbtns .mb { height: 52px; font-size: 13px; }
+#app.land #pad { grid-column: 2; grid-row: 3; margin: 6px; min-height: 0; padding: 8px; }
+#app.land #kbd { position: absolute; left: 0; right: var(--side); bottom: 0; z-index: 4; opacity: .9; }
+#app.lgame { grid-template-columns: var(--side) 1fr var(--side); }
+#app.lgame #screen-wrap { grid-column: 2; }
+#app.lgame #toolbar { grid-column: 3; }
+#app.lgame #toolbar button { height: 40px; min-width: 0; }
+/* the game column is narrow (15%): rows of 3 that may shrink, or the 7 buttons ran off the edge */
+#app.lgame #toolbar, #app.lgame #toolbar.n7 { grid-template-columns: repeat(3, minmax(0, 1fr)); padding-left: 4px; padding-right: 4px; gap: 4px; }
+#app.lgame #mbtns { display: none; }
+#app.lgame #kbd { display: contents; }
+#app.lgame #kbd .gl, #app.lgame #kbd .gr { display: grid; gap: 5px; padding: 6px; min-height: 0; align-content: end; }
+#app.lgame #kbd .gr { grid-column: 1; grid-row: 1 / span 3; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(5, minmax(0, 56px)); }
+#app.lgame #kbd .gl { grid-column: 3; grid-row: 2 / span 2; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, minmax(0, 64px)); }
+#app.lgame #kbd .k { grid-column: var(--sc); grid-row: var(--sr); font-size: 17px; border-radius: 10px; }
+#app.lgame #kbd .k.mod { font-size: 13px; }
+#app.lgame #kbd .k.cyc { font-size: 11px; }
+#app.lgame #kbd .k.pt { display: none; }
 
-/* ---------- landscape (overlay): the screen fills the height, the keyboard lies over its bottom ---------- */
-#app.overlay #screen-wrap { position: absolute; inset: 0; }
-#app.overlay #toolbar { position: absolute; top: 6px; right: 6px; flex-direction: column; opacity: .6; z-index: 5; }
-#app.overlay #toolbar button { width: 38px; height: 30px; font-size: 15px; }
-#app.overlay #mbtns { position: absolute; left: 6px; top: 6px; flex-direction: column; width: 70px; opacity: .6; z-index: 5; }
-#app.overlay #kbd { position: absolute; left: 0; right: 0; bottom: 0; z-index: 4; opacity: .9; }
+/* ---------- screen only (🖥, landscape): the picture over the whole screen (only the notch's side
+   kept clear), nothing else; ☰ and ✕ float over its top-right corner and fade ---------- */
+#toolbar [data-act=only] { display: none; }
+#app.land #toolbar [data-act=only] { display: block; }
+#app.land.only { display: block; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+#app.land.only > :not(#screen-wrap) { display: none !important; }
+#app.land.only #screen-wrap { width: 100%; height: 100%; }
+#screen-wrap.free { cursor: none; }
+#only-btns { position: fixed; z-index: 5; top: 8px; right: calc(env(safe-area-inset-right) + 8px); display: flex; gap: 6px;
+  transition: opacity .4s; }
+#only-btns[hidden] { display: none; }
+#only-btns.dim { opacity: .15; }
+#only-btns button { width: 40px; height: 36px; border-radius: 10px; border: 1px solid #444; background: rgba(28,28,34,.8); font-size: 17px; }
 
 /* ---------- dialogs ---------- */
 .dialog { position: fixed; inset: 0; background: rgba(0,0,0,.75); display: flex; align-items: center; justify-content: center; z-index: 20; }
@@ -191,3 +213,11 @@ button { font: inherit; color: inherit; }
 .spin { width: 28px; height: 28px; margin: 14px auto 0; border: 3px solid rgba(255,255,255,.2); border-top-color: #9fb0ff;
   border-radius: 50%; animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Files → More → Log: the emulator's last lines, to copy into a bug report */
+.log-box { position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column; background: #111; color: #ddd;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.log-bar { display: flex; gap: 8px; padding: 8px; }
+.log-bar button { flex: 1; font: inherit; padding: 10px; border-radius: 10px; border: 0; background: #2a2d3a; color: #fff; }
+.log-box pre { flex: 1; margin: 0; padding: 8px; overflow: auto; font: 11px/1.35 ui-monospace, Menlo, monospace;
+  white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; touch-action: pan-y; -webkit-overflow-scrolling: touch; }

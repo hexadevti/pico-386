@@ -33,6 +33,7 @@
     <button data-act="mouse" data-i18n-title="tb.mouse">🖱</button>
     <button data-act="sound" data-i18n-title="tb.sound">🔊</button>
     <button data-act="fs" data-i18n-title="tb.fs">⛶</button>
+    <button data-act="only" data-i18n-title="tb.only">🖥</button>
   </div>
 
   <!-- the trackpad (🖱): takes the keyboard's place; the touchpad's buttons below it -->
@@ -45,6 +46,12 @@
   </div>
 
   <div id="kbd" hidden></div>
+</div>
+
+<!-- screen only (🖥, landscape): the way back, and the in-game menu, over the picture's corner -->
+<div id="only-btns" hidden>
+  <button data-act="menu" data-i18n-title="tb.menu">☰</button>
+  <button data-act="only" data-i18n-title="tb.onlyexit">✕</button>
 </div>
 
 <!-- the emulator's menus, drawn by the page as touch screens (ui.cpp publishes them as JSON) -->
